@@ -21,25 +21,55 @@ log_section() {
 }
 
 install_system_deps() {
-  local missing=0
-  for cmd in protoc cc make perl; do
+  local missing=()
+  for cmd in cc make perl python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-      missing=1
+      missing+=("$cmd")
     fi
   done
 
-  if [[ "$missing" -eq 0 ]]; then
-    return
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    printf 'Missing required build tools: %s\n' "${missing[*]}" >&2
+    return 1
   fi
 
-  log_section "Installing system dependencies"
-  sudo dnf install -y \
-    ca-certificates \
-    curl \
-    gcc \
-    make \
-    perl \
-    protobuf-compiler
+  if ! command -v protoc >/dev/null 2>&1; then
+    install_protoc
+  fi
+}
+
+install_protoc() {
+  local version="${PROTOC_VERSION:-31.1}"
+  local arch
+  case "$(uname -m)" in
+    x86_64)
+      arch="x86_64"
+      ;;
+    aarch64|arm64)
+      arch="aarch_64"
+      ;;
+    *)
+      echo "Unsupported protoc architecture: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+
+  local url="https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-${arch}.zip"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  log_section "Installing protoc ${version}"
+  curl -L --proto '=https' --tlsv1.2 -sSf "$url" -o "$tmp_dir/protoc.zip"
+  python3 - "$tmp_dir/protoc.zip" "$CARGO_HOME" <<'PY'
+import sys
+import zipfile
+
+archive, cargo_home = sys.argv[1:]
+with zipfile.ZipFile(archive) as zf:
+    zf.extract("bin/protoc", cargo_home)
+PY
+  chmod +x "$CARGO_HOME/bin/protoc"
+  rm -rf "$tmp_dir"
 }
 
 rust_toolchain() {
