@@ -101,6 +101,14 @@ async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
         Command::Serve(args) => {
+            if args.engine_session.is_some()
+                && args.managed_engine.data_parallel_size_local != Some(0)
+            {
+                bail!("--engine-session requires --data-parallel-size-local 0");
+            }
+            if args.engine_session.is_some() && args.managed_engine.data_parallel_size != 1 {
+                bail!("--engine-session currently requires --data-parallel-size 1");
+            }
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {
