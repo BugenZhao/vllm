@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -242,21 +243,21 @@ fn parse_next_hy_event(
         HyMode::ToolBlock { tool_call_end_scan } => {
             parse_tool_block_event(input, tool_call_end_scan, markers, dialect)
         }
-        HyMode::Done => ignored_rest_event(input),
+        HyMode::Done => parse_ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode HY event.
 fn parse_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
     alt((
-        |input: &mut HyInput<'_>| tool_block_start_event(input, markers),
-        |input: &mut HyInput<'_>| safe_text_event(input, markers),
+        |input: &mut HyInput<'_>| parse_tool_block_start_event(input, markers),
+        |input: &mut HyInput<'_>| parse_safe_text_event(input, markers),
     ))
     .parse_next(input)
 }
 
 /// Parse a HY tool-block start marker.
-fn tool_block_start_event(
+fn parse_tool_block_start_event(
     input: &mut HyInput<'_>,
     markers: &HyToolMarkers,
 ) -> ModalResult<HyEvent> {
@@ -266,7 +267,7 @@ fn tool_block_start_event(
 }
 
 /// Parse a safe text run before the next HY marker.
-fn safe_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
+fn parse_safe_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
     safe_text_len(input, &markers.tool_calls_start).map(|len| HyEvent::Text { len })
 }
 
@@ -278,21 +279,26 @@ fn parse_tool_block_event(
     dialect: HyDialect,
 ) -> ModalResult<HyEvent> {
     alt((
-        |input: &mut HyInput<'_>| tool_block_end_event(input, markers),
-        |input: &mut HyInput<'_>| tool_call_event(input, tool_call_end_scan, markers, dialect),
+        |input: &mut HyInput<'_>| parse_tool_block_end_event(input, markers),
+        |input: &mut HyInput<'_>| {
+            parse_tool_call_event(input, tool_call_end_scan, markers, dialect)
+        },
     ))
     .parse_next(input)
 }
 
 /// Parse a HY tool-block end marker.
-fn tool_block_end_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
+fn parse_tool_block_end_event(
+    input: &mut HyInput<'_>,
+    markers: &HyToolMarkers,
+) -> ModalResult<HyEvent> {
     (ws0, literal(markers.tool_calls_end.as_str()))
         .value(HyEvent::ToolBlockEnd)
         .parse_next(input)
 }
 
 /// Parse a complete HY tool-call block.
-fn tool_call_event(
+fn parse_tool_call_event(
     input: &mut HyInput<'_>,
     tool_call_end_scan: &mut MarkerScanState,
     markers: &HyToolMarkers,
@@ -351,20 +357,14 @@ fn parse_tool_call_params(
     markers: &HyToolMarkers,
 ) -> ModalResult<Vec<(String, String)>> {
     let mut input = tool_call_body;
-    delimited(
-        ws0,
-        repeat(
-            0..,
-            terminated(|input: &mut &str| parameter(input, markers), ws0),
-        ),
-        eof,
-    )
-    .parse_next(&mut input)
+    delimited(ws0, repeat(0.., terminated(parameter(markers), ws0)), eof).parse_next(&mut input)
 }
 
 /// Parse a HY argument key/value block.
-fn parameter(input: &mut &str, markers: &HyToolMarkers) -> ModalResult<(String, String)> {
-    let (name, value) = seq!(
+fn parameter<'i>(
+    markers: &HyToolMarkers,
+) -> impl Parser<&'i str, (String, String), ErrMode<ContextError>> {
+    seq!(
         _: literal(markers.arg_key_start.as_str()),
         take_until(0.., markers.arg_key_end.as_str()),
         _: literal(markers.arg_key_end.as_str()),
@@ -373,13 +373,11 @@ fn parameter(input: &mut &str, markers: &HyToolMarkers) -> ModalResult<(String, 
         take_until(0.., markers.arg_value_end.as_str()),
         _: literal(markers.arg_value_end.as_str()),
     )
-    .parse_next(input)?;
-
-    Ok((name.trim().to_string(), value.to_string()))
+    .map(|(name, value): (&str, &str)| (name.trim().to_string(), value.to_string()))
 }
 
 /// Parse ignored rest after the HY tool block ends.
-fn ignored_rest_event(input: &mut HyInput<'_>) -> ModalResult<HyEvent> {
+fn parse_ignored_rest_event(input: &mut HyInput<'_>) -> ModalResult<HyEvent> {
     rest.value(HyEvent::IgnoredRest).parse_next(input)
 }
 

@@ -21,7 +21,7 @@ mod qwen;
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
-use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
+use winnow::error::{AddContext, ContextError, ErrMode, ModalResult, StrContext, StrContextValue};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::literal;
@@ -186,7 +186,7 @@ fn parse_next_json_tool_call_event(
 ) -> ModalResult<JsonToolCallEvent> {
     match mode {
         JsonToolCallMode::Text => parse_text_event(input, config),
-        JsonToolCallMode::Header => tool_call_header_event(input, config),
+        JsonToolCallMode::Header => parse_tool_call_header_event(input, config),
         JsonToolCallMode::Arguments { json_scan } => {
             parse_arguments_event(input, json_scan, config)
         }
@@ -199,20 +199,20 @@ fn parse_text_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     alt((
-        |input: &mut JsonToolInput<'_>| tool_call_start_event(input, config),
-        |input: &mut JsonToolInput<'_>| safe_text_event(input, config),
+        |input: &mut JsonToolInput<'_>| parse_tool_call_start_event(input, config),
+        |input: &mut JsonToolInput<'_>| parse_safe_text_event(input, config),
     ))
     .parse_next(input)
 }
 
 /// Parse a marker-wrapped JSON tool-call start marker.
-fn tool_call_start_event(
+fn parse_tool_call_start_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
         _: literal(config.start_marker),
-        _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        _: marker_whitespace(config),
     )
     .value(JsonToolCallEvent::ToolCallStart)
     .parse_next(input)
@@ -220,7 +220,7 @@ fn tool_call_start_event(
 
 /// Parse a marker-wrapped JSON tool-call header before the raw arguments
 /// payload.
-pub(crate) fn tool_call_header_event(
+pub(crate) fn parse_tool_call_header_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -228,7 +228,7 @@ pub(crate) fn tool_call_header_event(
         _: ws0,
         _: literal("{"),
         _: ws0,
-        _: |input: &mut JsonToolInput<'_>| json_key(input, config.name_key),
+        _: json_key(config.name_key),
         _: ws0,
         _: literal(":"),
         _: ws0,
@@ -236,7 +236,7 @@ pub(crate) fn tool_call_header_event(
         _: ws0,
         _: literal(","),
         _: ws0,
-        _: |input: &mut JsonToolInput<'_>| json_arguments_key(input, config.arguments_key),
+        _: json_arguments_key(config.arguments_key),
         _: ws0,
         _: literal(":"),
         _: ws0,
@@ -248,14 +248,13 @@ pub(crate) fn tool_call_header_event(
 }
 
 /// Parse a configured JSON object key.
-fn json_key(input: &mut JsonToolInput<'_>, key: &'static str) -> ModalResult<()> {
+fn json_key<'i>(key: &'static str) -> impl Parser<JsonToolInput<'i>, (), ErrMode<ContextError>> {
     seq!(
         _: literal("\""),
         _: literal(key).context(StrContext::Expected(StrContextValue::StringLiteral(key))),
         _: literal("\""),
     )
     .void()
-    .parse_next(input)
 }
 
 /// Parse a JSON object key accepting any of `candidates`.
@@ -269,26 +268,27 @@ fn json_key(input: &mut JsonToolInput<'_>, key: &'static str) -> ModalResult<()>
 /// contexts are added in a loop over `candidates` rather than through chained
 /// `.context(...)` calls, which keeps the diagnostics complete for any number
 /// of candidates.
-fn json_arguments_key(
-    input: &mut JsonToolInput<'_>,
+fn json_arguments_key<'i>(
     candidates: &'static [&'static str],
-) -> ModalResult<()> {
-    let start = input.checkpoint();
-    json_str
-        .verify(|key: &String| candidates.contains(&key.as_str()))
-        .void()
-        .parse_next(input)
-        .map_err(|err| {
-            err.map(|context_error| {
-                candidates.iter().fold(context_error, |context_error, candidate| {
-                    context_error.add_context(
-                        &*input,
-                        &start,
-                        StrContext::Expected(StrContextValue::StringLiteral(candidate)),
-                    )
+) -> impl Parser<JsonToolInput<'i>, (), ErrMode<ContextError>> {
+    move |input: &mut JsonToolInput<'i>| {
+        let start = input.checkpoint();
+        json_str
+            .verify(|key: &String| candidates.contains(&key.as_str()))
+            .void()
+            .parse_next(input)
+            .map_err(|err| {
+                err.map(|context_error| {
+                    candidates.iter().fold(context_error, |context_error, candidate| {
+                        context_error.add_context(
+                            &*input,
+                            &start,
+                            StrContext::Expected(StrContextValue::StringLiteral(candidate)),
+                        )
+                    })
                 })
             })
-        })
+    }
 }
 
 /// Parse one event inside a marker-wrapped JSON tool-call arguments payload.
@@ -298,14 +298,14 @@ fn parse_arguments_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     if json_scan.complete() {
-        tool_call_close_event(input, config)
+        parse_tool_call_close_event(input, config)
     } else {
-        argument_delta_event(input, json_scan)
+        parse_argument_delta_event(input, json_scan)
     }
 }
 
 /// Parse a raw JSON arguments delta.
-fn argument_delta_event(
+fn parse_argument_delta_event(
     input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -313,7 +313,7 @@ fn argument_delta_event(
 }
 
 /// Parse a marker-wrapped JSON tool-call close marker.
-fn tool_call_close_event(
+fn parse_tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -321,21 +321,21 @@ fn tool_call_close_event(
 
     match config.delimiter {
         Some(delimiter) => alt((
-            |input: &mut JsonToolInput<'_>| tool_call_end_event(input, config),
-            |input: &mut JsonToolInput<'_>| tool_call_delimiter_event(input, delimiter),
+            |input: &mut JsonToolInput<'_>| parse_tool_call_end_event(input, config),
+            |input: &mut JsonToolInput<'_>| parse_tool_call_delimiter_event(input, delimiter),
         ))
         .parse_next(input),
-        None => tool_call_end_event(input, config),
+        None => parse_tool_call_end_event(input, config),
     }
 }
 
 /// Parse a marker-wrapped JSON tool-call end marker.
-fn tool_call_end_event(
+fn parse_tool_call_end_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
-        _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
+        _: marker_whitespace(config),
         _: literal(config.end_marker),
     )
     .value(JsonToolCallEvent::ToolCallEnd)
@@ -343,7 +343,7 @@ fn tool_call_end_event(
 }
 
 /// Parse a delimiter between JSON tool calls inside one marker block.
-fn tool_call_delimiter_event(
+fn parse_tool_call_delimiter_event(
     input: &mut JsonToolInput<'_>,
     delimiter: &'static str,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -357,15 +357,17 @@ fn tool_call_delimiter_event(
 }
 
 /// Parse configured whitespace around a marker-wrapped JSON tool call.
-fn marker_whitespace(input: &mut JsonToolInput<'_>, config: JsonToolCallConfig) -> ModalResult<()> {
-    match config.marker_whitespace {
+fn marker_whitespace<'i>(
+    config: JsonToolCallConfig,
+) -> impl Parser<JsonToolInput<'i>, (), ErrMode<ContextError>> {
+    move |input: &mut JsonToolInput<'i>| match config.marker_whitespace {
         JsonToolCallWhitespace::Optional => ws0.void().parse_next(input),
         JsonToolCallWhitespace::Exact(whitespace) => literal(whitespace).void().parse_next(input),
     }
 }
 
 /// Parse a safe text run before the next marker-wrapped JSON tool call.
-fn safe_text_event(
+fn parse_safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {

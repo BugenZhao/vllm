@@ -13,7 +13,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::json::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
-    tool_call_header_event,
+    parse_tool_call_header_event,
 };
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -292,64 +292,64 @@ fn parse_next_inkling_event(
 /// Parse an event while waiting for a Inkling content kind.
 fn parse_idle_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
-        message_start_event,
-        reasoning_start_event,
-        text_start_event,
-        tool_json_start_event,
-        raw_text_start_event,
-        block_end_event,
-        safe_idle_text_event,
+        parse_message_start_event,
+        parse_reasoning_start_event,
+        parse_text_start_event,
+        parse_tool_json_start_event,
+        parse_raw_text_start_event,
+        parse_block_end_event,
+        parse_safe_idle_text_event,
     ))
     .parse_next(input)
 }
 
 /// Parse a Inkling model-authored message start marker.
-fn message_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_message_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(MESSAGE_MODEL).value(InklingEvent::MessageStart).parse_next(input)
 }
 
 /// Parse an event while waiting for an Inkling message content kind.
 fn parse_message_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
-        reasoning_start_event,
-        text_start_event,
-        tool_json_start_event,
-        raw_text_start_event,
-        block_end_event,
-        safe_header_event,
+        parse_reasoning_start_event,
+        parse_text_start_event,
+        parse_tool_json_start_event,
+        parse_raw_text_start_event,
+        parse_block_end_event,
+        parse_safe_header_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event inside a Inkling text block.
 fn parse_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    alt((block_end_event, safe_text_event)).parse_next(input)
+    alt((parse_block_end_event, parse_safe_text_event)).parse_next(input)
 }
 
 /// Parse an event inside a Inkling reasoning block.
 fn parse_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    alt((block_end_event, safe_reasoning_event)).parse_next(input)
+    alt((parse_block_end_event, parse_safe_reasoning_event)).parse_next(input)
 }
 
 /// Parse a Inkling text start marker.
-fn text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_TEXT).value(InklingEvent::TextStart).parse_next(input)
 }
 
 /// Parse a Inkling reasoning start marker.
-fn reasoning_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_reasoning_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_THINKING).value(InklingEvent::ReasoningStart).parse_next(input)
 }
 
 /// Parse a Inkling JSON tool-call start marker.
-fn tool_json_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_tool_json_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_INVOKE_TOOL_JSON)
         .value(InklingEvent::ToolJsonStart)
         .parse_next(input)
 }
 
 /// Parse a Inkling content kind treated as visible text.
-fn raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
         literal(CONTENT_INVOKE_TOOL_TEXT),
         literal(CONTENT_TOOL_ERROR),
@@ -359,39 +359,39 @@ fn raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEven
 }
 
 /// Parse a Inkling block end marker.
-fn block_end_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_block_end_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((literal(END_MESSAGE), literal(CONTENT_MODEL_END_SAMPLING)))
         .value(InklingEvent::BlockEnd)
         .parse_next(input)
 }
 
 /// Parse safe text while waiting for the next Inkling marker.
-fn safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe header text before the next Inkling marker.
-fn safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Header)
 }
 
 /// Parse safe text before the end of a Inkling text block.
-fn safe_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_safe_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe reasoning before the end of a Inkling reasoning block.
-fn safe_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn parse_safe_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Reasoning)
 }
 
 /// Parse a Inkling JSON tool-call header.
 fn parse_tool_json_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    match tool_call_header_event(input, INKLING_TOOL_CONFIG)? {
+    match parse_tool_call_header_event(input, INKLING_TOOL_CONFIG)? {
         JsonToolCallEvent::ToolCallHeader { function_name } => Ok(InklingEvent::ToolJsonHeader {
             name: function_name,
         }),
-        _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
+        _ => unreachable!("parse_tool_call_header_event only emits ToolCallHeader"),
     }
 }
 

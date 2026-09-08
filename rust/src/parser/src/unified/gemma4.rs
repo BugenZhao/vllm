@@ -227,17 +227,17 @@ fn parse_next_gemma4_event(
     match mode {
         Gemma4Mode::Text => parse_text_event(input),
         Gemma4Mode::Reasoning => parse_reasoning_event(input),
-        Gemma4Mode::Header => tool_call_header_event(input),
-        Gemma4Mode::ToolCall { args_scan, .. } => tool_call_args_event(input, args_scan),
+        Gemma4Mode::Header => parse_tool_call_header_event(input),
+        Gemma4Mode::ToolCall { args_scan, .. } => parse_tool_call_args_event(input, args_scan),
     }
 }
 
 /// Parse a Gemma4 text-mode event.
 fn parse_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     alt((
-        reasoning_start_event,
-        tool_call_start_event,
-        safe_text_event,
+        parse_reasoning_start_event,
+        parse_tool_call_start_event,
+        parse_safe_text_event,
     ))
     .parse_next(input)
 }
@@ -245,30 +245,30 @@ fn parse_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
 /// Parse a Gemma4 reasoning-mode event.
 fn parse_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     alt((
-        reasoning_end_event,
-        tool_call_start_event,
-        safe_reasoning_event,
+        parse_reasoning_end_event,
+        parse_tool_call_start_event,
+        parse_safe_reasoning_event,
     ))
     .parse_next(input)
 }
 
 /// Parse a Gemma4 reasoning start marker.
-fn reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(REASONING_START).value(Gemma4Event::ReasoningStart).parse_next(input)
 }
 
 /// Parse a Gemma4 reasoning end marker.
-fn reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(CHANNEL_END).value(Gemma4Event::ReasoningEnd).parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call start marker.
-fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(TOOL_CALL_START).value(Gemma4Event::ToolCallStart).parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call header.
-fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     let (name,) = seq!(
         _: literal(CALL_PREFIX),
         gemma4_tool_name,
@@ -279,7 +279,7 @@ fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Even
 }
 
 /// Parse complete Gemma4 tool-call arguments.
-fn tool_call_args_event(
+fn parse_tool_call_args_event(
     input: &mut Gemma4Input<'_>,
     args_scan: &mut Gemma4ArgsScanState,
 ) -> ModalResult<Gemma4Event> {
@@ -302,12 +302,12 @@ fn gemma4_tool_name(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
 }
 
 /// Parse a safe text run before the next Gemma4 marker.
-fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     safe_text_len_mul(input, &[REASONING_START, TOOL_CALL_START]).map(|_| Gemma4Event::Text)
 }
 
 /// Parse a safe reasoning run before the next Gemma4 marker.
-fn safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn parse_safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     safe_text_len_mul(input, &[CHANNEL_END, TOOL_CALL_START]).map(|_| Gemma4Event::Reasoning)
 }
 
