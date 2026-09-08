@@ -20,7 +20,7 @@ mod phi4mini;
 mod qwen;
 
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, seq};
+use winnow::combinator::{alt, dispatch, empty, seq};
 use winnow::error::{AddContext, ContextError, ErrMode, ModalResult, StrContext, StrContextValue};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
@@ -360,9 +360,9 @@ fn tool_call_delimiter_event(
 fn marker_whitespace<'i>(
     config: JsonToolCallConfig,
 ) -> impl Parser<JsonToolInput<'i>, (), ErrMode<ContextError>> {
-    move |input: &mut JsonToolInput<'i>| match config.marker_whitespace {
-        JsonToolCallWhitespace::Optional => ws0.void().parse_next(input),
-        JsonToolCallWhitespace::Exact(whitespace) => literal(whitespace).void().parse_next(input),
+    dispatch! {empty.value(config.marker_whitespace);
+        JsonToolCallWhitespace::Optional => ws0.void(),
+        JsonToolCallWhitespace::Exact(whitespace) => literal(whitespace).void(),
     }
 }
 
