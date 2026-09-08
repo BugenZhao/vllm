@@ -3,7 +3,6 @@
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
-use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
@@ -155,10 +154,9 @@ impl ToolParser for Qwen3CoderToolParser {
         self.buffer.push_str(chunk);
         let config = self.config;
 
-        while let Some((event, consumed_len)) = parse_buffered_event(
-            &self.buffer,
-            parse_next_qwen_coder_event(&mut self.mode, config),
-        )? {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+            parse_next_qwen_coder_event(input, &mut self.mode, config)
+        })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -189,61 +187,65 @@ impl ToolParser for Qwen3CoderToolParser {
 }
 
 /// Parse a Qwen Coder event for the current parser mode.
-fn parse_next_qwen_coder_event<'i>(
+fn parse_next_qwen_coder_event(
+    input: &mut QwenCoderInput<'_>,
     mode: &mut QwenCoderMode,
     config: QwenCoderConfig,
-) -> impl Parser<QwenCoderInput<'i>, QwenCoderEvent, ErrMode<ContextError>> {
-    move |input: &mut QwenCoderInput<'i>| match mode {
-        QwenCoderMode::Text => parse_text_event(config).parse_next(input),
+) -> ModalResult<QwenCoderEvent> {
+    match mode {
+        QwenCoderMode::Text => parse_text_event(input, config),
         QwenCoderMode::ToolCall { end_marker_scan } => {
-            parse_tool_call_event(end_marker_scan, config.tool_call_end).parse_next(input)
+            tool_call_event(input, end_marker_scan, config.tool_call_end)
         }
     }
 }
 
 /// Parse a text-mode Qwen Coder event.
-fn parse_text_event<'i>(
+fn parse_text_event(
+    input: &mut QwenCoderInput<'_>,
     config: QwenCoderConfig,
-) -> impl Parser<QwenCoderInput<'i>, QwenCoderEvent, ErrMode<ContextError>> {
+) -> ModalResult<QwenCoderEvent> {
     alt((
-        parse_tool_call_start_event(config.tool_call_start),
-        parse_safe_text_event(config.tool_call_start),
+        |input: &mut QwenCoderInput<'_>| tool_call_start_event(input, config.tool_call_start),
+        |input: &mut QwenCoderInput<'_>| safe_text_event(input, config.tool_call_start),
     ))
+    .parse_next(input)
 }
 
 /// Parse a Qwen Coder tool-call start marker.
-fn parse_tool_call_start_event<'i>(
+fn tool_call_start_event(
+    input: &mut QwenCoderInput<'_>,
     tool_call_start: &'static str,
-) -> impl Parser<QwenCoderInput<'i>, QwenCoderEvent, ErrMode<ContextError>> {
-    literal(tool_call_start).value(QwenCoderEvent::ToolCallStart)
+) -> ModalResult<QwenCoderEvent> {
+    literal(tool_call_start).value(QwenCoderEvent::ToolCallStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next Qwen Coder marker.
-fn parse_safe_text_event<'i>(
+fn safe_text_event(
+    input: &mut QwenCoderInput<'_>,
     tool_call_start: &'static str,
-) -> impl Parser<QwenCoderInput<'i>, QwenCoderEvent, ErrMode<ContextError>> {
-    safe_text_len(tool_call_start).map(|len| QwenCoderEvent::Text { len })
+) -> ModalResult<QwenCoderEvent> {
+    safe_text_len(input, tool_call_start).map(|len| QwenCoderEvent::Text { len })
 }
 
 /// Parse a complete Qwen Coder tool call.
-fn parse_tool_call_event<'i>(
+fn tool_call_event(
+    input: &mut QwenCoderInput<'_>,
     end_marker_scan: &mut MarkerScanState,
     tool_call_end: &'static str,
-) -> impl Parser<QwenCoderInput<'i>, QwenCoderEvent, ErrMode<ContextError>> {
-    let mut parser = seq!(
+) -> ModalResult<QwenCoderEvent> {
+    let (body,) = seq!(
         _: ws0,
         take_until_marker(tool_call_end, end_marker_scan),
         _: literal(tool_call_end),
-    );
-    move |input: &mut QwenCoderInput<'i>| {
-        let (body,) = parser.parse_next(input)?;
+    )
+    .parse_next(input)?;
 
-        parse_tool_call_body(body)
-    }
+    parse_tool_call_body(body)
 }
 
 /// Parse a Qwen Coder function block.
-fn parse_function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
+fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
     let (name, raw_params) = seq!(
         _: literal(FUNCTION_START),
         take_until(1.., ">"),
@@ -277,7 +279,7 @@ fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
 /// Parse a Qwen Coder tool-call body.
 fn parse_tool_call_body(body: &str) -> ModalResult<QwenCoderEvent> {
     let mut input = body;
-    delimited(ws0, parse_function_event, (ws0, eof)).parse_next(&mut input)
+    delimited(ws0, function_event, (ws0, eof)).parse_next(&mut input)
 }
 
 /// Trim a single leading and trailing newline from a parameter value.

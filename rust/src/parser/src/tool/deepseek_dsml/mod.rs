@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, preceded, repeat, seq, terminated};
-use winnow::error::{ContextError, ErrMode};
+use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -147,10 +146,9 @@ impl DeepSeekDsmlToolParser {
         // shot.
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(
-            &self.buffer,
-            parse_next_dsml_event(&mut self.mode, self.tokens),
-        )? {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+            parse_next_dsml_event(input, &mut self.mode, self.tokens)
+        })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -173,74 +171,71 @@ impl DeepSeekDsmlToolParser {
 }
 
 /// Parse a DSML event for the current parser mode.
-fn parse_next_dsml_event<'i>(
+fn parse_next_dsml_event(
+    input: &mut DsmlInput<'_>,
     mode: &mut DsmlMode,
     tokens: DsmlTokens,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    move |input: &mut DsmlInput<'i>| match mode {
-        DsmlMode::Text => parse_text_event(tokens).parse_next(input),
+) -> ModalResult<DsmlEvent> {
+    match mode {
+        DsmlMode::Text => parse_text_event(input, tokens),
         DsmlMode::ToolBlock { invoke_end_scan } => {
-            parse_tool_block_event(tokens, invoke_end_scan).parse_next(input)
+            parse_tool_block_event(input, tokens, invoke_end_scan)
         }
-        DsmlMode::Done => parse_ignored_rest_event(input),
+        DsmlMode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode DSML event.
-fn parse_text_event<'i>(
-    tokens: DsmlTokens,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
+fn parse_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     alt((
-        parse_tool_calls_start_event(tokens),
-        parse_safe_text_event(tokens),
+        |input: &mut DsmlInput<'_>| tool_calls_start_event(input, tokens),
+        |input: &mut DsmlInput<'_>| safe_text_event(input, tokens),
     ))
+    .parse_next(input)
 }
 
 /// Parse a tool-block DSML event.
-fn parse_tool_block_event<'i>(
+fn parse_tool_block_event(
+    input: &mut DsmlInput<'_>,
     tokens: DsmlTokens,
     invoke_end_scan: &mut MarkerScanState,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    preceded(
-        ws0,
-        alt((
-            parse_invoke_event(invoke_end_scan),
-            parse_tool_calls_end_event(tokens),
-        )),
-    )
+) -> ModalResult<DsmlEvent> {
+    ws0.void().parse_next(input)?;
+    alt((
+        |input: &mut DsmlInput<'_>| invoke_event(input, invoke_end_scan),
+        |input: &mut DsmlInput<'_>| tool_calls_end_event(input, tokens),
+    ))
+    .parse_next(input)
 }
 
 /// Parse a DSML function-calls start marker.
-fn parse_tool_calls_start_event<'i>(
-    tokens: DsmlTokens,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    literal(tokens.tool_calls_start).value(DsmlEvent::ToolCallsStart)
+fn tool_calls_start_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    literal(tokens.tool_calls_start)
+        .value(DsmlEvent::ToolCallsStart)
+        .parse_next(input)
 }
 
 /// Parse a DSML function-calls end marker.
-fn parse_tool_calls_end_event<'i>(
-    tokens: DsmlTokens,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    literal(tokens.tool_calls_end).value(DsmlEvent::ToolCallsEnd)
+fn tool_calls_end_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    literal(tokens.tool_calls_end).value(DsmlEvent::ToolCallsEnd).parse_next(input)
 }
 
 /// Parse a trailing rest after DSML function calls.
-fn parse_ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
     rest.value(DsmlEvent::IgnoredRest).parse_next(input)
 }
 
 /// Parse a safe text run before the next DSML marker.
-fn parse_safe_text_event<'i>(
-    tokens: DsmlTokens,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    safe_text_len(tokens.tool_calls_start).map(|len| DsmlEvent::Text { len })
+fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+    safe_text_len(input, tokens.tool_calls_start).map(|len| DsmlEvent::Text { len })
 }
 
 /// Parse a DSML invoke block.
-fn parse_invoke_event<'i>(
+fn invoke_event(
+    input: &mut DsmlInput<'_>,
     invoke_end_scan: &mut MarkerScanState,
-) -> impl Parser<DsmlInput<'i>, DsmlEvent, ErrMode<ContextError>> {
-    let mut parser = seq!(
+) -> ModalResult<DsmlEvent> {
+    let (name, body) = seq!(
         _: literal(INVOKE_START),
         _: ws1,
         dsml_name_attr,
@@ -248,25 +243,23 @@ fn parse_invoke_event<'i>(
         _: ">",
         take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
-    );
-    move |input: &mut DsmlInput<'i>| {
-        let (name, body) = parser.parse_next(input)?;
-        let raw_params = parse_invoke_params(body)?;
-        Ok(DsmlEvent::Invoke {
-            name: name.to_string(),
-            raw_params,
-        })
-    }
+    )
+    .parse_next(input)?;
+    let raw_params = parse_invoke_params(body)?;
+    Ok(DsmlEvent::Invoke {
+        name: name.to_string(),
+        raw_params,
+    })
 }
 
 /// Parse a DSML invoke body.
 fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<DsmlParameter>> {
     let mut input = invoke_body;
-    delimited(ws0, repeat(0.., terminated(parameter, ws0)), eof).parse_next(&mut input)
+    delimited(ws0, repeat(0.., terminated(parse_parameter, ws0)), eof).parse_next(&mut input)
 }
 
 /// Parse a DSML parameter block.
-fn parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
+fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
     seq! {DsmlParameter {
         _: literal(PARAMETER_START),
         _: ws1,

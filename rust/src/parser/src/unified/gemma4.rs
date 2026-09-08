@@ -187,9 +187,11 @@ impl UnifiedParser for Gemma4UnifiedParser {
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) =
-            { parse_buffered_event(&self.buffer.text, parse_next_gemma4_event(&mut self.mode))? }
-        {
+        while let Some((event, consumed_len)) = {
+            parse_buffered_event(&self.buffer.text, |input| {
+                parse_next_gemma4_event(input, &mut self.mode)
+            })?
+        } {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.apply_event(event, piece, output)?;
         }
@@ -218,25 +220,24 @@ impl UnifiedParser for Gemma4UnifiedParser {
 }
 
 /// Parse one Gemma4 event from buffered streaming input.
-fn parse_next_gemma4_event<'i>(
+fn parse_next_gemma4_event(
+    input: &mut Gemma4Input<'_>,
     mode: &mut Gemma4Mode,
-) -> impl Parser<Gemma4Input<'i>, Gemma4Event, ErrMode<ContextError>> {
-    move |input: &mut Gemma4Input<'i>| match mode {
+) -> ModalResult<Gemma4Event> {
+    match mode {
         Gemma4Mode::Text => parse_text_event(input),
         Gemma4Mode::Reasoning => parse_reasoning_event(input),
-        Gemma4Mode::Header => parse_tool_call_header_event(input),
-        Gemma4Mode::ToolCall { args_scan, .. } => {
-            parse_tool_call_args_event(args_scan).parse_next(input)
-        }
+        Gemma4Mode::Header => tool_call_header_event(input),
+        Gemma4Mode::ToolCall { args_scan, .. } => tool_call_args_event(input, args_scan),
     }
 }
 
 /// Parse a Gemma4 text-mode event.
 fn parse_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     alt((
-        parse_reasoning_start_event,
-        parse_tool_call_start_event,
-        parse_safe_text_event,
+        reasoning_start_event,
+        tool_call_start_event,
+        safe_text_event,
     ))
     .parse_next(input)
 }
@@ -244,30 +245,30 @@ fn parse_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
 /// Parse a Gemma4 reasoning-mode event.
 fn parse_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     alt((
-        parse_reasoning_end_event,
-        parse_tool_call_start_event,
-        parse_safe_reasoning_event,
+        reasoning_end_event,
+        tool_call_start_event,
+        safe_reasoning_event,
     ))
     .parse_next(input)
 }
 
 /// Parse a Gemma4 reasoning start marker.
-fn parse_reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn reasoning_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(REASONING_START).value(Gemma4Event::ReasoningStart).parse_next(input)
 }
 
 /// Parse a Gemma4 reasoning end marker.
-fn parse_reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn reasoning_end_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(CHANNEL_END).value(Gemma4Event::ReasoningEnd).parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call start marker.
-fn parse_tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     literal(TOOL_CALL_START).value(Gemma4Event::ToolCallStart).parse_next(input)
 }
 
 /// Parse a Gemma4 tool-call header.
-fn parse_tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     let (name,) = seq!(
         _: literal(CALL_PREFIX),
         gemma4_tool_name,
@@ -278,18 +279,17 @@ fn parse_tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemm
 }
 
 /// Parse complete Gemma4 tool-call arguments.
-fn parse_tool_call_args_event<'i>(
+fn tool_call_args_event(
+    input: &mut Gemma4Input<'_>,
     args_scan: &mut Gemma4ArgsScanState,
-) -> impl Parser<Gemma4Input<'i>, Gemma4Event, ErrMode<ContextError>> {
-    move |input: &mut Gemma4Input<'i>| {
-        let raw_args = gemma4_raw_args_until_tool_call_end(args_scan).parse_next(input)?;
-        let Some(args_input) = raw_args.strip_suffix('}') else {
-            return Err(ErrMode::Cut(ContextError::new()));
-        };
-        let args = parse_gemma4_args(args_input)?;
+) -> ModalResult<Gemma4Event> {
+    let raw_args = gemma4_raw_args_until_tool_call_end(input, args_scan)?;
+    let Some(args_input) = raw_args.strip_suffix('}') else {
+        return Err(ErrMode::Cut(ContextError::new()));
+    };
+    let args = parse_gemma4_args(args_input)?;
 
-        Ok(Gemma4Event::ToolCall { args })
-    }
+    Ok(Gemma4Event::ToolCall { args })
 }
 
 /// Parse a Gemma4 tool name.
@@ -302,66 +302,61 @@ fn gemma4_tool_name(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
 }
 
 /// Parse a safe text run before the next Gemma4 marker.
-fn parse_safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    safe_text_len_mul(&[REASONING_START, TOOL_CALL_START])
-        .map(|_| Gemma4Event::Text)
-        .parse_next(input)
+fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    safe_text_len_mul(input, &[REASONING_START, TOOL_CALL_START]).map(|_| Gemma4Event::Text)
 }
 
 /// Parse a safe reasoning run before the next Gemma4 marker.
-fn parse_safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    safe_text_len_mul(&[CHANNEL_END, TOOL_CALL_START])
-        .map(|_| Gemma4Event::Reasoning)
-        .parse_next(input)
+fn safe_reasoning_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    safe_text_len_mul(input, &[CHANNEL_END, TOOL_CALL_START]).map(|_| Gemma4Event::Reasoning)
 }
 
 /// Parse raw Gemma4 arguments through the first end marker outside a Gemma string.
 fn gemma4_raw_args_until_tool_call_end<'i>(
+    input: &mut Gemma4Input<'i>,
     state: &mut Gemma4ArgsScanState,
-) -> impl Parser<Gemma4Input<'i>, &'i str, ErrMode<ContextError>> {
-    move |input: &mut Gemma4Input<'i>| {
-        let text = **input;
-        if state.scanned_len > text.len() {
-            return incomplete();
+) -> ModalResult<&'i str> {
+    let text = **input;
+    if state.scanned_len > text.len() {
+        return incomplete();
+    }
+
+    loop {
+        let rest = &text[state.scanned_len..];
+        if state.in_string {
+            let Some(string_delim) = rest.find(STRING_DELIM) else {
+                state.scanned_len = safe_scan_len(text, state.scanned_len, &[STRING_DELIM]);
+                return incomplete();
+            };
+
+            state.scanned_len += string_delim + STRING_DELIM.len();
+            state.in_string = false;
+            continue;
         }
 
-        loop {
-            let rest = &text[state.scanned_len..];
-            if state.in_string {
-                let Some(string_delim) = rest.find(STRING_DELIM) else {
-                    state.scanned_len = safe_scan_len(text, state.scanned_len, &[STRING_DELIM]);
-                    return incomplete();
-                };
-
-                state.scanned_len += string_delim + STRING_DELIM.len();
-                state.in_string = false;
-                continue;
+        let next_string_delim = rest.find(STRING_DELIM);
+        let next_tool_call_end = rest.find(TOOL_CALL_END);
+        match (next_string_delim, next_tool_call_end) {
+            (Some(string_delim), Some(tool_call_end)) if tool_call_end < string_delim => {
+                let end = state.scanned_len + tool_call_end;
+                state.scanned_len = end + TOOL_CALL_END.len();
+                input.next_slice(state.scanned_len);
+                return Ok(&text[..end]);
             }
-
-            let next_string_delim = rest.find(STRING_DELIM);
-            let next_tool_call_end = rest.find(TOOL_CALL_END);
-            match (next_string_delim, next_tool_call_end) {
-                (Some(string_delim), Some(tool_call_end)) if tool_call_end < string_delim => {
-                    let end = state.scanned_len + tool_call_end;
-                    state.scanned_len = end + TOOL_CALL_END.len();
-                    input.next_slice(state.scanned_len);
-                    return Ok(&text[..end]);
-                }
-                (Some(string_delim), _) => {
-                    state.scanned_len += string_delim + STRING_DELIM.len();
-                    state.in_string = true;
-                }
-                (None, Some(tool_call_end)) => {
-                    let end = state.scanned_len + tool_call_end;
-                    state.scanned_len = end + TOOL_CALL_END.len();
-                    input.next_slice(state.scanned_len);
-                    return Ok(&text[..end]);
-                }
-                (None, None) => {
-                    state.scanned_len =
-                        safe_scan_len(text, state.scanned_len, &[STRING_DELIM, TOOL_CALL_END]);
-                    return incomplete();
-                }
+            (Some(string_delim), _) => {
+                state.scanned_len += string_delim + STRING_DELIM.len();
+                state.in_string = true;
+            }
+            (None, Some(tool_call_end)) => {
+                let end = state.scanned_len + tool_call_end;
+                state.scanned_len = end + TOOL_CALL_END.len();
+                input.next_slice(state.scanned_len);
+                return Ok(&text[..end]);
+            }
+            (None, None) => {
+                state.scanned_len =
+                    safe_scan_len(text, state.scanned_len, &[STRING_DELIM, TOOL_CALL_END]);
+                return incomplete();
             }
         }
     }

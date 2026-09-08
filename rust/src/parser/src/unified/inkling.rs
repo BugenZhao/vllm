@@ -3,7 +3,7 @@
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
-use winnow::error::{ContextError, ErrMode, ModalResult};
+use winnow::error::ModalResult;
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::literal;
@@ -13,7 +13,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::json::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
-    parse_tool_call_header_event,
+    tool_call_header_event,
 };
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -237,9 +237,9 @@ impl UnifiedParser for InklingUnifiedParser {
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) =
-            parse_buffered_event(&self.buffer.text, parse_next_inkling_event(&mut self.mode))?
-        {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
+            parse_next_inkling_event(input, &mut self.mode)
+        })? {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.apply_event(event, piece, output)?;
         }
@@ -274,18 +274,17 @@ impl UnifiedParser for InklingUnifiedParser {
 }
 
 /// Parse one Inkling event from buffered streaming input.
-fn parse_next_inkling_event<'i>(
+fn parse_next_inkling_event(
+    input: &mut InklingInput<'_>,
     mode: &mut InklingMode,
-) -> impl Parser<InklingInput<'i>, InklingEvent, ErrMode<ContextError>> {
-    move |input: &mut InklingInput<'i>| match mode {
+) -> ModalResult<InklingEvent> {
+    match mode {
         InklingMode::Idle => parse_idle_event(input),
         InklingMode::MessageHeader { .. } => parse_message_header_event(input),
         InklingMode::Text => parse_text_event(input),
         InklingMode::Reasoning => parse_reasoning_event(input),
         InklingMode::ToolJsonHeader => parse_tool_json_header_event(input),
-        InklingMode::ToolJsonArgs { json_scan } => {
-            parse_tool_json_args_event(json_scan).parse_next(input)
-        }
+        InklingMode::ToolJsonArgs { json_scan } => parse_tool_json_args_event(input, json_scan),
         InklingMode::ToolJsonClose => parse_tool_json_close_event(input),
     }
 }
@@ -293,64 +292,64 @@ fn parse_next_inkling_event<'i>(
 /// Parse an event while waiting for a Inkling content kind.
 fn parse_idle_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
-        parse_message_start_event,
-        parse_reasoning_start_event,
-        parse_text_start_event,
-        parse_tool_json_start_event,
-        parse_raw_text_start_event,
-        parse_block_end_event,
-        parse_safe_idle_text_event,
+        message_start_event,
+        reasoning_start_event,
+        text_start_event,
+        tool_json_start_event,
+        raw_text_start_event,
+        block_end_event,
+        safe_idle_text_event,
     ))
     .parse_next(input)
 }
 
 /// Parse a Inkling model-authored message start marker.
-fn parse_message_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn message_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(MESSAGE_MODEL).value(InklingEvent::MessageStart).parse_next(input)
 }
 
 /// Parse an event while waiting for an Inkling message content kind.
 fn parse_message_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
-        parse_reasoning_start_event,
-        parse_text_start_event,
-        parse_tool_json_start_event,
-        parse_raw_text_start_event,
-        parse_block_end_event,
-        parse_safe_header_event,
+        reasoning_start_event,
+        text_start_event,
+        tool_json_start_event,
+        raw_text_start_event,
+        block_end_event,
+        safe_header_event,
     ))
     .parse_next(input)
 }
 
 /// Parse an event inside a Inkling text block.
 fn parse_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    alt((parse_block_end_event, parse_safe_text_event)).parse_next(input)
+    alt((block_end_event, safe_text_event)).parse_next(input)
 }
 
 /// Parse an event inside a Inkling reasoning block.
 fn parse_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    alt((parse_block_end_event, parse_safe_reasoning_event)).parse_next(input)
+    alt((block_end_event, safe_reasoning_event)).parse_next(input)
 }
 
 /// Parse a Inkling text start marker.
-fn parse_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_TEXT).value(InklingEvent::TextStart).parse_next(input)
 }
 
 /// Parse a Inkling reasoning start marker.
-fn parse_reasoning_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn reasoning_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_THINKING).value(InklingEvent::ReasoningStart).parse_next(input)
 }
 
 /// Parse a Inkling JSON tool-call start marker.
-fn parse_tool_json_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn tool_json_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     literal(CONTENT_INVOKE_TOOL_JSON)
         .value(InklingEvent::ToolJsonStart)
         .parse_next(input)
 }
 
 /// Parse a Inkling content kind treated as visible text.
-fn parse_raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((
         literal(CONTENT_INVOKE_TOOL_TEXT),
         literal(CONTENT_TOOL_ERROR),
@@ -360,56 +359,51 @@ fn parse_raw_text_start_event(input: &mut InklingInput<'_>) -> ModalResult<Inkli
 }
 
 /// Parse a Inkling block end marker.
-fn parse_block_end_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+fn block_end_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
     alt((literal(END_MESSAGE), literal(CONTENT_MODEL_END_SAMPLING)))
         .value(InklingEvent::BlockEnd)
         .parse_next(input)
 }
 
 /// Parse safe text while waiting for the next Inkling marker.
-fn parse_safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(IDLE_MARKERS).map(|_| InklingEvent::Text).parse_next(input)
+fn safe_idle_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+    safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe header text before the next Inkling marker.
-fn parse_safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(IDLE_MARKERS).map(|_| InklingEvent::Header).parse_next(input)
+fn safe_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+    safe_text_len_mul(input, IDLE_MARKERS).map(|_| InklingEvent::Header)
 }
 
 /// Parse safe text before the end of a Inkling text block.
-fn parse_safe_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(BLOCK_END_MARKERS)
-        .map(|_| InklingEvent::Text)
-        .parse_next(input)
+fn safe_text_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Text)
 }
 
 /// Parse safe reasoning before the end of a Inkling reasoning block.
-fn parse_safe_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    safe_text_len_mul(BLOCK_END_MARKERS)
-        .map(|_| InklingEvent::Reasoning)
-        .parse_next(input)
+fn safe_reasoning_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
+    safe_text_len_mul(input, BLOCK_END_MARKERS).map(|_| InklingEvent::Reasoning)
 }
 
 /// Parse a Inkling JSON tool-call header.
 fn parse_tool_json_header_event(input: &mut InklingInput<'_>) -> ModalResult<InklingEvent> {
-    match parse_tool_call_header_event(INKLING_TOOL_CONFIG).parse_next(input)? {
+    match tool_call_header_event(input, INKLING_TOOL_CONFIG)? {
         JsonToolCallEvent::ToolCallHeader { function_name } => Ok(InklingEvent::ToolJsonHeader {
             name: function_name,
         }),
-        _ => unreachable!("parse_tool_call_header_event only emits ToolCallHeader"),
+        _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
     }
 }
 
 /// Parse raw Inkling JSON tool-call argument bytes.
-fn parse_tool_json_args_event<'i>(
+fn parse_tool_json_args_event(
+    input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
-) -> impl Parser<JsonToolInput<'i>, InklingEvent, ErrMode<ContextError>> {
-    move |input: &mut JsonToolInput<'i>| {
-        take_json_object(json_scan).parse_next(input)?;
-        Ok(InklingEvent::ToolJsonArgs {
-            complete: json_scan.complete(),
-        })
-    }
+) -> ModalResult<InklingEvent> {
+    take_json_object(input, json_scan)?;
+    Ok(InklingEvent::ToolJsonArgs {
+        complete: json_scan.complete(),
+    })
 }
 
 /// Parse the close of a Inkling JSON tool-call block.
