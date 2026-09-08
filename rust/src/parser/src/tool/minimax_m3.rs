@@ -148,9 +148,9 @@ impl ToolParser for MinimaxM3ToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_minimax_m3_event(input, &mut self.mode)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(&self.buffer, parse_next_minimax_m3_event(&mut self.mode))?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -183,58 +183,57 @@ impl ToolParser for MinimaxM3ToolParser {
 }
 
 /// Parse a MiniMax M3 event for the current parser mode.
-fn parse_next_minimax_m3_event(
-    input: &mut MinimaxM3Input<'_>,
+fn parse_next_minimax_m3_event<'i>(
     mode: &mut MinimaxM3Mode,
-) -> ModalResult<MinimaxM3Event> {
-    match mode {
+) -> impl Parser<MinimaxM3Input<'i>, MinimaxM3Event, ErrMode<ContextError>> {
+    move |input: &mut MinimaxM3Input<'i>| match mode {
         MinimaxM3Mode::Text => parse_text_event(input),
         MinimaxM3Mode::ToolBlock { invoke_end_scan } => {
-            parse_tool_block_event(input, invoke_end_scan)
+            parse_tool_block_event(invoke_end_scan).parse_next(input)
         }
-        MinimaxM3Mode::Done => ignored_rest_event(input),
+        MinimaxM3Mode::Done => parse_ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode MiniMax M3 event.
 fn parse_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
-    alt((tool_block_start_event, safe_text_event)).parse_next(input)
+    alt((parse_tool_block_start_event, parse_safe_text_event)).parse_next(input)
 }
 
 /// Parse a MiniMax M3 tool-block start marker.
-fn tool_block_start_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn parse_tool_block_start_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     literal(TOOL_CALL_START).value(MinimaxM3Event::ToolBlockStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next MiniMax M3 marker.
-fn safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| MinimaxM3Event::Text { len })
+fn parse_safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+    safe_text_len(TOOL_CALL_START)
+        .map(|len| MinimaxM3Event::Text { len })
+        .parse_next(input)
 }
 
 /// Parse one event inside a MiniMax M3 tool block.
-fn parse_tool_block_event(
-    input: &mut MinimaxM3Input<'_>,
+fn parse_tool_block_event<'i>(
     invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM3Event> {
-    alt((tool_block_end_event, |input: &mut MinimaxM3Input<'_>| {
-        invoke_event(input, invoke_end_scan)
-    }))
-    .parse_next(input)
+) -> impl Parser<MinimaxM3Input<'i>, MinimaxM3Event, ErrMode<ContextError>> {
+    alt((
+        parse_tool_block_end_event,
+        parse_invoke_event(invoke_end_scan),
+    ))
 }
 
 /// Parse a MiniMax M3 tool-block end marker.
-fn tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn parse_tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     (ws0, literal(TOOL_CALL_END))
         .value(MinimaxM3Event::ToolBlockEnd)
         .parse_next(input)
 }
 
 /// Parse a complete MiniMax M3 invoke block.
-fn invoke_event(
-    input: &mut MinimaxM3Input<'_>,
+fn parse_invoke_event<'i>(
     invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM3Event> {
-    let (name, body) = seq!(
+) -> impl Parser<MinimaxM3Input<'i>, MinimaxM3Event, ErrMode<ContextError>> {
+    let mut parser = seq!(
         _: ws0,
         _: literal(INVOKE_START),
         _: (ws1, literal("name=")),
@@ -242,14 +241,16 @@ fn invoke_event(
         _: literal(">"),
         take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
-    )
-    .parse_next(input)?;
-    let params = parse_invoke_params(body)?;
+    );
+    move |input: &mut MinimaxM3Input<'i>| {
+        let (name, body) = parser.parse_next(input)?;
+        let params = parse_invoke_params(body)?;
 
-    Ok(MinimaxM3Event::Invoke {
-        name: name.trim().to_string(),
-        params,
-    })
+        Ok(MinimaxM3Event::Invoke {
+            name: name.trim().to_string(),
+            params,
+        })
+    }
 }
 
 /// Parse all parameter elements inside a complete MiniMax M3 invoke body.
@@ -281,8 +282,8 @@ fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<(String, ParamInput
 fn parameter_element(input: &mut &str) -> ModalResult<ParamElement> {
     let name = open_element_tag(input)?.to_string();
     let _guard = ParserRecursionGuard::enter()?;
-    let value = element_body(input, &name)?;
-    close_element_tag(input, &name)?;
+    let value = element_body(&name).parse_next(input)?;
+    close_element_tag(&name).parse_next(input)?;
     Ok(ParamElement { name, value })
 }
 
@@ -304,43 +305,43 @@ fn open_element_tag<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
 }
 
 /// Parse a MiniMax M3 closing element tag.
-fn close_element_tag(input: &mut &str, name: &str) -> ModalResult<()> {
-    literal(ELEMENT_END_START).void().parse_next(input)?;
-    literal(name).void().parse_next(input)?;
-    literal(">").void().parse_next(input)
+fn close_element_tag<'i>(name: &str) -> impl Parser<&'i str, (), ErrMode<ContextError>> {
+    (literal(ELEMENT_END_START), literal(name), literal(">")).void()
 }
 
 /// Parse the body of one MiniMax M3 element.
-fn element_body(input: &mut &str, closing_name: &str) -> ModalResult<ParamInput> {
+fn element_body<'i>(closing_name: &str) -> impl Parser<&'i str, ParamInput, ErrMode<ContextError>> {
     let close_tag = format!("{ELEMENT_END_START}{closing_name}>");
-    let mut text = String::new();
-    let mut elements = Vec::new();
+    move |input: &mut &'i str| {
+        let mut text = String::new();
+        let mut elements = Vec::new();
 
-    loop {
-        text.push_str(text_until_namespace(input)?);
+        loop {
+            text.push_str(text_until_namespace(input)?);
 
-        if input.starts_with(&close_tag) {
-            // Close tag reached, end of element body.
-            break;
+            if input.starts_with(&close_tag) {
+                // Close tag reached, end of element body.
+                break;
+            }
+            if input.starts_with(ELEMENT_START) {
+                // Child element start reached, parse child element recursively.
+                elements.push(parameter_element(input)?);
+                continue;
+            }
+            if input.starts_with(NAMESPACE) {
+                // Unexpected namespace marker.
+                return malformed();
+            }
         }
-        if input.starts_with(ELEMENT_START) {
-            // Child element start reached, parse child element recursively.
-            elements.push(parameter_element(input)?);
-            continue;
-        }
-        if input.starts_with(NAMESPACE) {
-            // Unexpected namespace marker.
-            return malformed();
-        }
-    }
 
-    if elements.is_empty() {
-        Ok(ParamInput::Text(text))
-    } else {
-        if !text.trim().is_empty() {
-            push_mixed_text_element(&mut elements, text);
+        if elements.is_empty() {
+            Ok(ParamInput::Text(text))
+        } else {
+            if !text.trim().is_empty() {
+                push_mixed_text_element(&mut elements, text);
+            }
+            Ok(ParamInput::Elements(elements))
         }
-        Ok(ParamInput::Elements(elements))
     }
 }
 
@@ -375,7 +376,7 @@ fn partial_attr_value<'i>(input: &mut MinimaxM3Input<'i>) -> ModalResult<&'i str
 }
 
 /// Parse ignored rest after the MiniMax M3 tool block ends.
-fn ignored_rest_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn parse_ignored_rest_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     rest.value(MinimaxM3Event::IgnoredRest).parse_next(input)
 }
 

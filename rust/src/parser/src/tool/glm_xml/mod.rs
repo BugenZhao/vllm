@@ -3,6 +3,7 @@
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, eof, repeat, seq, terminated};
+use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
@@ -116,9 +117,10 @@ impl GlmXmlToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_glm_event(input, &mut self.mode, self.separator)
-        })? {
+        while let Some((event, consumed_len)) = parse_buffered_event(
+            &self.buffer,
+            parse_next_glm_event(&mut self.mode, self.separator),
+        )? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -143,59 +145,61 @@ impl GlmXmlToolParser {
 }
 
 /// Parse a GLM event for the current parser mode.
-fn parse_next_glm_event(
-    input: &mut GlmInput<'_>,
+fn parse_next_glm_event<'i>(
     mode: &mut GlmMode,
     separator: Separator,
-) -> ModalResult<GlmEvent> {
-    match mode {
+) -> impl Parser<GlmInput<'i>, GlmEvent, ErrMode<ContextError>> {
+    move |input: &mut GlmInput<'i>| match mode {
         GlmMode::Text => parse_text_event(input),
         GlmMode::ToolCall { tool_call_end_scan } => {
-            tool_call_event(input, separator, tool_call_end_scan)
+            parse_tool_call_event(separator, tool_call_end_scan).parse_next(input)
         }
-        GlmMode::AfterToolCall => after_tool_call_event(input),
+        GlmMode::AfterToolCall => parse_after_tool_call_event(input),
     }
 }
 
 /// Parse a text-mode GLM event.
 fn parse_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    alt((tool_call_start_event, safe_text_event)).parse_next(input)
+    alt((parse_tool_call_start_event, parse_safe_text_event)).parse_next(input)
 }
 
 /// Parse a GLM tool-call start marker.
-fn tool_call_start_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
+fn parse_tool_call_start_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     literal(TOOL_CALL_START).value(GlmEvent::ToolCallStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next GLM marker.
-fn safe_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| GlmEvent::Text { len })
+fn parse_safe_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
+    safe_text_len(TOOL_CALL_START)
+        .map(|len| GlmEvent::Text { len })
+        .parse_next(input)
 }
 
 /// Parse text after a completed GLM tool call.
-fn after_tool_call_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
+fn parse_after_tool_call_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     ws0.void().parse_next(input)?;
-    alt((tool_call_start_event, ignored_rest_event)).parse_next(input)
+    alt((parse_tool_call_start_event, parse_ignored_rest_event)).parse_next(input)
 }
 
 /// Parse a trailing rest after GLM tool calls.
-fn ignored_rest_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
+fn parse_ignored_rest_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     rest.value(GlmEvent::IgnoredRest).parse_next(input)
 }
 
 /// Parse a complete GLM tool call.
-fn tool_call_event(
-    input: &mut GlmInput<'_>,
+fn parse_tool_call_event<'i>(
     separator: Separator,
     tool_call_end_scan: &mut MarkerScanState,
-) -> ModalResult<GlmEvent> {
-    let (body,) = seq!(
+) -> impl Parser<GlmInput<'i>, GlmEvent, ErrMode<ContextError>> {
+    let mut parser = seq!(
         take_until_marker(TOOL_CALL_END, tool_call_end_scan),
         _: literal(TOOL_CALL_END),
-    )
-    .parse_next(input)?;
+    );
+    move |input: &mut GlmInput<'i>| {
+        let (body,) = parser.parse_next(input)?;
 
-    parse_tool_call_body(body, separator)
+        parse_tool_call_body(body, separator)
+    }
 }
 
 /// Parse a GLM tool-call body.
@@ -204,16 +208,16 @@ fn parse_tool_call_body(body: &str, separator: Separator) -> ModalResult<GlmEven
     let (name, raw_params) = match separator {
         Separator::Newline => seq!(
             _: ws0,
-            parse_newline_separated_function_name,
-            parse_parameters,
+            newline_separated_function_name,
+            parameters,
             _: ws0,
             _: eof,
         )
         .parse_next(&mut input)?,
         Separator::Flexible => seq!(
             _: ws0,
-            parse_flexible_function_name,
-            parse_parameters,
+            flexible_function_name,
+            parameters,
             _: ws0,
             _: eof,
         )
@@ -227,12 +231,12 @@ fn parse_tool_call_body(body: &str, separator: Separator) -> ModalResult<GlmEven
 }
 
 /// Parse a GLM-4.5 newline-separated function name.
-fn parse_newline_separated_function_name<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
+fn newline_separated_function_name<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
     terminated(take_until(1.., "\n"), "\n").map(str::trim).parse_next(input)
 }
 
 /// Parse a GLM-4.7 whitespace-or-tag-separated function name.
-fn parse_flexible_function_name<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
+fn flexible_function_name<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
     terminated(
         take_while(1.., |ch: char| !ch.is_whitespace() && ch != '<'),
         ws0,
@@ -241,12 +245,12 @@ fn parse_flexible_function_name<'i>(input: &mut &'i str) -> ModalResult<&'i str>
 }
 
 /// Parse GLM argument key-value pairs.
-fn parse_parameters(input: &mut &str) -> ModalResult<Vec<(String, String)>> {
-    repeat(0.., terminated(parse_parameter, ws0)).parse_next(input)
+fn parameters(input: &mut &str) -> ModalResult<Vec<(String, String)>> {
+    repeat(0.., terminated(parameter, ws0)).parse_next(input)
 }
 
 /// Parse a GLM argument key-value pair.
-fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
+fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
     let (key, value) = seq!(
         _: literal(ARG_KEY_START),
         take_until(1.., ARG_KEY_END),

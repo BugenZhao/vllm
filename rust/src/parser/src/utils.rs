@@ -52,50 +52,59 @@ pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
 /// This is the single-marker variant of [`safe_text_len_mul`].
 ///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
+pub fn safe_text_len<'i>(
+    marker: &str,
+) -> impl Parser<Partial<&'i str>, usize, ErrMode<ContextError>> {
+    move |input: &mut Partial<&'i str>| {
+        let text = **input;
+        if text.is_empty() {
+            return incomplete();
+        }
 
-    if let Some(start_idx) = text.find(marker) {
-        input.next_slice(start_idx);
-        return Ok(start_idx);
-    }
+        if let Some(start_idx) = text.find(marker) {
+            input.next_slice(start_idx);
+            return Ok(start_idx);
+        }
 
-    let keep_len = partial_prefix_len(text, marker);
-    let emit_len = text.len().saturating_sub(keep_len);
-    if emit_len == 0 {
-        return incomplete();
-    }
+        let keep_len = partial_prefix_len(text, marker);
+        let emit_len = text.len().saturating_sub(keep_len);
+        if emit_len == 0 {
+            return incomplete();
+        }
 
-    input.next_slice(emit_len);
-    Ok(emit_len)
+        input.next_slice(emit_len);
+        Ok(emit_len)
+    }
 }
 
 /// Parse a safe text run before the earliest next marker.
 /// This is the multi-marker variant of [`safe_text_len`].
 ///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
+pub fn safe_text_len_mul<'i>(
+    markers: &[&str],
+) -> impl Parser<Partial<&'i str>, usize, ErrMode<ContextError>> {
+    move |input: &mut Partial<&'i str>| {
+        let text = **input;
+        if text.is_empty() {
+            return incomplete();
+        }
 
-    if let Some(start_idx) = find_slice_mul(text, markers) {
-        input.next_slice(start_idx);
-        return Ok(start_idx);
-    }
+        if let Some(start_idx) = find_slice_mul(text, markers) {
+            input.next_slice(start_idx);
+            return Ok(start_idx);
+        }
 
-    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
-    let emit_len = text.len().saturating_sub(keep_len);
-    if emit_len == 0 {
-        return incomplete();
-    }
+        let keep_len =
+            markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
+        let emit_len = text.len().saturating_sub(keep_len);
+        if emit_len == 0 {
+            return incomplete();
+        }
 
-    input.next_slice(emit_len);
-    Ok(emit_len)
+        input.next_slice(emit_len);
+        Ok(emit_len)
+    }
 }
 
 #[inline(always)]
@@ -136,39 +145,33 @@ impl MarkerScanState {
 /// chunks while waiting for a closing marker. Plain `take_until` is still a
 /// better fit for one-shot parsers over a complete body, and for `1..` cases
 /// where an empty slice before the marker should be rejected.
-pub fn take_until_marker<'i, 'a>(
-    marker: &'a str,
-    state: &'a mut MarkerScanState,
-) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut Partial<&'i str>| take_until_marker_(input, marker, state)
-}
-
-fn take_until_marker_<'i>(
-    input: &mut Partial<&'i str>,
+pub fn take_until_marker<'i>(
     marker: &str,
     state: &mut MarkerScanState,
-) -> ModalResult<&'i str> {
-    debug_assert!(!marker.is_empty());
+) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> {
+    move |input: &mut Partial<&'i str>| {
+        debug_assert!(!marker.is_empty());
 
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
+        let text = **input;
+        if text.is_empty() {
+            return incomplete();
+        }
+
+        // Normal updates store a char boundary; this keeps stale or misused state from panicking.
+        let scan_start = floor_char_boundary(text, state.scan_start);
+
+        if let Some(offset) = text[scan_start..].find(marker) {
+            let marker_start = scan_start + offset;
+            let body = &text[..marker_start];
+            input.next_slice(marker_start);
+            state.reset();
+            return Ok(body);
+        }
+
+        let keep_len = partial_prefix_len(text, marker);
+        state.scan_start = text.len() - keep_len;
+        incomplete()
     }
-
-    // Normal updates store a char boundary; this keeps stale or misused state from panicking.
-    let scan_start = floor_char_boundary(text, state.scan_start);
-
-    if let Some(offset) = text[scan_start..].find(marker) {
-        let marker_start = scan_start + offset;
-        let body = &text[..marker_start];
-        input.next_slice(marker_start);
-        state.reset();
-        return Ok(body);
-    }
-
-    let keep_len = partial_prefix_len(text, marker);
-    state.scan_start = text.len() - keep_len;
-    incomplete()
 }
 
 fn floor_char_boundary(text: &str, index: usize) -> usize {
@@ -209,90 +212,91 @@ impl JsonObjectScanState {
 /// The returned length is safe to emit as raw argument text. This scans only
 /// lexical boundaries from `{` through the matching `}`, preserving
 /// malformed-but-balanced JSON without deserializing or normalizing it.
-pub fn take_json_object(
-    input: &mut Partial<&str>,
+pub fn take_json_object<'i>(
     state: &mut JsonObjectScanState,
-) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
-    if state.complete() {
-        return Err(json_scan_error(
-            "JSON object argument",
-            StrContextValue::Description("active JSON object scan"),
-        ));
-    }
-
-    let bytes = text.as_bytes();
-    let just_started = matches!(state.phase, JsonObjectScanPhase::Initial);
-    if just_started {
-        if bytes[0] != b'{' {
+) -> impl Parser<Partial<&'i str>, usize, ErrMode<ContextError>> {
+    move |input: &mut Partial<&'i str>| {
+        let text = **input;
+        if text.is_empty() {
+            return incomplete();
+        }
+        if state.complete() {
             return Err(json_scan_error(
                 "JSON object argument",
-                StrContextValue::CharLiteral('{'),
+                StrContextValue::Description("active JSON object scan"),
             ));
         }
-        state.phase = JsonObjectScanPhase::Scanning;
-        state.object_depth = 1;
-    }
 
-    let mut index = usize::from(just_started);
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-
-        if state.in_string {
-            if state.escape {
-                state.escape = false;
-            } else if byte == b'\\' {
-                state.escape = true;
-            } else if byte == b'"' {
-                state.in_string = false;
+        let bytes = text.as_bytes();
+        let just_started = matches!(state.phase, JsonObjectScanPhase::Initial);
+        if just_started {
+            if bytes[0] != b'{' {
+                return Err(json_scan_error(
+                    "JSON object argument",
+                    StrContextValue::CharLiteral('{'),
+                ));
             }
-            continue;
+            state.phase = JsonObjectScanPhase::Scanning;
+            state.object_depth = 1;
         }
 
-        match byte {
-            b'"' => state.in_string = true,
-            b'{' => state.object_depth += 1,
-            b'}' => {
-                state.object_depth = state.object_depth.checked_sub(1).ok_or_else(|| {
-                    json_scan_error(
-                        "JSON object argument",
-                        StrContextValue::Description("balanced object braces"),
-                    )
-                })?;
-                if state.object_depth == 0 && state.array_depth == 0 {
-                    state.phase = JsonObjectScanPhase::Complete;
-                    input.next_slice(index);
-                    return Ok(index);
-                }
-                if state.object_depth == 0 {
-                    return Err(json_scan_error(
-                        "JSON object argument",
-                        StrContextValue::Description(
-                            "nested arrays to close before the top-level object",
-                        ),
-                    ));
-                }
-            }
-            b'[' => state.array_depth += 1,
-            b']' => {
-                state.array_depth = state.array_depth.checked_sub(1).ok_or_else(|| {
-                    json_scan_error(
-                        "JSON object argument",
-                        StrContextValue::Description("balanced array brackets"),
-                    )
-                })?;
-            }
-            _ => {}
-        }
-    }
+        let mut index = usize::from(just_started);
 
-    input.next_slice(text.len());
-    Ok(text.len())
+        while index < bytes.len() {
+            let byte = bytes[index];
+            index += 1;
+
+            if state.in_string {
+                if state.escape {
+                    state.escape = false;
+                } else if byte == b'\\' {
+                    state.escape = true;
+                } else if byte == b'"' {
+                    state.in_string = false;
+                }
+                continue;
+            }
+
+            match byte {
+                b'"' => state.in_string = true,
+                b'{' => state.object_depth += 1,
+                b'}' => {
+                    state.object_depth = state.object_depth.checked_sub(1).ok_or_else(|| {
+                        json_scan_error(
+                            "JSON object argument",
+                            StrContextValue::Description("balanced object braces"),
+                        )
+                    })?;
+                    if state.object_depth == 0 && state.array_depth == 0 {
+                        state.phase = JsonObjectScanPhase::Complete;
+                        input.next_slice(index);
+                        return Ok(index);
+                    }
+                    if state.object_depth == 0 {
+                        return Err(json_scan_error(
+                            "JSON object argument",
+                            StrContextValue::Description(
+                                "nested arrays to close before the top-level object",
+                            ),
+                        ));
+                    }
+                }
+                b'[' => state.array_depth += 1,
+                b']' => {
+                    state.array_depth = state.array_depth.checked_sub(1).ok_or_else(|| {
+                        json_scan_error(
+                            "JSON object argument",
+                            StrContextValue::Description("balanced array brackets"),
+                        )
+                    })?;
+                }
+                _ => {}
+            }
+        }
+
+        input.next_slice(text.len());
+        Ok(text.len())
+    }
 }
 
 /// Streaming lexical state for a JSON string literal.
@@ -307,52 +311,53 @@ pub struct JsonStringScanState {
 /// The returned length covers the quoted JSON string. This only scans for the
 /// string boundary; callers that need the decoded value should pass the raw
 /// slice to [`decode_json_str`].
-pub fn take_json_string(
-    input: &mut Partial<&str>,
+pub fn take_json_string<'i>(
     state: &mut JsonStringScanState,
-) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
-
-    let bytes = text.as_bytes();
-    if bytes[0] != b'"' {
-        return Err(json_scan_error(
-            "JSON string",
-            StrContextValue::CharLiteral('"'),
-        ));
-    }
-
-    let mut index = if state.scanned_len == 0 {
-        1
-    } else if state.scanned_len <= bytes.len() {
-        state.scanned_len
-    } else {
-        return incomplete();
-    };
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-        index += 1;
-
-        if state.escape {
-            state.escape = false;
-            continue;
+) -> impl Parser<Partial<&'i str>, usize, ErrMode<ContextError>> {
+    move |input: &mut Partial<&'i str>| {
+        let text = **input;
+        if text.is_empty() {
+            return incomplete();
         }
 
-        match byte {
-            b'\\' => state.escape = true,
-            b'"' => {
-                input.next_slice(index);
-                return Ok(index);
+        let bytes = text.as_bytes();
+        if bytes[0] != b'"' {
+            return Err(json_scan_error(
+                "JSON string",
+                StrContextValue::CharLiteral('"'),
+            ));
+        }
+
+        let mut index = if state.scanned_len == 0 {
+            1
+        } else if state.scanned_len <= bytes.len() {
+            state.scanned_len
+        } else {
+            return incomplete();
+        };
+
+        while index < bytes.len() {
+            let byte = bytes[index];
+            index += 1;
+
+            if state.escape {
+                state.escape = false;
+                continue;
             }
-            _ => {}
-        }
-    }
 
-    state.scanned_len = text.len();
-    incomplete()
+            match byte {
+                b'\\' => state.escape = true,
+                b'"' => {
+                    input.next_slice(index);
+                    return Ok(index);
+                }
+                _ => {}
+            }
+        }
+
+        state.scanned_len = text.len();
+        incomplete()
+    }
 }
 
 /// Parse a JSON string literal.
@@ -360,7 +365,7 @@ pub fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
     let text = **input;
     let checkpoint = input.checkpoint();
     let mut state = JsonStringScanState::default();
-    let len = take_json_string(input, &mut state)?;
+    let len = take_json_string(&mut state).parse_next(input)?;
     decode_json_str(&text[..len]).inspect_err(|_| {
         input.reset(&checkpoint);
     })
@@ -390,13 +395,13 @@ fn json_scan_error(label: &'static str, expected: StrContextValue) -> ErrMode<Co
 ///   of bytes consumed from the buffer.
 /// - `Ok(None)` if the buffer does not contain a full event yet, and more data is needed.
 /// - `Err` if a parsing error occurred.
-pub fn parse_buffered_event<E>(
-    buffer: &str,
-    parse: impl FnOnce(&mut Partial<&str>) -> ModalResult<E>,
+pub fn parse_buffered_event<'i, E>(
+    buffer: &'i str,
+    mut parse: impl Parser<Partial<&'i str>, E, ErrMode<ContextError>>,
 ) -> Result<Option<(E, usize)>> {
     let mut input = Partial::new(buffer);
     let checkpoint = input.checkpoint();
-    let event = match parse(&mut input) {
+    let event = match parse.parse_next(&mut input) {
         Ok(event) => event,
         Err(ErrMode::Incomplete(_)) => return Ok(None),
         Err(ErrMode::Backtrack(e) | ErrMode::Cut(e)) => {
@@ -462,7 +467,7 @@ mod tests {
         let mut input = Partial::new("hello<tool_call>");
         let checkpoint = input.checkpoint();
 
-        let len = safe_text_len(&mut input, "<tool_call>").unwrap();
+        let len = safe_text_len("<tool_call>").parse_next(&mut input).unwrap();
 
         assert_eq!(len, "hello".len());
         assert_eq!(input.offset_from(&checkpoint), "hello".len());
@@ -473,7 +478,7 @@ mod tests {
         let mut input = Partial::new("hello<tool");
         let checkpoint = input.checkpoint();
 
-        let len = safe_text_len(&mut input, "<tool_call>").unwrap();
+        let len = safe_text_len("<tool_call>").parse_next(&mut input).unwrap();
 
         assert_eq!(len, "hello".len());
         assert_eq!(input.offset_from(&checkpoint), "hello".len());
@@ -483,7 +488,7 @@ mod tests {
     fn safe_text_len_reports_incomplete_for_only_partial_marker() {
         let mut input = Partial::new("<tool");
 
-        let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
+        let error = safe_text_len("<tool_call>").parse_next(&mut input).unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
     }
@@ -493,7 +498,9 @@ mod tests {
         let mut input = Partial::new("hello<channel|><|tool_call>");
         let checkpoint = input.checkpoint();
 
-        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<channel|>"]).unwrap();
+        let len = safe_text_len_mul(&["<|tool_call>", "<channel|>"])
+            .parse_next(&mut input)
+            .unwrap();
 
         assert_eq!(len, "hello".len());
         assert_eq!(input.offset_from(&checkpoint), "hello".len());
@@ -505,7 +512,9 @@ mod tests {
         let mut input = Partial::new("hello<|tool");
         let checkpoint = input.checkpoint();
 
-        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap();
+        let len = safe_text_len_mul(&["<|tool_call>", "<|channel>thought\n"])
+            .parse_next(&mut input)
+            .unwrap();
 
         assert_eq!(len, "hello".len());
         assert_eq!(input.offset_from(&checkpoint), "hello".len());
@@ -517,7 +526,9 @@ mod tests {
         let mut input = Partial::new("hello<not_marker><|tool_call>");
         let checkpoint = input.checkpoint();
 
-        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap();
+        let len = safe_text_len_mul(&["<|tool_call>", "<|channel>thought\n"])
+            .parse_next(&mut input)
+            .unwrap();
 
         assert_eq!(len, "hello<not_marker>".len());
         assert_eq!(input.offset_from(&checkpoint), "hello<not_marker>".len());
@@ -528,8 +539,9 @@ mod tests {
     fn safe_text_len_mul_reports_incomplete_for_only_partial_marker() {
         let mut input = Partial::new("<|channel>thought");
 
-        let error =
-            safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap_err();
+        let error = safe_text_len_mul(&["<|tool_call>", "<|channel>thought\n"])
+            .parse_next(&mut input)
+            .unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
     }
@@ -638,7 +650,7 @@ mod tests {
         let mut input = Partial::new(buffer);
         let checkpoint = input.checkpoint();
 
-        let len = take_json_object(&mut input, &mut state).unwrap();
+        let len = take_json_object(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, r#"{"location":"Paris"}"#.len());
         assert_eq!(input.offset_from(&checkpoint), len);
@@ -652,7 +664,7 @@ mod tests {
         let buffer = format!("{arguments}<end>");
         let mut input = Partial::new(buffer.as_str());
 
-        let len = take_json_object(&mut input, &mut state).unwrap();
+        let len = take_json_object(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, arguments.len());
         assert!(state.complete());
@@ -663,7 +675,7 @@ mod tests {
         let mut state = JsonObjectScanState::default();
         let mut input = Partial::new(" {\"x\":1}");
 
-        let error = take_json_object(&mut input, &mut state).unwrap_err();
+        let error = take_json_object(&mut state).parse_next(&mut input).unwrap_err();
 
         let ErrMode::Cut(error) = error else {
             panic!("expected cut error");
@@ -680,7 +692,7 @@ mod tests {
         let mut input = Partial::new("{\"x\":1}\n<end>");
         let checkpoint = input.checkpoint();
 
-        let len = take_json_object(&mut input, &mut state).unwrap();
+        let len = take_json_object(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, "{\"x\":1}".len());
         assert_eq!(input.offset_from(&checkpoint), len);
@@ -699,7 +711,7 @@ mod tests {
 
         for chunk in chunks {
             let mut input = Partial::new(chunk);
-            let len = take_json_object(&mut input, &mut state).unwrap();
+            let len = take_json_object(&mut state).parse_next(&mut input).unwrap();
             collected.push_str(&chunk[..len]);
         }
 
@@ -712,7 +724,7 @@ mod tests {
         let mut state = JsonObjectScanState::default();
         let mut input = Partial::new(r#"[{"x":1}]"#);
 
-        let error = take_json_object(&mut input, &mut state).unwrap_err();
+        let error = take_json_object(&mut state).parse_next(&mut input).unwrap_err();
 
         let ErrMode::Cut(error) = error else {
             panic!("expected cut error");
@@ -728,7 +740,7 @@ mod tests {
         let mut state = JsonObjectScanState::default();
         let mut input = Partial::new(r#"{"x":]}"#);
 
-        let error = take_json_object(&mut input, &mut state).unwrap_err();
+        let error = take_json_object(&mut state).parse_next(&mut input).unwrap_err();
 
         let ErrMode::Cut(error) = error else {
             panic!("expected cut error");
@@ -744,7 +756,7 @@ mod tests {
         let mut state = JsonObjectScanState::default();
         let mut input = Partial::new(r#"{"x":[}"#);
 
-        let error = take_json_object(&mut input, &mut state).unwrap_err();
+        let error = take_json_object(&mut state).parse_next(&mut input).unwrap_err();
 
         let ErrMode::Cut(error) = error else {
             panic!("expected cut error");
@@ -761,7 +773,7 @@ mod tests {
         let mut input = Partial::new(r#""say_\"hi\u0021" rest"#);
         let checkpoint = input.checkpoint();
 
-        let len = take_json_string(&mut input, &mut state).unwrap();
+        let len = take_json_string(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, r#""say_\"hi\u0021""#.len());
         assert_eq!(input.offset_from(&checkpoint), len);
@@ -774,14 +786,14 @@ mod tests {
         let mut input = Partial::new(r#""{\"data\":\"partial"#);
         let checkpoint = input.checkpoint();
 
-        let error = take_json_string(&mut input, &mut state).unwrap_err();
+        let error = take_json_string(&mut state).parse_next(&mut input).unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
         assert_eq!(input.offset_from(&checkpoint), 0);
         assert_eq!(state.scanned_len, r#""{\"data\":\"partial"#.len());
 
         let mut input = Partial::new(r#""{\"data\":\"partial string\"}" tail"#);
-        let len = take_json_string(&mut input, &mut state).unwrap();
+        let len = take_json_string(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, r#""{\"data\":\"partial string\"}""#.len());
         assert_eq!(*input, " tail");
@@ -792,13 +804,13 @@ mod tests {
         let mut state = JsonStringScanState::default();
         let mut input = Partial::new(r#""abc\"#);
 
-        let error = take_json_string(&mut input, &mut state).unwrap_err();
+        let error = take_json_string(&mut state).parse_next(&mut input).unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
         assert!(state.escape);
 
         let mut input = Partial::new(r#""abc\"def" tail"#);
-        let len = take_json_string(&mut input, &mut state).unwrap();
+        let len = take_json_string(&mut state).parse_next(&mut input).unwrap();
 
         assert_eq!(len, r#""abc\"def""#.len());
         assert_eq!(*input, " tail");
@@ -809,7 +821,7 @@ mod tests {
         let mut state = JsonStringScanState::default();
         let mut input = Partial::new("42");
 
-        let error = take_json_string(&mut input, &mut state).unwrap_err();
+        let error = take_json_string(&mut state).parse_next(&mut input).unwrap_err();
 
         let ErrMode::Cut(error) = error else {
             panic!("expected cut error");
@@ -841,9 +853,10 @@ mod tests {
 
     #[test]
     fn parse_buffered_event_error_includes_input_snippet() {
-        let result = parse_buffered_event(" {\"x\":1}", |input| {
-            take_json_object(input, &mut JsonObjectScanState::default())
-        });
+        let result = parse_buffered_event(
+            " {\"x\":1}",
+            take_json_object(&mut JsonObjectScanState::default()),
+        );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("near \""), "error must include snippet");
     }
@@ -851,9 +864,10 @@ mod tests {
     #[test]
     fn parse_buffered_event_error_truncates_long_input() {
         let long_input = format!(" {}", "x".repeat(100));
-        let result = parse_buffered_event(&long_input, |input| {
-            take_json_object(input, &mut JsonObjectScanState::default())
-        });
+        let result = parse_buffered_event(
+            &long_input,
+            take_json_object(&mut JsonObjectScanState::default()),
+        );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("near \""), "error must include snippet");
         assert!(

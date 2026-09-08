@@ -8,6 +8,7 @@ pub use deepseek_v3::DeepSeekV3ToolParser;
 pub use deepseek_v31::DeepSeekV31ToolParser;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
+use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -145,9 +146,10 @@ impl DeepSeekJsonToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_deepseek_json_event(input, &mut self.mode, self.format)
-        })? {
+        while let Some((event, consumed_len)) = parse_buffered_event(
+            &self.buffer,
+            parse_next_deepseek_json_event(&mut self.mode, self.format),
+        )? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -180,88 +182,90 @@ impl DeepSeekJsonToolParser {
 }
 
 /// Parse a DeepSeek JSON event for the current parser mode.
-fn parse_next_deepseek_json_event(
-    input: &mut DeepSeekJsonInput<'_>,
+fn parse_next_deepseek_json_event<'i>(
     mode: &mut DeepSeekJsonMode,
     format: DeepSeekJsonFormat,
-) -> ModalResult<DeepSeekJsonEvent> {
-    match mode {
+) -> impl Parser<DeepSeekJsonInput<'i>, DeepSeekJsonEvent, ErrMode<ContextError>> {
+    move |input: &mut DeepSeekJsonInput<'i>| match mode {
         DeepSeekJsonMode::Text => parse_text_event(input),
         DeepSeekJsonMode::ToolBlock => parse_tool_block_event(input),
-        DeepSeekJsonMode::Header => tool_call_header_event(input, format),
+        DeepSeekJsonMode::Header => parse_tool_call_header_event(format).parse_next(input),
         DeepSeekJsonMode::Arguments { json_scan } => {
-            parse_arguments_event(input, format, json_scan)
+            parse_arguments_event(format, json_scan).parse_next(input)
         }
-        DeepSeekJsonMode::Done => ignored_rest_event(input),
+        DeepSeekJsonMode::Done => parse_ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode DeepSeek JSON event.
 fn parse_text_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
-    alt((tool_calls_start_event, safe_text_event)).parse_next(input)
+    alt((parse_tool_calls_start_event, parse_safe_text_event)).parse_next(input)
 }
 
 /// Parse one event inside the DeepSeek tool-calls section.
 fn parse_tool_block_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
     ws0.void().parse_next(input)?;
-    alt((tool_calls_end_event, tool_call_start_event)).parse_next(input)
+    alt((parse_tool_calls_end_event, parse_tool_call_start_event)).parse_next(input)
 }
 
 /// Parse one event inside a DeepSeek tool-call arguments payload.
-fn parse_arguments_event(
-    input: &mut DeepSeekJsonInput<'_>,
+fn parse_arguments_event<'i>(
     format: DeepSeekJsonFormat,
     json_scan: &mut JsonObjectScanState,
-) -> ModalResult<DeepSeekJsonEvent> {
-    if json_scan.complete() {
-        tool_call_end_event(input, format)
-    } else {
-        argument_delta_event(input, json_scan)
+) -> impl Parser<DeepSeekJsonInput<'i>, DeepSeekJsonEvent, ErrMode<ContextError>> {
+    move |input: &mut DeepSeekJsonInput<'i>| {
+        if json_scan.complete() {
+            parse_tool_call_end_event(format).parse_next(input)
+        } else {
+            parse_argument_delta_event(json_scan).parse_next(input)
+        }
     }
 }
 
 /// Parse a DeepSeek tool-calls start marker.
-fn tool_calls_start_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_tool_calls_start_event(
+    input: &mut DeepSeekJsonInput<'_>,
+) -> ModalResult<DeepSeekJsonEvent> {
     literal(TOOL_CALLS_START)
         .value(DeepSeekJsonEvent::ToolCallsStart)
         .parse_next(input)
 }
 
 /// Parse a DeepSeek tool-calls end marker.
-fn tool_calls_end_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_tool_calls_end_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
     literal(TOOL_CALLS_END).value(DeepSeekJsonEvent::ToolCallsEnd).parse_next(input)
 }
 
 /// Parse a DeepSeek tool-call start marker.
-fn tool_call_start_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_tool_call_start_event(
+    input: &mut DeepSeekJsonInput<'_>,
+) -> ModalResult<DeepSeekJsonEvent> {
     literal(TOOL_CALL_START)
         .value(DeepSeekJsonEvent::ToolCallStart)
         .parse_next(input)
 }
 
 /// Parse a DeepSeek tool-call end marker.
-fn tool_call_end_event(
-    input: &mut DeepSeekJsonInput<'_>,
+fn parse_tool_call_end_event<'i>(
     format: DeepSeekJsonFormat,
-) -> ModalResult<DeepSeekJsonEvent> {
-    literal(format.argument_end_marker())
-        .value(DeepSeekJsonEvent::ToolCallEnd)
-        .parse_next(input)
+) -> impl Parser<DeepSeekJsonInput<'i>, DeepSeekJsonEvent, ErrMode<ContextError>> {
+    literal(format.argument_end_marker()).value(DeepSeekJsonEvent::ToolCallEnd)
 }
 
 /// Parse a DeepSeek tool-call header before the JSON arguments payload.
-fn tool_call_header_event(
-    input: &mut DeepSeekJsonInput<'_>,
+fn parse_tool_call_header_event<'i>(
     format: DeepSeekJsonFormat,
-) -> ModalResult<DeepSeekJsonEvent> {
-    match format {
-        DeepSeekJsonFormat::V3 => v3_tool_call_header_event(input),
-        DeepSeekJsonFormat::V31 => v31_tool_call_header_event(input),
+) -> impl Parser<DeepSeekJsonInput<'i>, DeepSeekJsonEvent, ErrMode<ContextError>> {
+    move |input: &mut DeepSeekJsonInput<'i>| match format {
+        DeepSeekJsonFormat::V3 => parse_v3_tool_call_header_event(input),
+        DeepSeekJsonFormat::V31 => parse_v31_tool_call_header_event(input),
     }
 }
 
 /// Parse a DeepSeek V3 tool-call header.
-fn v3_tool_call_header_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_v3_tool_call_header_event(
+    input: &mut DeepSeekJsonInput<'_>,
+) -> ModalResult<DeepSeekJsonEvent> {
     let name = seq!(
         _: literal("function"),
         _: literal(TOOL_CALL_SEPARATOR),
@@ -276,7 +280,9 @@ fn v3_tool_call_header_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<D
 }
 
 /// Parse a DeepSeek V3.1 tool-call header.
-fn v31_tool_call_header_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_v31_tool_call_header_event(
+    input: &mut DeepSeekJsonInput<'_>,
+) -> ModalResult<DeepSeekJsonEvent> {
     let (name, _) = (
         take_until(1.., TOOL_CALL_SEPARATOR),
         literal(TOOL_CALL_SEPARATOR),
@@ -289,19 +295,20 @@ fn v31_tool_call_header_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<
 }
 
 /// Parse a DeepSeek raw JSON arguments delta.
-fn argument_delta_event(
-    input: &mut DeepSeekJsonInput<'_>,
+fn parse_argument_delta_event<'i>(
     json_scan: &mut JsonObjectScanState,
-) -> ModalResult<DeepSeekJsonEvent> {
-    take_json_object(input, json_scan).map(|len| DeepSeekJsonEvent::Arguments { len })
+) -> impl Parser<DeepSeekJsonInput<'i>, DeepSeekJsonEvent, ErrMode<ContextError>> {
+    take_json_object(json_scan).map(|len| DeepSeekJsonEvent::Arguments { len })
 }
 
 /// Parse a safe text run before the next DeepSeek tool-calls section.
-fn safe_text_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
-    safe_text_len(input, TOOL_CALLS_START).map(|len| DeepSeekJsonEvent::Text { len })
+fn parse_safe_text_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+    safe_text_len(TOOL_CALLS_START)
+        .map(|len| DeepSeekJsonEvent::Text { len })
+        .parse_next(input)
 }
 
 /// Parse ignored rest after the DeepSeek tool-calls section ends.
-fn ignored_rest_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
+fn parse_ignored_rest_event(input: &mut DeepSeekJsonInput<'_>) -> ModalResult<DeepSeekJsonEvent> {
     rest.value(DeepSeekJsonEvent::IgnoredRest).parse_next(input)
 }

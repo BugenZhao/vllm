@@ -3,6 +3,7 @@
 
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -122,9 +123,9 @@ impl ToolParser for MinimaxM2ToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_minimax_m2_event(input, &mut self.mode)
-        })? {
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(&self.buffer, parse_next_minimax_m2_event(&mut self.mode))?
+        {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -153,58 +154,57 @@ impl ToolParser for MinimaxM2ToolParser {
 }
 
 /// Parse a MiniMax M2 event for the current parser mode.
-fn parse_next_minimax_m2_event(
-    input: &mut MinimaxM2Input<'_>,
+fn parse_next_minimax_m2_event<'i>(
     mode: &mut MinimaxM2Mode,
-) -> ModalResult<MinimaxM2Event> {
-    match mode {
+) -> impl Parser<MinimaxM2Input<'i>, MinimaxM2Event, ErrMode<ContextError>> {
+    move |input: &mut MinimaxM2Input<'i>| match mode {
         MinimaxM2Mode::Text => parse_text_event(input),
         MinimaxM2Mode::ToolBlock { invoke_end_scan } => {
-            parse_tool_block_event(input, invoke_end_scan)
+            parse_tool_block_event(invoke_end_scan).parse_next(input)
         }
-        MinimaxM2Mode::Done => ignored_rest_event(input),
+        MinimaxM2Mode::Done => parse_ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode MiniMax M2 event.
 fn parse_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    alt((tool_block_start_event, safe_text_event)).parse_next(input)
+    alt((parse_tool_block_start_event, parse_safe_text_event)).parse_next(input)
 }
 
 /// Parse a MiniMax M2 tool-block start marker.
-fn tool_block_start_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
+fn parse_tool_block_start_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
     literal(TOOL_CALL_START).value(MinimaxM2Event::ToolBlockStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next MiniMax M2 marker.
-fn safe_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| MinimaxM2Event::Text { len })
+fn parse_safe_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
+    safe_text_len(TOOL_CALL_START)
+        .map(|len| MinimaxM2Event::Text { len })
+        .parse_next(input)
 }
 
 /// Parse one event inside a MiniMax M2 tool block.
-fn parse_tool_block_event(
-    input: &mut MinimaxM2Input<'_>,
+fn parse_tool_block_event<'i>(
     invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM2Event> {
-    alt((tool_block_end_event, |input: &mut MinimaxM2Input<'_>| {
-        invoke_event(input, invoke_end_scan)
-    }))
-    .parse_next(input)
+) -> impl Parser<MinimaxM2Input<'i>, MinimaxM2Event, ErrMode<ContextError>> {
+    alt((
+        parse_tool_block_end_event,
+        parse_invoke_event(invoke_end_scan),
+    ))
 }
 
 /// Parse a MiniMax M2 tool-block end marker.
-fn tool_block_end_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
+fn parse_tool_block_end_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
     (ws0, literal(TOOL_CALL_END))
         .value(MinimaxM2Event::ToolBlockEnd)
         .parse_next(input)
 }
 
 /// Parse a complete MiniMax M2 invoke block.
-fn invoke_event(
-    input: &mut MinimaxM2Input<'_>,
+fn parse_invoke_event<'i>(
     invoke_end_scan: &mut MarkerScanState,
-) -> ModalResult<MinimaxM2Event> {
-    let (name, body) = seq!(
+) -> impl Parser<MinimaxM2Input<'i>, MinimaxM2Event, ErrMode<ContextError>> {
+    let mut parser = seq!(
         _: ws0,
         _: literal(INVOKE_START),
         _: (ws1, literal("name=")),
@@ -212,14 +212,16 @@ fn invoke_event(
         _: literal(">"),
         take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
-    )
-    .parse_next(input)?;
-    let raw_params = parse_invoke_params(body)?;
+    );
+    move |input: &mut MinimaxM2Input<'i>| {
+        let (name, body) = parser.parse_next(input)?;
+        let raw_params = parse_invoke_params(body)?;
 
-    Ok(MinimaxM2Event::Invoke {
-        name: name.trim().to_string(),
-        raw_params,
-    })
+        Ok(MinimaxM2Event::Invoke {
+            name: name.trim().to_string(),
+            raw_params,
+        })
+    }
 }
 
 /// Parse all parameter blocks inside a complete MiniMax M2 invoke body.
@@ -264,7 +266,7 @@ fn partial_attr_value<'i>(input: &mut MinimaxM2Input<'i>) -> ModalResult<&'i str
 }
 
 /// Parse ignored rest after the MiniMax M2 tool block ends.
-fn ignored_rest_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
+fn parse_ignored_rest_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
     rest.value(MinimaxM2Event::IgnoredRest).parse_next(input)
 }
 
