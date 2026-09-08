@@ -192,22 +192,22 @@ fn parse_next_minimax_m3_event(
         MinimaxM3Mode::ToolBlock { invoke_end_scan } => {
             parse_tool_block_event(input, invoke_end_scan)
         }
-        MinimaxM3Mode::Done => parse_ignored_rest_event(input),
+        MinimaxM3Mode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode MiniMax M3 event.
 fn parse_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
-    alt((parse_tool_block_start_event, parse_safe_text_event)).parse_next(input)
+    alt((tool_block_start_event, safe_text_event)).parse_next(input)
 }
 
 /// Parse a MiniMax M3 tool-block start marker.
-fn parse_tool_block_start_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn tool_block_start_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     literal(TOOL_CALL_START).value(MinimaxM3Event::ToolBlockStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next MiniMax M3 marker.
-fn parse_safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     safe_text_len(input, TOOL_CALL_START).map(|len| MinimaxM3Event::Text { len })
 }
 
@@ -216,22 +216,21 @@ fn parse_tool_block_event(
     input: &mut MinimaxM3Input<'_>,
     invoke_end_scan: &mut MarkerScanState,
 ) -> ModalResult<MinimaxM3Event> {
-    alt((
-        parse_tool_block_end_event,
-        |input: &mut MinimaxM3Input<'_>| parse_invoke_event(input, invoke_end_scan),
-    ))
+    alt((tool_block_end_event, |input: &mut MinimaxM3Input<'_>| {
+        invoke_event(input, invoke_end_scan)
+    }))
     .parse_next(input)
 }
 
 /// Parse a MiniMax M3 tool-block end marker.
-fn parse_tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     (ws0, literal(TOOL_CALL_END))
         .value(MinimaxM3Event::ToolBlockEnd)
         .parse_next(input)
 }
 
 /// Parse a complete MiniMax M3 invoke block.
-fn parse_invoke_event(
+fn invoke_event(
     input: &mut MinimaxM3Input<'_>,
     invoke_end_scan: &mut MarkerScanState,
 ) -> ModalResult<MinimaxM3Event> {
@@ -376,7 +375,7 @@ fn partial_attr_value<'i>(input: &mut MinimaxM3Input<'i>) -> ModalResult<&'i str
 }
 
 /// Parse ignored rest after the MiniMax M3 tool block ends.
-fn parse_ignored_rest_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn ignored_rest_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
     rest.value(MinimaxM3Event::IgnoredRest).parse_next(input)
 }
 

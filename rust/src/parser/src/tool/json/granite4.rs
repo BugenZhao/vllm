@@ -9,7 +9,7 @@ use winnow::token::{any, literal};
 
 use super::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
-    parse_tool_call_header_event,
+    tool_call_header_event,
 };
 use crate::tool::utils::{
     JsonObjectScanState, JsonStringScanState, decode_json_str, parse_buffered_event, safe_text_len,
@@ -72,7 +72,7 @@ enum Granite4Event {
 ///
 /// Parallel calls are repeated `<tool_call>…</tool_call>` blocks with ordinary
 /// content interleaved between them. This reuses the shared JSON helpers for
-/// everything except one Granite 4 specific step (`parse_args_event`): the `arguments`
+/// everything except one Granite 4 specific step (`args_event`): the `arguments`
 /// value may be a JSON object (kept verbatim) **or** a JSON string whose decoded
 /// contents are the arguments (the `# test granite behavior` case in Python).
 pub struct Granite4ToolParser {
@@ -195,15 +195,15 @@ fn parse_next_granite4_event(
     mode: &mut Granite4Mode,
 ) -> ModalResult<Granite4Event> {
     match mode {
-        Granite4Mode::Text => parse_text_event(input),
-        Granite4Mode::Header => parse_header_event(input),
-        Granite4Mode::Args { args_scan } => parse_args_event(input, args_scan),
-        Granite4Mode::Close => parse_close_event(input),
+        Granite4Mode::Text => text_event(input),
+        Granite4Mode::Header => header_event(input),
+        Granite4Mode::Args { args_scan } => args_event(input, args_scan),
+        Granite4Mode::Close => close_event(input),
     }
 }
 
 /// Parse content text or the start of a `<tool_call>` block. *(reuses `safe_text_len`)*
-fn parse_text_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
+fn text_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     alt((
         seq!(_: literal(TOOL_CALL_START), _: ws0).value(Granite4Event::ToolCallStart),
         |input: &mut JsonToolInput<'_>| {
@@ -213,8 +213,8 @@ fn parse_text_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event>
     .parse_next(input)
 }
 
-/// Parse the `{"name":"X","arguments":` header before the value. *(reuses `parse_tool_call_header_event`)*
-fn parse_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
+/// Parse the `{"name":"X","arguments":` header before the value. *(reuses `tool_call_header_event`)*
+fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Granite4",
         start_marker: "",
@@ -225,11 +225,11 @@ fn parse_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Even
         arguments_key: &["arguments"],
     };
 
-    match parse_tool_call_header_event(input, CONFIG)? {
+    match tool_call_header_event(input, CONFIG)? {
         JsonToolCallEvent::ToolCallHeader { function_name } => {
             Ok(Granite4Event::ToolCallHeader { function_name })
         }
-        _ => unreachable!("parse_tool_call_header_event only emits ToolCallHeader"),
+        _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
     }
 }
 
@@ -241,7 +241,7 @@ fn parse_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Even
 /// (decoded whole via `json_str`). The string form is why we cannot just forward
 /// raw arg bytes like the sibling parsers do: an escaped string only resolves
 /// once seen whole and unescaped.
-fn parse_args_event(
+fn args_event(
     input: &mut JsonToolInput<'_>,
     args_scan: &mut Option<Granite4ArgsScan>,
 ) -> ModalResult<Granite4Event> {
@@ -254,7 +254,7 @@ fn parse_args_event(
                     complete: scan.complete(),
                 })
             }
-            Granite4ArgsScan::String(scan) => parse_string_args_event(input, scan),
+            Granite4ArgsScan::String(scan) => string_args_event(input, scan),
         };
     }
 
@@ -271,7 +271,7 @@ fn parse_args_event(
             let Some(Granite4ArgsScan::String(scan)) = args_scan else {
                 unreachable!("Granite4 string scan state was just initialized")
             };
-            parse_string_args_event(input, scan)
+            string_args_event(input, scan)
         }
         _ => {
             let mut error = ContextError::new();
@@ -281,7 +281,7 @@ fn parse_args_event(
     }
 }
 
-fn parse_string_args_event(
+fn string_args_event(
     input: &mut JsonToolInput<'_>,
     scan: &mut JsonStringScanState,
 ) -> ModalResult<Granite4Event> {
@@ -293,7 +293,7 @@ fn parse_string_args_event(
 }
 
 /// Parse the tool-call object's closing `}` and the `</tool_call>` end marker.
-fn parse_close_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
+fn close_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
     seq!(_: ws0, _: literal("}"), _: ws0, _: literal(TOOL_CALL_END))
         .value(Granite4Event::ToolCallEnd)
         .parse_next(input)
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn granite4_streaming_handles_marker_and_json_whitespace() {
         // Granite spaces the markers (`<tool_call> {…} </tool_call>`) and the JSON
-        // (`"name": …`). Since `parse_args_event` has no leading `ws0`, this guards that
+        // (`"name": …`). Since `args_event` has no leading `ws0`, this guards that
         // the header consumes the whitespace before the arguments value.
         let input = concat!(
             "Here goes the bbox call: \n",

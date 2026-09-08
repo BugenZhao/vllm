@@ -243,21 +243,21 @@ fn parse_next_hy_event(
         HyMode::ToolBlock { tool_call_end_scan } => {
             parse_tool_block_event(input, tool_call_end_scan, markers, dialect)
         }
-        HyMode::Done => parse_ignored_rest_event(input),
+        HyMode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode HY event.
 fn parse_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
     alt((
-        |input: &mut HyInput<'_>| parse_tool_block_start_event(input, markers),
-        |input: &mut HyInput<'_>| parse_safe_text_event(input, markers),
+        |input: &mut HyInput<'_>| tool_block_start_event(input, markers),
+        |input: &mut HyInput<'_>| safe_text_event(input, markers),
     ))
     .parse_next(input)
 }
 
 /// Parse a HY tool-block start marker.
-fn parse_tool_block_start_event(
+fn tool_block_start_event(
     input: &mut HyInput<'_>,
     markers: &HyToolMarkers,
 ) -> ModalResult<HyEvent> {
@@ -267,7 +267,7 @@ fn parse_tool_block_start_event(
 }
 
 /// Parse a safe text run before the next HY marker.
-fn parse_safe_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
+fn safe_text_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
     safe_text_len(input, &markers.tool_calls_start).map(|len| HyEvent::Text { len })
 }
 
@@ -279,26 +279,21 @@ fn parse_tool_block_event(
     dialect: HyDialect,
 ) -> ModalResult<HyEvent> {
     alt((
-        |input: &mut HyInput<'_>| parse_tool_block_end_event(input, markers),
-        |input: &mut HyInput<'_>| {
-            parse_tool_call_event(input, tool_call_end_scan, markers, dialect)
-        },
+        |input: &mut HyInput<'_>| tool_block_end_event(input, markers),
+        |input: &mut HyInput<'_>| tool_call_event(input, tool_call_end_scan, markers, dialect),
     ))
     .parse_next(input)
 }
 
 /// Parse a HY tool-block end marker.
-fn parse_tool_block_end_event(
-    input: &mut HyInput<'_>,
-    markers: &HyToolMarkers,
-) -> ModalResult<HyEvent> {
+fn tool_block_end_event(input: &mut HyInput<'_>, markers: &HyToolMarkers) -> ModalResult<HyEvent> {
     (ws0, literal(markers.tool_calls_end.as_str()))
         .value(HyEvent::ToolBlockEnd)
         .parse_next(input)
 }
 
 /// Parse a complete HY tool-call block.
-fn parse_tool_call_event(
+fn tool_call_event(
     input: &mut HyInput<'_>,
     tool_call_end_scan: &mut MarkerScanState,
     markers: &HyToolMarkers,
@@ -377,7 +372,7 @@ fn parameter<'i>(
 }
 
 /// Parse ignored rest after the HY tool block ends.
-fn parse_ignored_rest_event(input: &mut HyInput<'_>) -> ModalResult<HyEvent> {
+fn ignored_rest_event(input: &mut HyInput<'_>) -> ModalResult<HyEvent> {
     rest.value(HyEvent::IgnoredRest).parse_next(input)
 }
 

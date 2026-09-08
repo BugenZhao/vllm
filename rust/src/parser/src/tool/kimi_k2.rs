@@ -197,20 +197,20 @@ fn parse_next_kimi_k2_event(
     match mode {
         KimiK2Mode::Text => parse_text_event(input),
         KimiK2Mode::ToolBlock => parse_tool_block_event(input),
-        KimiK2Mode::Header => parse_tool_call_header_event(input),
+        KimiK2Mode::Header => tool_call_header_event(input),
         KimiK2Mode::Arguments { json_scan } => parse_arguments_event(input, json_scan),
-        KimiK2Mode::Done => parse_ignored_rest_event(input),
+        KimiK2Mode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode Kimi K2 event.
 fn parse_text_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
-    alt((parse_tool_calls_start_event, parse_safe_text_event)).parse_next(input)
+    alt((tool_calls_start_event, safe_text_event)).parse_next(input)
 }
 
 /// Parse one event inside the Kimi K2 tool-calls section.
 fn parse_tool_block_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
-    alt((parse_tool_calls_end_event, parse_tool_call_start_event)).parse_next(input)
+    alt((tool_calls_end_event, tool_call_start_event)).parse_next(input)
 }
 
 /// Parse one event inside a Kimi K2 tool-call arguments payload.
@@ -219,38 +219,38 @@ fn parse_arguments_event(
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<KimiK2Event> {
     if json_scan.complete() {
-        parse_tool_call_end_event(input)
+        tool_call_end_event(input)
     } else {
-        parse_argument_delta_event(input, json_scan)
+        argument_delta_event(input, json_scan)
     }
 }
 
 /// Parse a Kimi K2 tool-calls section start marker.
-fn parse_tool_calls_start_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn tool_calls_start_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     literal(TOOL_CALLS_START).value(KimiK2Event::ToolCallsStart).parse_next(input)
 }
 
 /// Parse a Kimi K2 tool-calls section end marker.
-fn parse_tool_calls_end_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn tool_calls_end_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     (ws0, literal(TOOL_CALLS_END))
         .value(KimiK2Event::ToolCallsEnd)
         .parse_next(input)
 }
 
 /// Parse a Kimi K2 tool-call start marker.
-fn parse_tool_call_start_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn tool_call_start_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     (ws0, literal(TOOL_CALL_START))
         .value(KimiK2Event::ToolCallStart)
         .parse_next(input)
 }
 
 /// Parse a Kimi K2 tool-call end marker.
-fn parse_tool_call_end_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn tool_call_end_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     literal(TOOL_CALL_END).value(KimiK2Event::ToolCallEnd).parse_next(input)
 }
 
 /// Parse a Kimi K2 tool-call header before the argument marker.
-fn parse_tool_call_header_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn tool_call_header_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     let (raw_header, _) = (
         take_until(1.., TOOL_CALL_ARGUMENT_START),
         literal(TOOL_CALL_ARGUMENT_START),
@@ -269,7 +269,7 @@ fn parse_tool_call_header_event(input: &mut KimiK2Input<'_>) -> ModalResult<Kimi
 }
 
 /// Parse a Kimi K2 raw JSON arguments delta.
-fn parse_argument_delta_event(
+fn argument_delta_event(
     input: &mut KimiK2Input<'_>,
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<KimiK2Event> {
@@ -277,12 +277,12 @@ fn parse_argument_delta_event(
 }
 
 /// Parse a safe text run before the next Kimi K2 tool-calls section.
-fn parse_safe_text_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn safe_text_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     safe_text_len(input, TOOL_CALLS_START).map(|len| KimiK2Event::Text { len })
 }
 
 /// Parse ignored rest after the Kimi K2 tool-calls section ends.
-fn parse_ignored_rest_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
+fn ignored_rest_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
     rest.value(KimiK2Event::IgnoredRest).parse_next(input)
 }
 

@@ -186,7 +186,7 @@ fn parse_next_json_tool_call_event(
 ) -> ModalResult<JsonToolCallEvent> {
     match mode {
         JsonToolCallMode::Text => parse_text_event(input, config),
-        JsonToolCallMode::Header => parse_tool_call_header_event(input, config),
+        JsonToolCallMode::Header => tool_call_header_event(input, config),
         JsonToolCallMode::Arguments { json_scan } => {
             parse_arguments_event(input, json_scan, config)
         }
@@ -199,14 +199,14 @@ fn parse_text_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     alt((
-        |input: &mut JsonToolInput<'_>| parse_tool_call_start_event(input, config),
-        |input: &mut JsonToolInput<'_>| parse_safe_text_event(input, config),
+        |input: &mut JsonToolInput<'_>| tool_call_start_event(input, config),
+        |input: &mut JsonToolInput<'_>| safe_text_event(input, config),
     ))
     .parse_next(input)
 }
 
 /// Parse a marker-wrapped JSON tool-call start marker.
-fn parse_tool_call_start_event(
+fn tool_call_start_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -220,7 +220,7 @@ fn parse_tool_call_start_event(
 
 /// Parse a marker-wrapped JSON tool-call header before the raw arguments
 /// payload.
-pub(crate) fn parse_tool_call_header_event(
+pub(crate) fn tool_call_header_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -298,14 +298,14 @@ fn parse_arguments_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     if json_scan.complete() {
-        parse_tool_call_close_event(input, config)
+        tool_call_close_event(input, config)
     } else {
-        parse_argument_delta_event(input, json_scan)
+        argument_delta_event(input, json_scan)
     }
 }
 
 /// Parse a raw JSON arguments delta.
-fn parse_argument_delta_event(
+fn argument_delta_event(
     input: &mut JsonToolInput<'_>,
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -313,7 +313,7 @@ fn parse_argument_delta_event(
 }
 
 /// Parse a marker-wrapped JSON tool-call close marker.
-fn parse_tool_call_close_event(
+fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -321,16 +321,16 @@ fn parse_tool_call_close_event(
 
     match config.delimiter {
         Some(delimiter) => alt((
-            |input: &mut JsonToolInput<'_>| parse_tool_call_end_event(input, config),
-            |input: &mut JsonToolInput<'_>| parse_tool_call_delimiter_event(input, delimiter),
+            |input: &mut JsonToolInput<'_>| tool_call_end_event(input, config),
+            |input: &mut JsonToolInput<'_>| tool_call_delimiter_event(input, delimiter),
         ))
         .parse_next(input),
-        None => parse_tool_call_end_event(input, config),
+        None => tool_call_end_event(input, config),
     }
 }
 
 /// Parse a marker-wrapped JSON tool-call end marker.
-fn parse_tool_call_end_event(
+fn tool_call_end_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -343,7 +343,7 @@ fn parse_tool_call_end_event(
 }
 
 /// Parse a delimiter between JSON tool calls inside one marker block.
-fn parse_tool_call_delimiter_event(
+fn tool_call_delimiter_event(
     input: &mut JsonToolInput<'_>,
     delimiter: &'static str,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -367,7 +367,7 @@ fn marker_whitespace<'i>(
 }
 
 /// Parse a safe text run before the next marker-wrapped JSON tool call.
-fn parse_safe_text_event(
+fn safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {

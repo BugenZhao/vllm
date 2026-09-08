@@ -9,7 +9,7 @@ use winnow::token::literal;
 
 use super::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
-    parse_argument_delta_event, parse_tool_call_header_event,
+    argument_delta_event, tool_call_header_event,
 };
 use crate::tool::utils::{JsonObjectScanState, parse_buffered_event};
 use crate::tool::{
@@ -197,16 +197,14 @@ fn parse_next_llama_json_event(
         LlamaJsonMode::Start | LlamaJsonMode::Passthrough => {
             unreachable!("Llama JSON parser driver must commit before parsing events")
         }
-        LlamaJsonMode::Header => parse_llama_tool_call_header_event(input),
+        LlamaJsonMode::Header => llama_tool_call_header_event(input),
         LlamaJsonMode::Arguments { json_scan } => parse_llama_arguments_event(input, json_scan),
-        LlamaJsonMode::AfterCall => parse_after_call_event(input),
+        LlamaJsonMode::AfterCall => after_call_event(input),
     }
 }
 
 /// Parse a Llama JSON tool-call header.
-fn parse_llama_tool_call_header_event(
-    input: &mut JsonToolInput<'_>,
-) -> ModalResult<LlamaJsonEvent> {
+fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Llama JSON",
         start_marker: "",
@@ -217,11 +215,11 @@ fn parse_llama_tool_call_header_event(
         arguments_key: &["parameters"],
     };
 
-    match parse_tool_call_header_event(input, CONFIG)? {
+    match tool_call_header_event(input, CONFIG)? {
         JsonToolCallEvent::ToolCallHeader { function_name } => {
             Ok(LlamaJsonEvent::ToolCallHeader { function_name })
         }
-        _ => unreachable!("parse_tool_call_header_event only emits ToolCallHeader"),
+        _ => unreachable!("tool_call_header_event only emits ToolCallHeader"),
     }
 }
 
@@ -231,24 +229,24 @@ fn parse_llama_arguments_event(
     json_scan: &mut JsonObjectScanState,
 ) -> ModalResult<LlamaJsonEvent> {
     if json_scan.complete() {
-        parse_tool_call_close_event(input)
+        tool_call_close_event(input)
     } else {
-        match parse_argument_delta_event(input, json_scan)? {
+        match argument_delta_event(input, json_scan)? {
             JsonToolCallEvent::Arguments { len } => Ok(LlamaJsonEvent::Arguments { len }),
-            _ => unreachable!("parse_argument_delta_event only emits Arguments"),
+            _ => unreachable!("argument_delta_event only emits Arguments"),
         }
     }
 }
 
 /// Parse the outer closing brace for one Llama JSON tool call.
-fn parse_tool_call_close_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
+fn tool_call_close_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
     seq!(_: ws0, _: literal("}"))
         .value(LlamaJsonEvent::ToolCallClose)
         .parse_next(input)
 }
 
 /// Parse a semicolon separator after one Llama JSON tool call.
-fn parse_after_call_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
+fn after_call_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
     seq!(
         _: ws0,
         _: literal(";"),

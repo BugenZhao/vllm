@@ -181,15 +181,15 @@ fn parse_next_dsml_event(
         DsmlMode::ToolBlock { invoke_end_scan } => {
             parse_tool_block_event(input, tokens, invoke_end_scan)
         }
-        DsmlMode::Done => parse_ignored_rest_event(input),
+        DsmlMode::Done => ignored_rest_event(input),
     }
 }
 
 /// Parse a text-mode DSML event.
 fn parse_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     alt((
-        |input: &mut DsmlInput<'_>| parse_tool_calls_start_event(input, tokens),
-        |input: &mut DsmlInput<'_>| parse_safe_text_event(input, tokens),
+        |input: &mut DsmlInput<'_>| tool_calls_start_event(input, tokens),
+        |input: &mut DsmlInput<'_>| safe_text_event(input, tokens),
     ))
     .parse_next(input)
 }
@@ -202,42 +202,36 @@ fn parse_tool_block_event(
 ) -> ModalResult<DsmlEvent> {
     ws0.void().parse_next(input)?;
     alt((
-        |input: &mut DsmlInput<'_>| parse_invoke_event(input, invoke_end_scan),
-        |input: &mut DsmlInput<'_>| parse_tool_calls_end_event(input, tokens),
+        |input: &mut DsmlInput<'_>| invoke_event(input, invoke_end_scan),
+        |input: &mut DsmlInput<'_>| tool_calls_end_event(input, tokens),
     ))
     .parse_next(input)
 }
 
 /// Parse a DSML function-calls start marker.
-fn parse_tool_calls_start_event(
-    input: &mut DsmlInput<'_>,
-    tokens: DsmlTokens,
-) -> ModalResult<DsmlEvent> {
+fn tool_calls_start_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     literal(tokens.tool_calls_start)
         .value(DsmlEvent::ToolCallsStart)
         .parse_next(input)
 }
 
 /// Parse a DSML function-calls end marker.
-fn parse_tool_calls_end_event(
-    input: &mut DsmlInput<'_>,
-    tokens: DsmlTokens,
-) -> ModalResult<DsmlEvent> {
+fn tool_calls_end_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     literal(tokens.tool_calls_end).value(DsmlEvent::ToolCallsEnd).parse_next(input)
 }
 
 /// Parse a trailing rest after DSML function calls.
-fn parse_ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
     rest.value(DsmlEvent::IgnoredRest).parse_next(input)
 }
 
 /// Parse a safe text run before the next DSML marker.
-fn parse_safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
     safe_text_len(input, tokens.tool_calls_start).map(|len| DsmlEvent::Text { len })
 }
 
 /// Parse a DSML invoke block.
-fn parse_invoke_event(
+fn invoke_event(
     input: &mut DsmlInput<'_>,
     invoke_end_scan: &mut MarkerScanState,
 ) -> ModalResult<DsmlEvent> {
@@ -261,11 +255,11 @@ fn parse_invoke_event(
 /// Parse a DSML invoke body.
 fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<DsmlParameter>> {
     let mut input = invoke_body;
-    delimited(ws0, repeat(0.., terminated(parameter, ws0)), eof).parse_next(&mut input)
+    delimited(ws0, repeat(0.., terminated(parse_parameter, ws0)), eof).parse_next(&mut input)
 }
 
 /// Parse a DSML parameter block.
-fn parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
+fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
     seq! {DsmlParameter {
         _: literal(PARAMETER_START),
         _: ws1,
