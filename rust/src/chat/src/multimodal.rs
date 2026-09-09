@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
-use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
+use vllm_engine_core_client::protocol::multimodal::{
+    InlineMmFeatures, MmFeatureSpec, MmFeatures, MmKwargsItem,
+};
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
@@ -39,11 +41,13 @@ use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 mod audio;
 mod expand;
 mod image;
+mod input;
 mod item;
 mod tensor;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
+pub use self::input::MultimodalInput;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -654,11 +658,16 @@ impl MultimodalModelInfo {
     ///
     /// Modalities without a configured count are unlimited.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
+        self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
+    }
+
+    fn validate_modality_limits(
+        &self,
+        modalities: impl IntoIterator<Item = MmModality>,
+    ) -> Result<()> {
         let mut counts: HashMap<MmModality, usize> = HashMap::new();
-        for part in media_parts {
-            if let Some(modality) = media_part_limit_modality(part) {
-                *counts.entry(modality).or_default() += 1;
-            }
+        for modality in modalities {
+            *counts.entry(modality).or_default() += 1;
         }
 
         for (modality, count) in counts {
@@ -675,6 +684,32 @@ impl MultimodalModelInfo {
         }
 
         Ok(())
+    }
+
+    /// Validate preprocessed features against this model's supported modalities,
+    /// item-count limits, and the final prompt length.
+    ///
+    /// Storage and batching metadata are validated by [`InlineMmFeatures`].
+    /// `prompt_len` must include all expanded multimodal placeholders.
+    pub(crate) fn prepare_preprocessed(
+        &self,
+        features: InlineMmFeatures,
+        prompt_len: usize,
+    ) -> Result<MmFeatures> {
+        for feature in features.as_slice() {
+            let supported = match feature.modality {
+                MmModality::Image => self.image.is_some(),
+                MmModality::Video => self.video.is_some(),
+                MmModality::Audio => self.audio.is_some(),
+            };
+            if !supported {
+                return Err(Error::UnsupportedModality {
+                    modality: feature.modality.as_str().to_owned(),
+                });
+            }
+        }
+        self.validate_modality_limits(features.as_slice().iter().map(|feature| feature.modality))?;
+        Ok(features.into_features(prompt_len)?)
     }
 
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
