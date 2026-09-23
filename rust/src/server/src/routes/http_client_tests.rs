@@ -15,11 +15,13 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
+use async_openai::types::responses::{CreateResponse, OutputItem, ResponseStreamEvent, Status};
 use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
-    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
+    DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
+    RenderedPrompt,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -144,7 +146,12 @@ struct FakeChatBackend;
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(TestTokenizer::new())
+        // Reasoning delimiters are required by reasoning parsers.
+        Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<think>", 0xF001)
+                .with_regular_token("</think>", 0xF002),
+        )
     }
 
     fn model_id(&self) -> &str {
@@ -204,6 +211,19 @@ async fn http_test_server(
     tokio::task::JoinHandle<()>,
     MockEngineTask,
 ) {
+    http_test_server_with_chat(engine_id, output_specs, |chat| chat).await
+}
+
+/// Like [`http_test_server`], with a hook to configure the chat facade.
+async fn http_test_server_with_chat(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    configure_chat: impl FnOnce(ChatLlm) -> ChatLlm,
+) -> (
+    Client<OpenAIConfig>,
+    tokio::task::JoinHandle<()>,
+    MockEngineTask,
+) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -236,10 +256,10 @@ async fn http_test_server(
     .await
     .expect("connect client");
 
-    let chat = ChatLlm::from_shared_backend(
+    let chat = configure_chat(ChatLlm::from_shared_backend(
         test_llm(client),
         Arc::new(FakeChatBackend) as Arc<dyn ChatTextBackend>,
-    );
+    ));
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     let app = build_router(state);
 
@@ -352,6 +372,101 @@ async fn streaming_chat_via_http_client() {
     assert!(saw_role, "expected an assistant role chunk");
     assert!(saw_finish_reason, "expected a terminal finish reason");
     assert_eq!(full_text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+/// Engine outputs generating `text` followed by one undecoded EOS token.
+fn text_then_eos(text: &str) -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+    vec![
+        (text.bytes().map(u32::from).collect(), None),
+        (vec![0], Some(EngineCoreFinishReason::Stop)),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_streaming_responses_via_http_client() {
+    let (client, server_task, engine_task) =
+        http_test_server(b"engine-http-responses", text_then_eos("hi")).await;
+
+    let request: CreateResponse = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "instructions": "Be brief.",
+        "input": [{"role": "user", "content": "hello"}],
+        "max_output_tokens": 10,
+    }))
+    .expect("build request");
+    let response = client.responses().create(request).await.expect("create response");
+
+    assert_eq!(response.status, Status::Completed);
+    assert_eq!(response.model, "test-model");
+    assert_eq!(response.output_text().as_deref(), Some("hi"));
+    let usage = response.usage.expect("usage");
+    assert_eq!(usage.output_tokens, 3);
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_responses_via_http_client() {
+    let patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n";
+    let call = serde_json::json!({"name": "apply_patch", "arguments": {"input": patch}});
+    let (client, server_task, engine_task) = http_test_server_with_chat(
+        b"engine-http-responses-stream",
+        text_then_eos(&format!(
+            "<think>Need a patch.</think><tool_call>\n{call}\n</tool_call>"
+        )),
+        |chat| {
+            chat.with_reasoning_parser(ParserSelection::Explicit("qwen3".to_string()))
+                .with_tool_call_parser(ParserSelection::Explicit("hermes".to_string()))
+        },
+    )
+    .await;
+
+    let request: CreateResponse = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "input": "Add a.txt.",
+        "tools": [
+            {"type": "custom", "name": "apply_patch", "description": "Edit files.",
+             "format": {"type": "grammar", "syntax": "lark", "definition": "start: \"x\""}},
+        ],
+        "stream": true,
+    }))
+    .expect("build request");
+    let mut stream = client.responses().create_stream(request).await.expect("create stream");
+
+    let mut reasoning = String::new();
+    let mut custom_input = String::new();
+    let mut done_items = Vec::new();
+    let mut completed = None;
+    while let Some(event) = stream.next().await {
+        match event.expect("stream event") {
+            ResponseStreamEvent::ResponseReasoningTextDelta(event) => {
+                reasoning.push_str(&event.delta)
+            }
+            ResponseStreamEvent::ResponseCustomToolCallInputDelta(event) => {
+                custom_input.push_str(&event.delta)
+            }
+            ResponseStreamEvent::ResponseOutputItemDone(event) => done_items.push(event.item),
+            ResponseStreamEvent::ResponseCompleted(event) => completed = Some(event.response),
+            _ => {}
+        }
+    }
+    let response = completed.expect("response.completed");
+
+    assert_eq!(reasoning, "Need a patch.");
+    assert_eq!(custom_input, patch);
+    assert_eq!(done_items, response.output);
+    let [OutputItem::Reasoning(_), OutputItem::CustomToolCall(call)] = response.output.as_slice()
+    else {
+        panic!("unexpected output items: {:?}", response.output);
+    };
+    assert_eq!(call.name, "apply_patch");
+    assert_eq!(call.input, patch);
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
