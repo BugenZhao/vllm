@@ -44,7 +44,6 @@ trait_set! {
 }
 
 /// Text request preparation shared by inference and render-only frontends.
-#[derive(Clone)]
 pub struct TextRequestProcessor {
     /// Tokenizer/model metadata backend responsible for prompt encode/decode
     /// and sampling hints.
@@ -54,7 +53,6 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
-    return_token_offsets: bool,
 }
 
 impl TextRequestProcessor {
@@ -64,7 +62,6 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
-            return_token_offsets: false,
         }
     }
 
@@ -73,12 +70,6 @@ impl TextRequestProcessor {
         if let Some(max_logprobs) = max_logprobs {
             self.max_logprobs = max_logprobs;
         }
-        self
-    }
-
-    /// Collect source character offsets when the tokenizer supports them.
-    pub fn with_token_offsets(mut self, enabled: bool) -> Self {
-        self.return_token_offsets = enabled;
         self
     }
 
@@ -98,7 +89,7 @@ impl TextRequestProcessor {
             mut token_ids,
             mut token_offsets,
         } = match take(&mut request.prompt) {
-            Prompt::Text(text) if self.return_token_offsets && request.mm_features.is_none() => {
+            Prompt::Text(text) if request.return_token_offsets && request.mm_features.is_none() => {
                 tokenizer.encode_with_offsets(&text, request.add_special_tokens)?
             }
             Prompt::Text(text) => EncodedPrompt {
@@ -331,8 +322,7 @@ mod tests {
 
     #[test]
     fn token_offsets_survive_truncation_and_repeated_preparation() {
-        let processor =
-            TextRequestProcessor::new(Arc::new(TestTextBackend), 5).with_token_offsets(true);
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 5);
         for (side, expected_ids, expected_offsets) in [
             (
                 TruncationSide::Left,
