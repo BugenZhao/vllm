@@ -18,6 +18,8 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     // Download models and tokenizers from ModelScope instead of the
     // Hugging Face Hub.
     ("VLLM_USE_MODELSCOPE", is_truthy),
+    // Accept any requested model name and serve it with the base model.
+    ("VLLM_SKIP_MODEL_NAME_VALIDATION", is_truthy),
 ];
 
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
@@ -66,11 +68,15 @@ mod tests {
     fn default_values_pass() {
         check_with(&[]).unwrap();
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
+        check_with(&[("VLLM_SKIP_MODEL_NAME_VALIDATION", "false")]).unwrap();
     }
 
     #[test]
     fn non_default_values_fail_startup() {
-        let cases = [("VLLM_USE_MODELSCOPE", "True")];
+        let cases = [
+            ("VLLM_USE_MODELSCOPE", "True"),
+            ("VLLM_SKIP_MODEL_NAME_VALIDATION", "1"),
+        ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
             assert!(error.contains(&format!("- {name}\n")), "{name}: {error}");
