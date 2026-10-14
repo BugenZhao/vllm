@@ -26,6 +26,11 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// Stop strings. Not supported yet: the route does not detokenize.
+    pub stop: Option<Value>,
+    /// Whether to include the matched stop string in the output. Only
+    /// meaningful with `stop`.
+    pub include_stop_str_in_output: Option<bool>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
