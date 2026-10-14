@@ -27,6 +27,14 @@ pub(crate) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
+    // TODO: support `output_mode: "text"`.
+    if request.output_mode.as_deref().is_some_and(|mode| mode != "tokens") {
+        bail_invalid_request!(
+            param = "output_mode",
+            "Only output_mode=\"tokens\" is supported."
+        );
+    }
+
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -118,6 +126,27 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_text_output_mode() {
+        for (output_mode, accepted) in [
+            (json!(null), true),
+            (json!("tokens"), true),
+            (json!("text"), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {},
+                "output_mode": output_mode,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{output_mode}"
+            );
+        }
     }
 
     #[test]

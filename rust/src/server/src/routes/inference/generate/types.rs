@@ -50,6 +50,9 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Response level: `tokens` (default) returns token IDs only, `text` also
+    /// returns detokenized text. Only `tokens` is supported.
+    pub output_mode: Option<String>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
