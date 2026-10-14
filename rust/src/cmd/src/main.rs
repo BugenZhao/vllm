@@ -113,14 +113,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// Fail startup if an environment variable the Rust frontend does not honor
+/// is set to a non-default value.
+fn check_unsupported_envs() -> Result<()> {
+    cli::unsupported_env::check(|name| env::var(name).ok()).map_err(|message| anyhow!(message))
+}
+
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
+        Command::Frontend(args) => {
+            check_unsupported_envs()?;
+            vllm_server::serve(args.into_config(), shutdown_signal()).await
+        }
         Command::Bench(BenchCommand::Serve(bench_args)) => {
             vllm_bench::prepare_process();
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            if !args.headless {
+                check_unsupported_envs()?;
+            }
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {
