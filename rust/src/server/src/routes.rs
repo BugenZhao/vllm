@@ -6,6 +6,7 @@ mod cache;
 mod collective_rpc;
 mod health;
 mod inference;
+mod invocations;
 mod kv_event_sources;
 mod load;
 mod lora;
@@ -161,8 +162,8 @@ fn build_router_with_options(
         // TODO: implement the decisions APIs.
         .route("/v1/decisions", post(not_supported))
         .route("/v1/systemone", post(not_supported))
-        // TODO: implement SageMaker invocations.
-        .route("/invocations", post(not_supported))
+        // SageMaker invocations, dispatched to chat completions or completions.
+        .route("/invocations", post(invocations::invocations))
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
         .route("/is_scaling_elastic_ep", post(not_supported))

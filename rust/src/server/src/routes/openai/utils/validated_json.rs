@@ -7,6 +7,8 @@
 use axum::Json;
 use axum::extract::{FromRequest, Request};
 use serde::de::DeserializeOwned;
+use serde_json::Value;
+use thiserror_ext::AsReport as _;
 use validator::Validate;
 
 use super::types::Normalizable;
@@ -29,8 +31,24 @@ where
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(mut data) = Json::<T>::from_request(req, state).await?;
+        let Json(data) = Json::<T>::from_request(req, state).await?;
+        Self::normalize_and_validate(data)
+    }
+}
 
+impl<T> ValidatedJson<T>
+where
+    T: DeserializeOwned + Validate + Normalizable,
+{
+    /// Deserialize, normalize, and validate an already parsed JSON body, for
+    /// handlers that pick the request type at runtime.
+    pub fn from_value(value: Value) -> Result<Self, ApiError> {
+        let data = serde_json::from_value(value)
+            .map_err(|error| ApiError::json_parse_error(error.to_report_string()))?;
+        Self::normalize_and_validate(data)
+    }
+
+    fn normalize_and_validate(mut data: T) -> Result<Self, ApiError> {
         data.normalize();
 
         data.validate()

@@ -783,6 +783,89 @@ async fn ping_route_reports_health_for_get_and_post() {
     }
 }
 
+async fn call_invocations(
+    app: &axum::Router,
+    body: serde_json::Value,
+    adapter: Option<&str>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/invocations")
+        .header("content-type", "application/json");
+    if let Some(adapter) = adapter {
+        request = request.header("X-Amzn-SageMaker-Adapter-Identifier", adapter);
+    }
+    app.clone()
+        .call(request.body(Body::from(body.to_string())).expect("build request"))
+        .await
+        .expect("call app")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn invocations_dispatch_chat_and_completion_bodies() {
+    for (body, object) in [
+        (
+            json!({"messages": [{"role": "user", "content": "hello"}], "stream": true}),
+            "chat.completion.chunk",
+        ),
+        (
+            json!({"prompt": "hello", "stream": true}),
+            "text_completion",
+        ),
+    ] {
+        let (app, engine_task) = test_app_with_engine_handle().await;
+        let response = call_invocations(&app, body, None).await;
+        assert_eq!(response.status(), StatusCode::OK, "{object}");
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert_shared_openai_stream_envelope(
+            &sse_json_payloads(&text),
+            object,
+            "Qwen/Qwen1.5-0.5B-Chat",
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn invocations_reject_bodies_matching_no_request_type() {
+    let app = test_app().await;
+    let response = call_invocations(&app, json!({"input": "hello"}), None).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(
+        error["error"]["message"],
+        "Cannot find suitable handler for request. Expected one of: \
+         ['ChatCompletionRequest', 'CompletionRequest']"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn invocations_take_the_model_from_the_sagemaker_adapter_header() {
+    let app = test_app().await;
+    let response = call_invocations(
+        &app,
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+        Some("missing-adapter"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(error["error"]["param"], "model");
+    assert!(
+        error["error"]["message"].as_str().expect("message").contains("missing-adapter"),
+        "{error}"
+    );
+}
+
 /// Assert that `method uri` hits the 501 placeholder for the Python route
 /// `route`.
 async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
@@ -830,7 +913,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
-        ("POST", "/invocations"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
     ] {
