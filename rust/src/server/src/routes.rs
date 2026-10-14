@@ -28,7 +28,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::MatchedPath;
 use axum::http::{Method, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -192,7 +192,10 @@ fn build_router_with_options(
     if runtime_lora_updating_enabled {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
-            .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
+            .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter))
+            // TODO: implement the SageMaker LoRA adapter routes.
+            .route("/adapters", post(not_supported))
+            .route("/adapters/{adapter_name}", delete(not_supported));
     }
 
     if dev_mode_enabled {

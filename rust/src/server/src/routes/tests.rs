@@ -982,6 +982,46 @@ async fn tokenizer_info_route_follows_api_server_options() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sagemaker_adapter_routes_follow_runtime_lora_updating() {
+    for runtime_lora_updating_enabled in [false, true] {
+        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+            b"engine-sagemaker-adapters",
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router_with_dev_mode_and_lora(
+            Arc::new(AppState::new(vec!["model".to_string()], chat)),
+            false,
+            runtime_lora_updating_enabled,
+        );
+
+        for (method, uri, route) in [
+            ("POST", "/adapters", "/adapters"),
+            ("DELETE", "/adapters/my-adapter", "/adapters/{adapter_name}"),
+        ] {
+            if runtime_lora_updating_enabled {
+                assert_route_not_supported(&app, method, uri, route).await;
+            } else {
+                let response = app
+                    .clone()
+                    .call(
+                        Request::builder()
+                            .method(method)
+                            .uri(uri)
+                            .body(Body::empty())
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            }
+        }
+    }
+}
+
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
