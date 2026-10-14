@@ -131,6 +131,8 @@ fn build_router_with_options(
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
+        // SageMaker health check.
+        .route("/ping", get(health::health).post(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))

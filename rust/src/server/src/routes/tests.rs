@@ -761,6 +761,28 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn ping_route_reports_health_for_get_and_post() {
+    let app = test_app().await;
+
+    for method in ["GET", "POST"] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri("/ping")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{method} /ping");
+    }
+}
+
 /// Assert that `method uri` hits the 501 placeholder for the Python route
 /// `route`.
 async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
