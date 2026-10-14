@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::types::{ResponseToolChoice, ResponsesRequest};
+use super::types::ResponsesRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_requested_model;
 
 /// Enforce the compatibility contract of the Rust Responses API frontend.
 ///
@@ -16,7 +17,12 @@ use crate::error::{ApiError, bail_invalid_request};
 ///   rejected with a 404 like an unknown response ID would be.
 ///
 /// Errors use the shared frontend envelope with numeric HTTP codes.
-pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), ApiError> {
+pub(super) fn validate_request_compat(
+    request: &ResponsesRequest,
+    served_model_names: &[String],
+) -> Result<(), ApiError> {
+    validate_requested_model(request.model.as_deref(), served_model_names)?;
+
     if request.background.unwrap_or(false) {
         bail_invalid_request!(
             param = "background",
@@ -46,25 +52,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
     }
 
-    if let Some(ResponseToolChoice::Mode(mode)) = &request.tool_choice
-        && !matches!(mode.as_str(), "none" | "auto" | "required")
-    {
-        bail_invalid_request!(
-            param = "tool_choice",
-            "tool_choice string form must be one of 'none', 'auto', or 'required'; \
-             got '{mode}'."
-        );
-    }
-
-    if let Some(truncation) = &request.truncation
-        && !matches!(truncation.as_str(), "auto" | "disabled")
-    {
-        bail_invalid_request!(
-            param = "truncation",
-            "truncation must be 'auto' or 'disabled'; got '{truncation}'."
-        );
-    }
-
     if request.max_tool_calls.is_some() {
         bail_invalid_request!(
             param = "max_tool_calls",
@@ -82,12 +69,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
             param = "metadata",
             "metadata supports at most 16 pairs, with keys up to 64 characters and values up to 512 characters"
         );
-    }
-
-    if let Some(tier) = request.service_tier.as_deref()
-        && !matches!(tier, "auto" | "default" | "flex" | "scale" | "priority")
-    {
-        bail_invalid_request!(param = "service_tier", "unknown service_tier '{tier}'");
     }
 
     if let Some(include) = &request.include
@@ -108,25 +89,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
-    if let Some(summary) =
-        request.reasoning.as_ref().and_then(|reasoning| reasoning.summary.as_deref())
-        && !matches!(summary, "auto" | "concise" | "detailed")
-    {
-        bail_invalid_request!(
-            param = "reasoning.summary",
-            "unknown reasoning.summary '{summary}'"
-        );
-    }
-
-    if let Some(verbosity) = request.text.as_ref().and_then(|text| text.verbosity.as_deref())
-        && !matches!(verbosity, "low" | "medium" | "high")
-    {
-        bail_invalid_request!(
-            param = "text.verbosity",
-            "unknown text.verbosity '{verbosity}'"
-        );
-    }
-
     Ok(())
 }
 
@@ -137,7 +99,6 @@ mod tests {
     use super::*;
     fn base_request() -> ResponsesRequest {
         serde_json::from_value(json!({
-            "model": "test-model",
             "input": "hello",
         }))
         .unwrap()
@@ -147,7 +108,7 @@ mod tests {
     fn background_true_is_rejected() {
         let mut request = base_request();
         request.background = Some(true);
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request_compat(&request, &[]).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
     }
 
@@ -155,47 +116,23 @@ mod tests {
     fn previous_response_id_is_rejected_with_not_found() {
         let mut request = base_request();
         request.previous_response_id = Some("resp_missing".to_string());
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request_compat(&request, &[]).unwrap_err();
         assert!(matches!(error, ApiError::ResponseNotFound { .. }));
         assert_eq!(error.status_code(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[test]
     fn store_true_without_background_is_accepted() {
-        let mut request = base_request();
-        request.store = Some(true);
-        assert!(validate_request_compat(&request).is_ok());
+        let request = serde_json::from_value(json!({"input": "hello", "store": true})).unwrap();
+        assert!(validate_request_compat(&request, &[]).is_ok());
     }
 
     #[test]
     fn prompt_template_is_rejected() {
         let mut request = base_request();
         request.prompt = Some(json!({"id": "ptmpl"}));
-        let error = validate_request_compat(&request).unwrap_err();
+        let error = validate_request_compat(&request, &[]).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn unknown_tool_choice_mode_is_rejected() {
-        let mut request = base_request();
-        request.tool_choice = Some(ResponseToolChoice::Mode("sometimes".to_string()));
-        let error = validate_request_compat(&request).unwrap_err();
-        assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn unknown_truncation_value_is_rejected() {
-        let mut request = base_request();
-        request.truncation = Some("maybe".to_string());
-        let error = validate_request_compat(&request).unwrap_err();
-        assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn auto_truncation_is_accepted() {
-        let mut request = base_request();
-        request.truncation = Some("auto".to_string());
-        assert!(validate_request_compat(&request).is_ok());
     }
 
     #[test]
@@ -203,14 +140,14 @@ mod tests {
         let mut request = base_request();
         request.previous_input_messages = Some(vec![json!({"role": "user", "content": "hi"})]);
         assert!(matches!(
-            validate_request_compat(&request),
+            validate_request_compat(&request, &[]),
             Err(ApiError::InvalidRequest { .. })
         ));
 
         let mut request = base_request();
         request.max_tool_calls = Some(1);
         assert!(matches!(
-            validate_request_compat(&request),
+            validate_request_compat(&request, &[]),
             Err(ApiError::InvalidRequest { .. })
         ));
     }
@@ -220,19 +157,18 @@ mod tests {
         let mut request = base_request();
         request.previous_input_messages = Some(vec![]);
 
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request_compat(&request, &[]).is_ok());
     }
 
     #[test]
     fn output_presentation_controls_are_accepted_for_compatibility() {
         let request = serde_json::from_value(json!({
-            "model": "test-model",
             "input": "hello",
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"summary": "concise"},
             "text": {"verbosity": "low"},
         }))
         .unwrap();
-        assert!(validate_request_compat(&request).is_ok());
+        assert!(validate_request_compat(&request, &[]).is_ok());
     }
 }

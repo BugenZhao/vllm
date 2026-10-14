@@ -12,6 +12,20 @@ use vllm_text::{PromptTruncation, TruncationSide};
 
 use crate::error::{ApiError, bail_invalid_request};
 
+/// Reject a non-empty requested model that this server does not serve. An
+/// omitted or empty model selects the served model.
+pub(crate) fn validate_requested_model(
+    model: Option<&str>,
+    served_model_names: &[String],
+) -> Result<(), ApiError> {
+    if let Some(model) = model.filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.to_owned()));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_generation_prompt_truncation(
     limit: Option<i64>,
     echo: bool,
