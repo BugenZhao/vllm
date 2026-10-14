@@ -147,6 +147,8 @@ fn build_router_with_options(
         // TODO: implement the decisions APIs.
         .route("/v1/decisions", post(not_supported))
         .route("/v1/systemone", post(not_supported))
+        // TODO: implement SageMaker invocations.
+        .route("/invocations", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
