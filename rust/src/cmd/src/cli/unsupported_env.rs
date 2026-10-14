@@ -20,6 +20,11 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_USE_MODELSCOPE", is_truthy),
     // Accept any requested model name and serve it with the base model.
     ("VLLM_SKIP_MODEL_NAME_VALIDATION", is_truthy),
+    // Disabling strict tool calling turns off structural tags for required
+    // and named `tool_choice`.
+    ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
+        !is_truthy(value)
+    }),
 ];
 
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
@@ -69,6 +74,7 @@ mod tests {
         check_with(&[]).unwrap();
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
         check_with(&[("VLLM_SKIP_MODEL_NAME_VALIDATION", "false")]).unwrap();
+        check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
     }
 
     #[test]
@@ -76,6 +82,7 @@ mod tests {
         let cases = [
             ("VLLM_USE_MODELSCOPE", "True"),
             ("VLLM_SKIP_MODEL_NAME_VALIDATION", "1"),
+            ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
         ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
