@@ -510,6 +510,12 @@ impl<'de> Deserialize<'de> for ChatMessage {
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
+        // TODO: pass `task` through to the DeepSeek V4 renderers, as Python does.
+        if value.get("task").is_some_and(|task| !task.is_null()) {
+            return Err(serde::de::Error::custom(
+                "messages[].task is not supported.",
+            ));
+        }
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)

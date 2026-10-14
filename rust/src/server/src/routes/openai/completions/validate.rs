@@ -41,6 +41,10 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }
 
+    if request.prompt_embeds.is_some() {
+        bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
+    }
+
     if let Some(logprobs) = request.logprobs
         && logprobs < 0
         && logprobs != -1
@@ -93,7 +97,8 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.length_penalty.is_some() {
+    // Python's default is 1.0, which SDKs may send explicitly.
+    if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
     if !request.spaces_between_special_tokens {
@@ -157,6 +162,46 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_length_penalty() {
+        let request = CompletionRequest {
+            length_penalty: Some(1.0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+
+        let request = CompletionRequest {
+            length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_prompt_embeds() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": "AAAA",
+        }))
+        .expect("parse request");
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "prompt": "hello",
+            "prompt_embeds": null,
+        }))
+        .expect("parse request");
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
         );
     }
 

@@ -27,6 +27,37 @@ pub(crate) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
+    // TODO: support `output_mode: "text"`.
+    if request.output_mode.as_deref().is_some_and(|mode| mode != "tokens") {
+        bail_invalid_request!(
+            param = "output_mode",
+            "Only output_mode=\"tokens\" is supported."
+        );
+    }
+
+    // TODO: support stop strings, which need incremental detokenization.
+    if request
+        .sampling_params
+        .stop
+        .as_ref()
+        .is_some_and(|stop| !stop.is_null() && stop.as_array().is_none_or(|stop| !stop.is_empty()))
+    {
+        bail_invalid_request!(param = "stop", "stop is not supported.");
+    }
+    if request.sampling_params.include_stop_str_in_output == Some(true) {
+        bail_invalid_request!(
+            param = "include_stop_str_in_output",
+            "include_stop_str_in_output is not supported."
+        );
+    }
+
+    if request.sampling_params.trace_decode_token_ids.is_some() {
+        bail_invalid_request!(
+            param = "trace_decode_token_ids",
+            "trace_decode_token_ids is not supported."
+        );
+    }
+
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -118,6 +149,68 @@ mod tests {
         }))
         .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_text_output_mode() {
+        for (output_mode, accepted) in [
+            (json!(null), true),
+            (json!("tokens"), true),
+            (json!("text"), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {},
+                "output_mode": output_mode,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{output_mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_stop_strings() {
+        for (sampling_params, accepted) in [
+            (
+                json!({"stop": null, "include_stop_str_in_output": false}),
+                true,
+            ),
+            (json!({"stop": []}), true),
+            (json!({"stop": "\n"}), false),
+            (json!({"stop": ["\n"]}), false),
+            (json!({"include_stop_str_in_output": true}), false),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": sampling_params,
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{sampling_params}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_trace_decode_token_ids() {
+        for (trace_decode_token_ids, accepted) in [(json!(null), true), (json!([7, 8]), false)] {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {"trace_decode_token_ids": trace_decode_token_ids},
+            }))
+            .expect("parse request");
+            assert_eq!(
+                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
+                accepted,
+                "{trace_decode_token_ids}"
+            );
+        }
     }
 
     #[test]

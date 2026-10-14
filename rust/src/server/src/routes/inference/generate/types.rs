@@ -26,6 +26,14 @@ use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
+    /// Stop strings. Not supported yet: the route does not detokenize.
+    pub stop: Option<Value>,
+    /// Whether to include the matched stop string in the output. Only
+    /// meaningful with `stop`.
+    pub include_stop_str_in_output: Option<bool>,
+    /// Decode token IDs to replay instead of sampling, gated by
+    /// `--enable-trace-replay` in Python. Not supported.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
@@ -50,6 +58,9 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Response level: `tokens` (default) returns token IDs only, `text` also
+    /// returns detokenized text. Only `tokens` is supported.
+    pub output_mode: Option<String>,
     /// Whether reasoning has ended before the first generated token, as
     /// resolved by `/render`. `true` applies structured outputs from the first
     /// token; `None` lets the engine check the prompt with its reasoning parser.
