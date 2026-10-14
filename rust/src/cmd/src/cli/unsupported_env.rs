@@ -18,6 +18,11 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     // Download models and tokenizers from ModelScope instead of the
     // Hugging Face Hub.
     ("VLLM_USE_MODELSCOPE", is_truthy),
+    // Disabling strict tool calling turns off structural tags for required
+    // and named `tool_choice`.
+    ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
+        !is_truthy(value)
+    }),
 ];
 
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
@@ -66,11 +71,15 @@ mod tests {
     fn default_values_pass() {
         check_with(&[]).unwrap();
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
+        check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
     }
 
     #[test]
     fn non_default_values_fail_startup() {
-        let cases = [("VLLM_USE_MODELSCOPE", "True")];
+        let cases = [
+            ("VLLM_USE_MODELSCOPE", "True"),
+            ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
+        ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
             assert!(error.contains(&format!("- {name}\n")), "{name}: {error}");
