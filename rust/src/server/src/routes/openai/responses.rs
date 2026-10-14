@@ -121,7 +121,6 @@ fn response_status(finish_reason: &FinishReason) -> ResponseItemStatus {
 
 /// Terminal event metadata captured from the internal `Done` chat event.
 struct TerminalOutput {
-    message: vllm_chat::AssistantMessage,
     usage: ChatTokenUsage,
     finish_reason: FinishReason,
     kv_transfer_params: Option<serde_json::Value>,
@@ -169,7 +168,8 @@ async fn responses_event_stream(
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Done {
-                message,
+                // The output items already carry the parser's final blocks.
+                message: _,
                 usage,
                 finish_reason,
                 kv_transfer_params,
@@ -177,7 +177,6 @@ async fn responses_event_stream(
                 ..
             }) => {
                 terminal = Some(TerminalOutput {
-                    message,
                     usage,
                     finish_reason,
                     kv_transfer_params: kv_transfer_params.map(|params| *params),
@@ -201,7 +200,7 @@ async fn responses_event_stream(
                     sampling,
                     &request_id,
                     created_at,
-                    items.completed_output_items(),
+                    items.into_output_items(),
                     "The response stream failed before generation completed.",
                     None,
                 )
@@ -223,7 +222,7 @@ async fn responses_event_stream(
             sampling,
             &request_id,
             created_at,
-            items.completed_output_items(),
+            items.into_output_items(),
             "The response stream ended before generation completed.",
             None,
         )
@@ -231,7 +230,6 @@ async fn responses_event_stream(
         return Ok(());
     };
     let TerminalOutput {
-        message,
         usage,
         finish_reason,
         kv_transfer_params,
@@ -245,7 +243,7 @@ async fn responses_event_stream(
             sampling,
             &request_id,
             created_at,
-            items.final_output_items(&message, &finish_reason),
+            items.into_output_items(),
             "The model failed to generate a response.",
             Some(&usage),
         )
@@ -258,7 +256,7 @@ async fn responses_event_stream(
         sampling,
         &request_id,
         created_at,
-        items.final_output_items(&message, &finish_reason),
+        items.into_output_items(),
         response_status(&finish_reason),
         Some(build_usage(&usage)),
         kv_transfer_params,
