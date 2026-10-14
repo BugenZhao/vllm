@@ -25,11 +25,22 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
         !is_truthy(value)
     }),
+    // SageMaker stateful sessions on `/invocations`, read by the
+    // `model_hosting_container_standards` package as a pydantic bool.
+    ("SAGEMAKER_ENABLE_STATEFUL_SESSIONS", is_pydantic_truthy),
 ];
 
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
 fn is_truthy(value: &str) -> bool {
     matches!(value.trim().to_lowercase().as_str(), "1" | "true")
+}
+
+/// Pydantic's lax bool parsing of a string.
+fn is_pydantic_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "1" | "on" | "t" | "true" | "y" | "yes"
+    )
 }
 
 /// Check that no unsupported environment variable is set to a non-default
@@ -75,6 +86,7 @@ mod tests {
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
         check_with(&[("VLLM_SKIP_MODEL_NAME_VALIDATION", "false")]).unwrap();
         check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
+        check_with(&[("SAGEMAKER_ENABLE_STATEFUL_SESSIONS", "false")]).unwrap();
     }
 
     #[test]
@@ -83,6 +95,7 @@ mod tests {
             ("VLLM_USE_MODELSCOPE", "True"),
             ("VLLM_SKIP_MODEL_NAME_VALIDATION", "1"),
             ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
+            ("SAGEMAKER_ENABLE_STATEFUL_SESSIONS", "yes"),
         ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
