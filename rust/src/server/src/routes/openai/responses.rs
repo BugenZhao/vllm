@@ -30,11 +30,12 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{ChatEvent, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
+use vllm_text::EffectiveSampling;
 
 use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
 use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
 use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
-use crate::error::{ApiError, chat_submit_error, invalid_request, text_submit_error};
+use crate::error::{ApiError, chat_submit_error, invalid_request};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
@@ -43,17 +44,9 @@ use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 pub async fn create_responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(mut body): ValidatedJson<ResponsesRequest>,
+    ValidatedJson(body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
     let stream_requested = body.stream.unwrap_or(false);
-    let sampling_hints = match state.chat.text().request_processor().sampling_hints() {
-        Ok(hints) => hints,
-        Err(error) => {
-            return text_submit_error("failed to resolve sampling defaults", error).into_response();
-        }
-    };
-    body.temperature = body.temperature.or(sampling_hints.default_temperature);
-    body.top_p = body.top_p.or(sampling_hints.default_top_p);
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state
         .resolve_model_with_loras(body.model.as_deref().filter(|model| !model.is_empty()))
@@ -88,9 +81,16 @@ pub async fn create_responses(
                     .into_response();
             }
         };
+    // Echo the values the engine uses, as Python does, rather than the request's.
+    let sampling = chat_stream.sampling();
 
-    let event_stream =
-        responses_event_stream(chat_stream, prepared.meta, prepared.request_id, created_at);
+    let event_stream = responses_event_stream(
+        chat_stream,
+        prepared.meta,
+        sampling,
+        prepared.request_id,
+        created_at,
+    );
     let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
     sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
 }
@@ -141,6 +141,7 @@ struct TerminalOutput {
 async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
     meta: ResponseMeta,
+    sampling: EffectiveSampling,
     request_id: String,
     created_at: u64,
     mut y: TryYielder<ResponseStreamEvent, Infallible>,
@@ -149,6 +150,7 @@ async fn responses_event_stream(
 
     let initial = Arc::new(build_response(
         &meta,
+        sampling,
         &request_id,
         created_at,
         vec![],
@@ -196,6 +198,7 @@ async fn responses_event_stream(
                 emit_failed(
                     &mut y,
                     &meta,
+                    sampling,
                     &request_id,
                     created_at,
                     items.completed_output_items(),
@@ -217,6 +220,7 @@ async fn responses_event_stream(
         emit_failed(
             &mut y,
             &meta,
+            sampling,
             &request_id,
             created_at,
             items.completed_output_items(),
@@ -238,6 +242,7 @@ async fn responses_event_stream(
         emit_failed(
             &mut y,
             &meta,
+            sampling,
             &request_id,
             created_at,
             items.final_output_items(&message, &finish_reason),
@@ -250,6 +255,7 @@ async fn responses_event_stream(
 
     let final_response = build_response(
         &meta,
+        sampling,
         &request_id,
         created_at,
         items.final_output_items(&message, &finish_reason),
@@ -283,6 +289,7 @@ fn terminal_event(
 async fn emit_failed(
     y: &mut TryYielder<ResponseStreamEvent, Infallible>,
     meta: &ResponseMeta,
+    sampling: EffectiveSampling,
     request_id: &str,
     created_at: u64,
     output: Vec<self::types::ResponseOutputItem>,
@@ -291,6 +298,7 @@ async fn emit_failed(
 ) {
     let mut failed = build_response(
         meta,
+        sampling,
         request_id,
         created_at,
         output,
