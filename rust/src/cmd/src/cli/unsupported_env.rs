@@ -23,6 +23,11 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
         !is_truthy(value)
     }),
+    // Log level of the request JSON body under `--enable-log-requests`,
+    // upper-cased by Python.
+    ("VLLM_REQUEST_BODY_LOG_LEVEL", |value| {
+        value.to_uppercase() != "DEBUG"
+    }),
 ];
 
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
@@ -72,6 +77,7 @@ mod tests {
         check_with(&[]).unwrap();
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
         check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
+        check_with(&[("VLLM_REQUEST_BODY_LOG_LEVEL", "debug")]).unwrap();
     }
 
     #[test]
@@ -79,6 +85,7 @@ mod tests {
         let cases = [
             ("VLLM_USE_MODELSCOPE", "True"),
             ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
+            ("VLLM_REQUEST_BODY_LOG_LEVEL", "INFO"),
         ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
