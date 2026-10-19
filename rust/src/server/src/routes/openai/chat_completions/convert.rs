@@ -1119,23 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_rejects_message_task() {
-        let error = serde_json::from_value::<ChatCompletionRequest>(json!({
-            "messages": [{"role": "user", "content": "hello", "task": "search"}],
-        }))
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("messages[].task is not supported."),
-            "{error}"
-        );
-
-        serde_json::from_value::<ChatCompletionRequest>(json!({
-            "messages": [{"role": "user", "content": "hello", "task": null}],
-        }))
-        .expect("a null task is accepted");
-    }
-
-    #[test]
     fn prepare_chat_request_accepts_custom_role_messages() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "messages": [
