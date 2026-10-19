@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::types::GenerateRequest;
+use super::types::{GenerateOutputMode, GenerateRequest};
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the minimal compatibility contract for the Rust token generate
@@ -28,7 +28,7 @@ pub(crate) fn validate_request_compat(
     }
 
     // TODO: support `output_mode: "text"`.
-    if request.output_mode.as_deref().is_some_and(|mode| mode != "tokens") {
+    if request.output_mode == Some(GenerateOutputMode::Text) {
         bail_invalid_request!(
             param = "output_mode",
             "Only output_mode=\"tokens\" is supported."
