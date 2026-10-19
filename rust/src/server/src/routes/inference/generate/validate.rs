@@ -40,7 +40,7 @@ pub(crate) fn validate_request_compat(
         .sampling_params
         .stop
         .as_ref()
-        .is_some_and(|stop| !stop.is_null() && stop.as_array().is_none_or(|stop| !stop.is_empty()))
+        .is_some_and(|stop| !stop.as_slice().is_empty())
     {
         bail_invalid_request!(param = "stop", "stop is not supported.");
     }
