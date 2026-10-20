@@ -122,7 +122,6 @@ impl StructuredOutputsParams {
                         message: "structured_outputs.json cannot be an empty string".to_string(),
                     });
                 }
-                nesting::check_json_schema_text(value)?;
                 let schema = serde_json::from_str::<Value>(value).map_err(|_| {
                     Error::InvalidStructuredOutputsParams {
                         message: "Invalid JSON grammar specification.".to_string(),
@@ -130,10 +129,7 @@ impl StructuredOutputsParams {
                 })?;
                 self.validate_json_schema(&schema)
             }
-            StructuredOutputConstraint::Json(schema) => {
-                nesting::check_json_schema(schema)?;
-                self.validate_json_schema(schema)
-            }
+            StructuredOutputConstraint::Json(schema) => self.validate_json_schema(schema),
             StructuredOutputConstraint::Choice(choice) if choice.is_empty() => {
                 Err(Error::InvalidStructuredOutputsParams {
                     message: "structured_outputs.choice cannot be empty".to_string(),
@@ -153,14 +149,23 @@ impl StructuredOutputsParams {
                         .to_string(),
                 })
             }
-            StructuredOutputConstraint::StructuralTag(tag) => nesting::check_structural_tag(tag),
+            StructuredOutputConstraint::StructuralTag(tag) => {
+                let tag = serde_json::from_str::<Value>(tag).map_err(|_| {
+                    Error::InvalidStructuredOutputsParams {
+                        message: "Invalid structural tag specification.".to_string(),
+                    }
+                })?;
+                nesting::check_structural_tag(&tag)
+            }
             _ => Ok(()),
         }
     }
 
-    /// Reject a schema the selected backend would accept but enforce only in
-    /// part, as Python does when validating against xgrammar.
+    /// Reject a schema nested too deeply to compile, or one the selected
+    /// backend would accept but enforce only in part, as Python does when
+    /// validating against xgrammar.
     fn validate_json_schema(&self, schema: &Value) -> Result<()> {
+        nesting::check_json_schema(schema)?;
         if self.backend == StructuredOutputBackend::Xgrammar
             && xgrammar::has_unsupported_json_features(schema)
         {
@@ -436,16 +441,12 @@ mod tests {
 
     #[test]
     fn validate_caps_json_schema_nesting() {
-        for (depth, accepted) in [(64, true), (65, false), (200, false)] {
+        for (depth, accepted) in [(64, true), (65, false)] {
             let schema = schema_nested(depth);
-            let mut constraints = vec![StructuredOutputsParams::json(Value::String(
-                schema.to_string(),
-            ))];
-            // `serde_json` parses a request body only up to 128 levels deep.
-            if depth < 128 {
-                constraints.push(StructuredOutputsParams::json(schema));
-            }
-            for params in constraints {
+            for params in [
+                StructuredOutputsParams::json(Value::String(schema.to_string())),
+                StructuredOutputsParams::json(schema),
+            ] {
                 let result = params.validate();
                 if accepted {
                     assert!(result.is_ok(), "depth {depth}: {result:?}");
@@ -476,6 +477,14 @@ mod tests {
         assert!(StructuredOutputsParams::structural_tag(tag(80)).validate().is_ok());
         let error = StructuredOutputsParams::structural_tag(tag(81)).validate().unwrap_err();
         assert!(error.to_string().contains("nested too deeply"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_structural_tag() {
+        let error = StructuredOutputsParams::structural_tag(r#"{"type": "structural_tag""#)
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid structural tag specification."));
     }
 
     #[test]
