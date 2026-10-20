@@ -82,8 +82,6 @@ pub struct ChatRequestProcessor {
     /// Server-side floor for tool-call structural tags, or `None` for the
     /// tool parser's default level.
     tool_strict_level: Option<ToolStrictLevel>,
-    /// Whether requests may supply their own chat template.
-    trust_request_chat_template: bool,
 }
 
 impl ChatRequestProcessor {
@@ -97,7 +95,6 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
-            trust_request_chat_template: false,
         }
     }
 
@@ -110,7 +107,6 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: None,
-            trust_request_chat_template: false,
         }
     }
 
@@ -130,28 +126,6 @@ impl ChatRequestProcessor {
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.tool_strict_level = tool_strict_level;
         self
-    }
-
-    /// Allow requests to supply their own chat template
-    /// (`--trust-request-chat-template`).
-    pub fn with_trust_request_chat_template(mut self, trust_request_chat_template: bool) -> Self {
-        self.trust_request_chat_template = trust_request_chat_template;
-        self
-    }
-
-    /// Reject a request that supplies its own chat template, either directly
-    /// or through `chat_template_kwargs`, unless request templates are trusted.
-    fn check_request_chat_template(&self, request: &ChatRequest) -> Result<()> {
-        let options = &request.chat_options;
-        let has_request_template = options.chat_template.is_some()
-            || options
-                .template_kwargs
-                .get("chat_template")
-                .is_some_and(|template| !template.is_null());
-        if has_request_template && !self.trust_request_chat_template {
-            return Err(Error::UntrustedRequestChatTemplate);
-        }
-        Ok(())
     }
 
     async fn finalize_rendered_prompt(
@@ -206,7 +180,6 @@ impl ChatRequestProcessor {
     }
 
     async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
-        self.check_request_chat_template(&request)?;
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         let renderer = self.backend.chat_renderer();
@@ -328,13 +301,6 @@ impl ChatLlm {
     /// the tool parser's default level.
     pub fn with_tool_strict_level(mut self, tool_strict_level: Option<ToolStrictLevel>) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
-        self
-    }
-
-    /// Allow requests to supply their own chat template
-    /// (`--trust-request-chat-template`).
-    pub fn with_trust_request_chat_template(mut self, trust_request_chat_template: bool) -> Self {
-        self.processor.trust_request_chat_template = trust_request_chat_template;
         self
     }
 

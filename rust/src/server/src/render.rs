@@ -78,6 +78,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
+            trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: Default::default(),
@@ -95,8 +96,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
         )
-        .with_tool_strict_level(config.tool_strict_level)
-        .with_trust_request_chat_template(config.trust_request_chat_template);
+        .with_tool_strict_level(config.tool_strict_level);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,

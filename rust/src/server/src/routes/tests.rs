@@ -1469,66 +1469,6 @@ async fn render_chat_omits_unset_sampling_params() {
 }
 
 #[tokio::test]
-async fn render_chat_rejects_request_chat_template_unless_trusted() {
-    let render_app = |trust_request_chat_template: bool| {
-        let backend = Arc::new(FakeChatBackend::new());
-        build_render_router(Arc::new(RenderState {
-            model: "backend-model".to_string(),
-            served_model_names: vec!["render-model".to_string()],
-            max_model_len: Some(128),
-            text: TextRequestProcessor::new(backend.clone(), 128),
-            chat: ChatRequestProcessor::render_only(backend)
-                .with_trust_request_chat_template(trust_request_chat_template),
-        }))
-    };
-    let cases = [
-        (
-            false,
-            json!({"chat_template": "{{ messages }}"}),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            false,
-            json!({"chat_template_kwargs": {"chat_template": "{{ messages }}"}}),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            false,
-            json!({"chat_template_kwargs": {"chat_template": null}}),
-            StatusCode::OK,
-        ),
-        (
-            true,
-            json!({"chat_template": "{{ messages }}"}),
-            StatusCode::OK,
-        ),
-    ];
-    for (trust_request_chat_template, template_fields, expected_status) in cases {
-        let mut body = json!({
-            "model": "render-model",
-            "messages": [{"role": "user", "content": "hello"}],
-        });
-        body.as_object_mut()
-            .unwrap()
-            .extend(template_fields.as_object().unwrap().clone());
-        let mut app = render_app(trust_request_chat_template);
-        let (status, json) = post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
-
-        assert_eq!(
-            status, expected_status,
-            "trusted={trust_request_chat_template} {body}"
-        );
-        if status == StatusCode::BAD_REQUEST {
-            assert_eq!(
-                json["error"]["message"],
-                "Chat template is passed with request, but --trust-request-chat-template is not \
-                 set. Refused request with untrusted chat template."
-            );
-        }
-    }
-}
-
-#[tokio::test]
 async fn render_chat_uses_processor_owned_parser_selections() {
     let mut app = test_render_app_with_parser_selections(
         ParserSelection::Auto,
@@ -8221,32 +8161,6 @@ async fn tokenize_chat_empty_messages_returns_400() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["error"]["type"], "invalid_request_error");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn tokenize_chat_rejects_untrusted_request_chat_template() {
-    let mut app = test_app().await;
-
-    let (status, json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "hello"}],
-            "chat_template": "{{ messages }}",
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("--trust-request-chat-template is not set"),
-        "{json}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
