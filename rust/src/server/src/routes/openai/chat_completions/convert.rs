@@ -280,15 +280,17 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
 pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
-        ChatMessage::System { content, .. } => {
-            Ok(VllmChatMessage::system(convert_content(content)?))
+        ChatMessage::System { content, name } => {
+            Ok(VllmChatMessage::system(convert_content(content)?).with_name(name))
         }
-        ChatMessage::User { content, .. } => Ok(VllmChatMessage::user(convert_content(content)?)),
+        ChatMessage::User { content, name } => {
+            Ok(VllmChatMessage::user(convert_content(content)?).with_name(name))
+        }
         ChatMessage::Assistant {
             content,
             tool_calls,
             reasoning,
-            name: _,
+            name,
         } => {
             let mut blocks = Vec::new();
             if let Some(reasoning) = reasoning
@@ -308,29 +310,32 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
                 );
             }
 
-            Ok(VllmChatMessage::assistant_blocks(blocks))
+            Ok(VllmChatMessage::assistant_blocks(blocks).with_name(name))
         }
         ChatMessage::Tool {
             content,
             tool_call_id,
-        } => Ok(VllmChatMessage::tool_response(
-            convert_content(content)?,
-            tool_call_id,
-        )),
+            name,
+        } => Ok(
+            VllmChatMessage::tool_response(convert_content(content)?, tool_call_id).with_name(name),
+        ),
         ChatMessage::Function { .. } => {
             bail_invalid_request!("Function messages are not supported.")
         }
         ChatMessage::Developer {
             content,
             tools,
-            name: _,
+            name,
         } => Ok(VllmChatMessage::developer(
             convert_content(content)?,
             convert_message_tools(tools)?,
-        )),
-        ChatMessage::Custom { role, content } => {
-            Ok(VllmChatMessage::custom(role, convert_content(content)?))
-        }
+        )
+        .with_name(name)),
+        ChatMessage::Custom {
+            role,
+            content,
+            name,
+        } => Ok(VllmChatMessage::custom(role, convert_content(content)?).with_name(name)),
     }
 }
 
@@ -867,6 +872,43 @@ mod tests {
         let prompt = tokenizer.decode(&prompt_token_ids, false).expect("Kimi K3 prompt decodes");
         assert!(prompt.contains("response_format=json_schema"));
         assert!(prompt.contains(r#""answer":{"type":"string"}"#));
+    }
+
+    #[test]
+    fn prepare_chat_request_keeps_message_names() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "root", "content": "identity", "name": "operator"},
+                {"role": "system", "content": "policy", "name": "rules"},
+                {"role": "user", "content": "hello", "name": "alice"},
+                {"role": "user", "content": "hi", "name": null},
+                {"role": "assistant", "content": "hey", "name": "helper"},
+                {"role": "tool", "content": "sunny", "tool_call_id": "call_1", "name": "weather"},
+            ],
+        }))
+        .expect("parse messages");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        let names: Vec<_> =
+            prepared.chat_request.messages.iter().map(VllmChatMessage::name).collect();
+        assert_eq!(
+            names,
+            [
+                Some("operator"),
+                Some("rules"),
+                Some("alice"),
+                None,
+                Some("helper"),
+                Some("weather"),
+            ]
+        );
     }
 
     #[test]
@@ -1431,6 +1473,7 @@ mod tests {
                 ChatMessage::Tool {
                     content: MessageContent::Text("Sunny".to_string()),
                     tool_call_id: "call_1".to_string(),
+                    name: None,
                 },
             ],
             tools: Some(vec![Tool {

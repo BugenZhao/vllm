@@ -125,21 +125,21 @@ fn render_message(
     let add_generation_prompt = message_index + 1 != messages.len() || add_generation_prompt;
 
     match message {
-        ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
-        ChatMessage::Developer { content, tools } => render_developer_message(
+        ChatMessage::System { content, .. } => render_system_message(out, Some(content), &[]),
+        ChatMessage::Developer { content, tools, .. } => render_developer_message(
             out,
             content,
             tools.as_deref().unwrap_or(&[]),
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
             add_generation_prompt,
         ),
-        ChatMessage::User { content } => render_user_message(
+        ChatMessage::User { content, .. } => render_user_message(
             out,
             content,
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
             add_generation_prompt,
         ),
-        ChatMessage::Assistant { content } => render_assistant_message(
+        ChatMessage::Assistant { content, .. } => render_assistant_message(
             out,
             thinking_mode == ThinkingMode::Thinking && after_last_user_turn,
             content,
@@ -275,6 +275,7 @@ fn render_tool_message(
 
     let ChatMessage::Assistant {
         content: assistant_content,
+        ..
     } = &messages[prev_assistant_idx]
     else {
         return Err(Error::ChatTemplate(
@@ -305,6 +306,7 @@ fn render_tool_message(
         let ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } = message
         else {
             unreachable!("tool response block should only contain tool messages");

@@ -453,6 +453,7 @@ pub enum ChatMessage {
     Tool {
         content: MessageContent,
         tool_call_id: String,
+        name: Option<String>,
     },
     #[serde(rename = "function")]
     Function { content: String, name: String },
@@ -468,6 +469,7 @@ pub enum ChatMessage {
     Custom {
         role: String,
         content: MessageContent,
+        name: Option<String>,
     },
 }
 
@@ -482,10 +484,12 @@ const STANDARD_CHAT_ROLES: &[&str] = &[
 ];
 
 /// Wire shape of [`ChatMessage::Custom`].
+#[serde_with::skip_serializing_none]
 #[derive(Deserialize, Serialize)]
-struct CustomChatMessage<R, C> {
+struct CustomChatMessage<R, C, N> {
     role: R,
     content: C,
+    name: Option<N>,
 }
 
 impl Serialize for ChatMessage {
@@ -494,9 +498,16 @@ impl Serialize for ChatMessage {
         S: serde::Serializer,
     {
         match self {
-            Self::Custom { role, content } => {
-                CustomChatMessage { role, content }.serialize(serializer)
+            Self::Custom {
+                role,
+                content,
+                name,
+            } => CustomChatMessage {
+                role,
+                content,
+                name: name.as_ref(),
             }
+            .serialize(serializer),
             _ => Self::serialize(self, serializer),
         }
     }
@@ -516,9 +527,16 @@ impl<'de> Deserialize<'de> for ChatMessage {
             .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
 
         if is_custom {
-            let CustomChatMessage { role, content } =
-                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
-            Ok(Self::Custom { role, content })
+            let CustomChatMessage {
+                role,
+                content,
+                name,
+            } = CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom {
+                role,
+                content,
+                name,
+            })
         } else {
             Self::deserialize(value).map_err(serde::de::Error::custom)
         }

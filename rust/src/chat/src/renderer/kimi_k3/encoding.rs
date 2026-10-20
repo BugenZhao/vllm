@@ -122,6 +122,7 @@ pub(super) fn render_request_with_media_order(
             let ChatMessage::ToolResponse {
                 content,
                 tool_call_id,
+                ..
             } = message
             else {
                 unreachable!("pending tool run only holds tool responses");
@@ -176,19 +177,20 @@ pub(super) fn render_request_with_media_order(
             ChatMessage::Developer {
                 content,
                 tools: Some(local_tools),
+                ..
             } if !local_tools.is_empty() => {
                 write_tool_declare(&mut out, local_tools, true)?;
                 if !content_is_empty(content) {
                     write_role_message(&mut out, "system", None, message_index, content)?;
                 }
             }
-            ChatMessage::System { content } | ChatMessage::Developer { content, .. } => {
+            ChatMessage::System { content, .. } | ChatMessage::Developer { content, .. } => {
                 write_role_message(&mut out, "system", None, message_index, content)?;
             }
-            ChatMessage::User { content } => {
+            ChatMessage::User { content, .. } => {
                 write_role_message(&mut out, "user", None, message_index, content)?;
             }
-            ChatMessage::Assistant { content } => {
+            ChatMessage::Assistant { content, .. } => {
                 tool_call_id_index.clear();
                 let mut call_position = 0usize;
                 for block in content {

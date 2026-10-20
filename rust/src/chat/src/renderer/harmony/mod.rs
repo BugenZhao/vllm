@@ -180,8 +180,10 @@ fn peel_leading_instructions(
     };
 
     match first {
-        ChatMessage::System { content } => Ok((Some(flatten_text(content)?), None, &messages[1..])),
-        ChatMessage::Developer { content, tools } => Ok((
+        ChatMessage::System { content, .. } => {
+            Ok((Some(flatten_text(content)?), None, &messages[1..]))
+        }
+        ChatMessage::Developer { content, tools, .. } => Ok((
             Some(flatten_text(content)?),
             tools.as_deref(),
             &messages[1..],
@@ -291,7 +293,7 @@ fn to_harmony_message(
     options: &Options,
 ) -> Result<Vec<Message>> {
     Ok(match message {
-        ChatMessage::System { content } => {
+        ChatMessage::System { content, .. } => {
             let instructions = flatten_text(content)?;
             vec![system_or_developer_message(
                 "system",
@@ -300,20 +302,21 @@ fn to_harmony_message(
                 options,
             )?]
         }
-        ChatMessage::Developer { content, tools } => {
+        ChatMessage::Developer { content, tools, .. } => {
             let instructions = flatten_text(content)?;
             vec![developer_message(Some(instructions), tools.as_deref())]
         }
-        ChatMessage::User { content } => {
+        ChatMessage::User { content, .. } => {
             vec![Message::from_role_and_content(
                 Role::User,
                 flatten_text(content)?,
             )]
         }
-        ChatMessage::Assistant { content } => assistant_messages(content),
+        ChatMessage::Assistant { content, .. } => assistant_messages(content),
         ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } => {
             let name = tool_call_names.get(tool_call_id).ok_or_else(|| {
                 Error::ChatTemplate(format!(
@@ -420,7 +423,7 @@ fn assistant_messages(content: &[AssistantContentBlock]) -> Vec<Message> {
 fn tool_call_names(messages: &[ChatMessage]) -> std::collections::HashMap<String, String> {
     let mut names = std::collections::HashMap::new();
     for message in messages {
-        let ChatMessage::Assistant { content } = message else {
+        let ChatMessage::Assistant { content, .. } = message else {
             continue;
         };
         for tool_call in content.tool_calls() {

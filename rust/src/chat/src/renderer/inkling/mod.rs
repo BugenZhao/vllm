@@ -322,21 +322,22 @@ impl ChatRenderer for InklingChatRenderer {
             }
 
             match message {
-                ChatMessage::System { content } => {
+                ChatMessage::System { content, .. } => {
                     self.write_chat_content(&mut out, self.special.message_system, content)?;
                 }
                 ChatMessage::Developer { content, .. } => {
                     self.write_chat_content(&mut out, self.special.message_system, content)?;
                 }
-                ChatMessage::User { content } => {
+                ChatMessage::User { content, .. } => {
                     self.write_chat_content(&mut out, self.special.message_user, content)?;
                 }
-                ChatMessage::Assistant { content } => {
+                ChatMessage::Assistant { content, .. } => {
                     self.write_assistant_content(&mut out, content, &mut tool_call_id_to_name)?;
                 }
                 ChatMessage::ToolResponse {
                     content,
                     tool_call_id,
+                    ..
                 } => {
                     self.write_tool_response(
                         &mut out,

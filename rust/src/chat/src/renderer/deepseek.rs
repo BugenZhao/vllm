@@ -162,7 +162,7 @@ pub(super) fn render_request_with_media_order(
         render_index += 1;
 
         match message {
-            ChatMessage::System { content } => {
+            ChatMessage::System { content, .. } => {
                 if dialect == DsDialect::V41 && current_render_index > 0 {
                     out.push_str(SYSTEM_SP_TOKEN);
                 }
@@ -180,7 +180,7 @@ pub(super) fn render_request_with_media_order(
                     &mut media_order,
                 )?;
             }
-            ChatMessage::Developer { content, tools } => {
+            ChatMessage::Developer { content, tools, .. } => {
                 render_developer_message(
                     &mut out,
                     message_index,
@@ -200,7 +200,7 @@ pub(super) fn render_request_with_media_order(
                     &mut media_order,
                 )?;
             }
-            ChatMessage::Assistant { content } => {
+            ChatMessage::Assistant { content, .. } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
                 // emitted whenever thinking is active and reasoning isn't
                 // dropped - i.e. drop_thinking is off OR this turn lies
@@ -436,9 +436,9 @@ fn starts_user_turn(
 fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
     let has_placeholder = |text: &str| text.contains(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
     let found = messages.iter().any(|message| match message {
-        ChatMessage::System { content }
+        ChatMessage::System { content, .. }
         | ChatMessage::Developer { content, .. }
-        | ChatMessage::User { content }
+        | ChatMessage::User { content, .. }
         | ChatMessage::ToolResponse { content, .. }
         | ChatMessage::Custom { content, .. } => match content {
             ChatContent::Text(text) => has_placeholder(text),
@@ -446,7 +446,7 @@ fn reject_image_placeholder_text(messages: &[ChatMessage]) -> Result<()> {
                 |part| matches!(part, ChatContentPart::Text { text } if has_placeholder(text)),
             ),
         },
-        ChatMessage::Assistant { content } => content.iter().any(|block| {
+        ChatMessage::Assistant { content, .. } => content.iter().any(|block| {
             matches!(
                 block,
                 AssistantContentBlock::Text { text } | AssistantContentBlock::Reasoning { text }
@@ -617,7 +617,7 @@ fn render_user_content_block(
             out.push_str("\n\n");
         }
         match &messages[message_index] {
-            ChatMessage::User { content } => {
+            ChatMessage::User { content, .. } => {
                 write_chat_content(out, content, dialect, message_index, media_order)?;
             }
             ChatMessage::ToolResponse { .. } => {
