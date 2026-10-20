@@ -150,7 +150,9 @@ pub struct RenderArgs {
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
-    /// Whether to trust the chat template provided in the request.
+    /// Whether to trust the chat template provided in the request. Only the HF
+    /// chat-template renderer honors request templates; native renderers ignore
+    /// them.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     trust_request_chat_template: bool,
     /// How message content is exposed to the chat template.
@@ -312,7 +314,8 @@ pub struct SharedRuntimeArgs {
 
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
-    /// `--chat-template` or the ones from tokenizer.
+    /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
+    /// renderer honors request templates; native renderers ignore them.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     #[serde(default)]
     pub trust_request_chat_template: bool,
