@@ -157,7 +157,7 @@ pub(super) fn prepare_chat_request(
         messages,
         sampling_params: SamplingParams {
             temperature: request.temperature,
-            watermarking: request.watermarking.unwrap_or(true),
+            watermarking: request.watermarking,
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
