@@ -36,6 +36,7 @@ pub struct RenderConfig {
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    pub trust_request_chat_template: bool,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
@@ -94,7 +95,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
         )
-        .with_tool_strict_level(config.tool_strict_level);
+        .with_tool_strict_level(config.tool_strict_level)
+        .with_trust_request_chat_template(config.trust_request_chat_template);
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -169,6 +171,7 @@ mod tests {
                 renderer: RendererSelection::Auto,
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                trust_request_chat_template: false,
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,
