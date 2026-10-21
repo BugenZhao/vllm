@@ -72,7 +72,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::DeepSeekV4ToolParser;
-    use crate::tool::test_utils::{collect_stream, test_tools};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
@@ -168,6 +168,49 @@ mod tests {
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Paris", "date": "tomorrow" })
         );
+    }
+
+    #[test]
+    fn deepseek_v4_misspelled_tool_calls_opener_parses_like_canonical() {
+        let canonical = build_tool_call("get_weather", &[("location", "Seoul")]);
+        for opener in ["<｜DSML｜toolcalls>", "<｜DSML｜tool>"] {
+            let misspelled = canonical.replacen("<｜DSML｜tool_calls>", opener, 1);
+            for preamble in ["", "Let me check.", "Let me check.\n\n"] {
+                let expected = DeepSeekV4ToolParser::new(&test_tools())
+                    .parse_complete(&format!("{preamble}{canonical}"))
+                    .unwrap();
+                assert_eq!(expected.normal_text(), preamble.trim_end());
+                assert_eq!(expected.calls().len(), 1);
+
+                let text = format!("{preamble}{misspelled}");
+                let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+                assert_eq!(parser.parse_complete(&text).unwrap(), expected, "{text:?}");
+                for chunk_chars in [1, 3] {
+                    let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+                    let output = collect_stream(&mut parser, &split_by_chars(&text, chunk_chars));
+                    assert_eq!(output, expected, "{text:?} in {chunk_chars}-char chunks");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_unaccepted_dsml_lookalikes_stay_text() {
+        for text in [
+            "see <｜DSML｜foo> and <｜DSML｜tool_call> here",
+            "see <｜DSML｜tool",
+            "see <|DSML|tool> and <|DSML|toolcalls> there",
+        ] {
+            let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+            let output = parser.parse_complete(text).unwrap();
+            assert_eq!(output.normal_text(), text);
+            assert!(output.calls().is_empty());
+
+            let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+            let output = collect_stream(&mut parser, &split_by_chars(text, 1));
+            assert_eq!(output.normal_text(), text);
+            assert!(output.calls().is_empty());
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, opt, preceded, repeat, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, fail, opt, preceded, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -24,8 +24,9 @@ type DsmlInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, Copy)]
 struct DsmlTokens {
-    tool_calls_start: &'static str,
-    framed_tool_calls_start: &'static str,
+    /// Accepted spellings of the tool-calls opener, each listed with and
+    /// without its leading `\n\n` framing.
+    tool_calls_starts: &'static [&'static str],
     tool_calls_end: &'static str,
     invoke_start: &'static str,
     invoke_end: &'static str,
@@ -35,8 +36,7 @@ struct DsmlTokens {
 
 impl DsmlTokens {
     const V32: Self = Self {
-        tool_calls_start: "<｜DSML｜function_calls>",
-        framed_tool_calls_start: "\n\n<｜DSML｜function_calls>",
+        tool_calls_starts: &["\n\n<｜DSML｜function_calls>", "<｜DSML｜function_calls>"],
         tool_calls_end: "</｜DSML｜function_calls>",
         invoke_start: "<｜DSML｜invoke",
         invoke_end: "</｜DSML｜invoke>",
@@ -44,14 +44,23 @@ impl DsmlTokens {
         parameter_end: "</｜DSML｜parameter>",
     };
     const V4: Self = Self {
-        tool_calls_start: "<｜DSML｜tool_calls>",
-        framed_tool_calls_start: "\n\n<｜DSML｜tool_calls>",
+        // DeepSeek V4 sometimes misspells the opener as `<｜DSML｜toolcalls>` or
+        // `<｜DSML｜tool>` while the rest of the block stays well-formed. Only
+        // the opener is relaxed; the closer and the output grammar keep the
+        // canonical spelling.
+        tool_calls_starts: &[
+            "\n\n<｜DSML｜tool_calls>",
+            "<｜DSML｜tool_calls>",
+            "\n\n<｜DSML｜toolcalls>",
+            "<｜DSML｜toolcalls>",
+            "\n\n<｜DSML｜tool>",
+            "<｜DSML｜tool>",
+        ],
         tool_calls_end: "</｜DSML｜tool_calls>",
         ..Self::V32
     };
     const V41: Self = Self {
-        tool_calls_start: "<｜DSML｜ calls>",
-        framed_tool_calls_start: "\n\n<｜DSML｜ calls>",
+        tool_calls_starts: &["\n\n<｜DSML｜ calls>", "<｜DSML｜ calls>"],
         tool_calls_end: "</｜DSML｜ calls>",
         invoke_start: "<｜DSML｜ invoke",
         invoke_end: "</｜DSML｜ invoke>",
@@ -226,14 +235,14 @@ fn parse_tool_block_event(
     .parse_next(input)
 }
 
-/// Parse a DSML function-calls start marker.
+/// Parse a DSML function-calls start marker in any accepted spelling.
 fn tool_calls_start_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
-    alt((
-        literal(tokens.framed_tool_calls_start),
-        literal(tokens.tool_calls_start),
-    ))
-    .value(DsmlEvent::ToolCallsStart)
-    .parse_next(input)
+    for start in tokens.tool_calls_starts {
+        if opt(literal(*start)).parse_next(input)?.is_some() {
+            return Ok(DsmlEvent::ToolCallsStart);
+        }
+    }
+    fail.parse_next(input)
 }
 
 /// Parse a DSML function-calls end marker.
@@ -248,11 +257,7 @@ fn ignored_rest_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
 
 /// Parse a safe text run before the next DSML marker.
 fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
-    safe_text_len_mul(
-        input,
-        &[tokens.framed_tool_calls_start, tokens.tool_calls_start],
-    )
-    .map(|len| DsmlEvent::Text { len })
+    safe_text_len_mul(input, tokens.tool_calls_starts).map(|len| DsmlEvent::Text { len })
 }
 
 /// Parse a DSML invoke block.
