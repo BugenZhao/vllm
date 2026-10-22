@@ -263,6 +263,13 @@ impl LoraManager {
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
+        // `load_inplace` applies to this load only: the engine reloads the
+        // adapter from disk whenever a request carries it, so generate
+        // requests must not inherit it from the registry.
+        let lora_request = LoraRequest {
+            load_inplace: false,
+            ..lora_request
+        };
         self.requests.write().await.insert(lora_name, lora_request.clone());
         Ok(lora_request)
     }
