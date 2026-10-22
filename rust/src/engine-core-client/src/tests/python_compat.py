@@ -65,6 +65,20 @@ class KvHintsEnvelope(msgspec.Struct, frozen=True):
     actions: list[KvHintAction]
 
 
+# Mirror of `vllm.lora.request.LoRARequest`.
+class LoRARequest(
+    msgspec.Struct,
+    array_like=True,
+    omit_defaults=True,
+):
+    lora_name: str
+    lora_int_id: int
+    lora_path: str = ""
+    base_model_name: str | None = None
+    load_inplace: bool = False
+    is_3d_lora_weight: bool = False
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -76,7 +90,7 @@ class EngineCoreRequest(
     sampling_params: EngineCoreSamplingParams | None
     pooling_params: object | None
     arrival_time: float
-    lora_request: object | None = None
+    lora_request: LoRARequest | None = None
     cache_salt: str | None = None
     data_parallel_rank: int | None = None
     prompt_embeds: object | None = None
@@ -199,6 +213,25 @@ defaults_request = EngineCoreRequest(
     sampling_params=EngineCoreSamplingParams(),
     pooling_params=None,
     arrival_time=1.0,
+)
+
+# Every LoRARequest field is non-default, so omit_defaults trims nothing and the
+# fixture pins the full positional layout.
+lora_request = EngineCoreRequest(
+    request_id="req-lora",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=2.0,
+    lora_request=LoRARequest(
+        lora_name="alice",
+        lora_int_id=3,
+        lora_path="/adapters/alice",
+        base_model_name="base",
+        load_inplace=True,
+        is_3d_lora_weight=True,
+    ),
 )
 
 multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
@@ -573,3 +606,4 @@ print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
+print(msgspec.msgpack.encode(lora_request).hex())

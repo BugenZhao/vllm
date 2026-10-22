@@ -24,6 +24,7 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
     PlaceholderRange, SliceSpec,
@@ -2778,6 +2779,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
     let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
+    let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2850,6 +2852,31 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let rust_mm_features =
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
+
+    // Pin the full positional LoRARequest layout against Python in both
+    // directions: Python wire -> Rust struct, and Rust struct -> wire for the
+    // `lora_request` slot of the request.
+    let lora_request_bytes = hex::decode(lora_request_hex).unwrap();
+    let expected_lora_request = LoraRequest {
+        lora_name: "alice".to_string(),
+        lora_int_id: 3,
+        lora_path: "/adapters/alice".to_string(),
+        base_model_name: Some("base".to_string()),
+        load_inplace: true,
+        is_3d_lora_weight: true,
+    };
+    let decoded_lora_request: EngineCoreRequest =
+        rmp_serde::from_slice(&lora_request_bytes).unwrap();
+    assert_eq!(
+        decoded_lora_request.lora_request,
+        Some(expected_lora_request.clone())
+    );
+    let python_lora_slot = match decode_value(&lora_request_bytes) {
+        Value::Array(items) => items.get(6).cloned().expect("request lora_request slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
+    let rust_lora_slot = decode_value(&rmp_serde::to_vec_named(&expected_lora_request).unwrap());
+    assert_eq!(python_lora_slot, rust_lora_slot);
 
     let decoded_sampling_mask_outputs =
         decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
