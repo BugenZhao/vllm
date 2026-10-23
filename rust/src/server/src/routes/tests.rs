@@ -4820,7 +4820,7 @@ async fn logprob_tokens_with_server_flag(
     let mut app = build_router(Arc::new(
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
-                return_tokens_as_token_ids: server_flag,
+                default_return_tokens_as_token_ids: server_flag,
                 ..Default::default()
             },
         ),

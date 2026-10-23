@@ -748,7 +748,7 @@ fn serve_passes_return_tokens_as_token_ids_into_config() {
         panic!("expected serve args");
     };
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
-    assert!(config.api_server_options.return_tokens_as_token_ids);
+    assert!(config.api_server_options.default_return_tokens_as_token_ids);
 }
 
 #[test]
@@ -2340,7 +2340,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
-                return_tokens_as_token_ids: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -2448,7 +2448,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
-                return_tokens_as_token_ids: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
@@ -2644,7 +2644,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
-                return_tokens_as_token_ids: false,
+                default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,

@@ -141,7 +141,7 @@ async fn collect_completion(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
-        return_tokens_as_token_ids: default_return_tokens_as_token_ids,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,
@@ -250,7 +250,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
-        return_tokens_as_token_ids: default_return_tokens_as_token_ids,
+        default_return_tokens_as_token_ids,
         enable_per_request_metrics,
         ..
     }: ApiServerOptions,

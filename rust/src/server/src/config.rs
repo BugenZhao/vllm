@@ -62,7 +62,7 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// Format logprob tokens as `token_id:{id}` unless the request sets
     /// `return_tokens_as_token_ids` itself.
-    pub return_tokens_as_token_ids: bool,
+    pub default_return_tokens_as_token_ids: bool,
     /// Include request timing metrics in OpenAI chat and completion responses.
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
