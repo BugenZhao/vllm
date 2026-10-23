@@ -673,7 +673,20 @@ fn write_tool_result(
     media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     out.push_str("<tool_result>");
-    write_chat_content(out, content, dialect, message_index, media_order)?;
+    match (dialect, content) {
+        // Python's V4 renderer runs `parse_chat_messages`, which flattens
+        // text-only tool content with a single newline before the encoder
+        // sees it. V4.1 encodes the original content blocks.
+        (DsDialect::V4, ChatContent::Parts(parts)) => {
+            for (index, part) in parts.iter().enumerate() {
+                if index > 0 {
+                    out.push('\n');
+                }
+                out.push_str(part.as_text()?);
+            }
+        }
+        _ => write_chat_content(out, content, dialect, message_index, media_order)?,
+    }
     out.push_str("</tool_result>");
     Ok(())
 }
@@ -798,8 +811,9 @@ fn encode_arguments_to_dsml(
 /// Write chat content directly into the destination buffer without flattening
 /// it into an intermediate `String`.
 ///
-/// The V4.1 dialect inlines the image placeholder at each image part's
-/// position unconditionally (matching the Python encoding's
+/// Content parts are joined by a blank line, as both Python encodings flatten
+/// content blocks. The V4.1 dialect inlines the image placeholder at each image
+/// part's position unconditionally (matching the Python encoding's
 /// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
 fn write_chat_content(
     out: &mut String,
@@ -812,7 +826,7 @@ fn write_chat_content(
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
             for (index, part) in parts.iter().enumerate() {
-                if index > 0 && dialect == DsDialect::V41 {
+                if index > 0 {
                     out.push_str("\n\n");
                 }
                 match part {
@@ -840,12 +854,18 @@ fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]
     }
 }
 
-/// Write all visible assistant text blocks in encounter order.
+/// Write all visible assistant text blocks in encounter order, joined by a
+/// blank line like any other content parts.
 fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
-    for block in content {
-        if let AssistantContentBlock::Text { text } = block {
-            out.push_str(text);
+    let texts = content.iter().filter_map(|block| match block {
+        AssistantContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    for (index, text) in texts.enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
         }
+        out.push_str(text);
     }
 }
 
