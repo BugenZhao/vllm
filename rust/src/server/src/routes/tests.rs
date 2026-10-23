@@ -561,9 +561,9 @@ fn render_fake_message_content(
     placeholder: &str,
 ) -> vllm_chat::Result<String> {
     match message {
-        ChatMessage::System { content }
+        ChatMessage::System { content, .. }
         | ChatMessage::Developer { content, .. }
-        | ChatMessage::User { content }
+        | ChatMessage::User { content, .. }
         | ChatMessage::ToolResponse { content, .. }
         | ChatMessage::Custom { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),

@@ -245,6 +245,7 @@ mod tests {
             request_id: "renderer-selection-test".to_string(),
             messages: vec![ChatMessage::User {
                 content: ChatContent::Text(text.to_string()),
+                name: None,
             }],
             ..ChatRequest::for_test()
         }
