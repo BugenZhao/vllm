@@ -1325,7 +1325,7 @@ async fn static_lora_module_fails_when_engine_rejects_it() {
         matches!(error, LoadLoraError::NotLoaded { .. }),
         "{error:?}"
     );
-    assert!(state.served_lora_requests().await.is_empty());
+    assert!(state.served_loras().await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
