@@ -152,12 +152,16 @@ impl ChatBackend for HfChatBackend {
         self.multimodal_model_info.as_ref()
     }
 
+    fn parses_harmony_output(&self) -> bool {
+        self.model_type == "gpt_oss"
+    }
+
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<DynChatOutputProcessor> {
-        if self.model_type == "gpt_oss" {
+        if self.parses_harmony_output() {
             validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
             return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
         }

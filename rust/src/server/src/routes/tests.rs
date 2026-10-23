@@ -444,6 +444,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    parses_harmony_output: bool,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -468,6 +469,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            parses_harmony_output: false,
         }
     }
 
@@ -475,6 +477,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            parses_harmony_output: false,
         }
     }
 
@@ -484,6 +487,14 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            parses_harmony_output: false,
+        }
+    }
+
+    fn with_harmony_output(self) -> Self {
+        Self {
+            parses_harmony_output: true,
+            ..self
         }
     }
 }
@@ -513,6 +524,10 @@ impl ChatBackend for FakeChatBackend {
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
         self.multimodal_model_info.as_ref()
+    }
+
+    fn parses_harmony_output(&self) -> bool {
+        self.parses_harmony_output
     }
 
     fn new_chat_output_processor(
@@ -769,7 +784,20 @@ fn test_render_app_with(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
-    let backend = Arc::new(FakeChatBackend::new());
+    test_render_app_with_backend(
+        Arc::new(FakeChatBackend::new()),
+        max_model_len,
+        tool_call_parser,
+        reasoning_parser,
+    )
+}
+
+fn test_render_app_with_backend(
+    backend: Arc<FakeChatBackend>,
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
@@ -1681,6 +1709,131 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("mm_features").is_none());
     assert!(json[0].get("reasoning_ended").is_none());
     assert!(json[0].get("reasoning_parser_kwargs").is_none());
+    assert!(json[0].get("parse_context").is_none());
+}
+
+/// Render a chat request with a tool parser and return the response's
+/// `parse_context`.
+async fn render_chat_parse_context(
+    backend: FakeChatBackend,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    let mut app = test_render_app_with_backend(
+        Arc::new(backend),
+        Some(128),
+        ParserSelection::Explicit("hermes".to_string()),
+        ParserSelection::Auto,
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let mut json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    json["parse_context"].take()
+}
+
+fn parse_context_test_request() -> serde_json::Value {
+    json!({
+        "model": "render-model",
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "call_0", "type": "function",
+                 "function": {"name": "get_weather", "arguments": "{}"}},
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "get_weather", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "rainy"}
+        ],
+        "tools": [{"type": "function", "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {}}
+        }}],
+        "parallel_tool_calls": false,
+        "include_reasoning": false,
+        "chat_template_kwargs": {"enable_thinking": false},
+        "max_completion_tokens": 8
+    })
+}
+
+#[tokio::test]
+async fn render_chat_returns_parse_context() {
+    let parse_context =
+        render_chat_parse_context(FakeChatBackend::new(), parse_context_test_request()).await;
+    expect_test::expect![[r#"
+        {
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "get_weather",
+                "parameters": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          ],
+          "tool_choice": "auto",
+          "parallel_tool_calls": false,
+          "include_reasoning": false,
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "history_tool_call_cnt": 2
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&parse_context).unwrap());
+}
+
+#[tokio::test]
+async fn render_chat_parse_context_drops_template_kwargs_for_harmony() {
+    let parse_context = render_chat_parse_context(
+        FakeChatBackend::new().with_harmony_output(),
+        parse_context_test_request(),
+    )
+    .await;
+    assert_eq!(parse_context["chat_template_kwargs"], json!({}));
+}
+
+#[tokio::test]
+async fn render_chat_parse_context_includes_developer_message_tools() {
+    let lookup = json!({"type": "function", "function": {
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {}}
+    }});
+    for (tool_choice, expected) in [
+        (None, json!("auto")),
+        (
+            Some(json!({"type": "function", "function": {"name": "lookup"}})),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ),
+    ] {
+        let mut request = json!({
+            "model": "render-model",
+            "messages": [
+                {"role": "developer", "content": "be brief", "tools": [lookup]},
+                {"role": "user", "content": "look it up"}
+            ],
+            "max_completion_tokens": 8
+        });
+        if let Some(tool_choice) = tool_choice {
+            request["tool_choice"] = tool_choice;
+        }
+        let parse_context = render_chat_parse_context(FakeChatBackend::new(), request).await;
+        assert_eq!(parse_context["tools"], json!([lookup]));
+        assert_eq!(parse_context["tool_choice"], expected);
+    }
 }
 
 #[tokio::test]

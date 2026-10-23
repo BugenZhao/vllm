@@ -140,6 +140,12 @@ impl ChatRequestProcessor {
         self
     }
 
+    /// Whether output is parsed as Harmony, which reads no chat-template
+    /// kwargs.
+    pub fn parses_harmony_output(&self) -> bool {
+        self.backend.parses_harmony_output()
+    }
+
     async fn finalize_rendered_prompt(
         &self,
         request: &ChatRequest,

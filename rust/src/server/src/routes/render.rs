@@ -10,8 +10,10 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
+use serde::Serialize;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
+use vllm_chat::{ChatMessage, ChatRequest, ChatToolChoice};
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
@@ -22,7 +24,10 @@ use crate::render::RenderState;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    Function, FunctionChoice, ListModelsResponse, ModelObject, StreamOptions, Tool, ToolChoice,
+    ToolChoiceValue,
+};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
@@ -153,30 +158,115 @@ fn hoist_transfer_params(
     Some(params)
 }
 
+/// Chat render response: the generate request plus the context a generate
+/// server needs to parse its output in `output_mode: "derender"`.
+#[derive(Serialize)]
+struct RenderedChatRequest {
+    #[serde(flatten)]
+    request: GenerateRequest,
+    parse_context: ParseContext,
+}
+
+/// Chat request context for derender, mirroring Python's `ParseContext`.
+///
+/// The Rust generate route does not support derender, so only `/render`
+/// produces it, for a generate server that does.
+#[derive(Serialize)]
+struct ParseContext {
+    tools: Option<Vec<Tool>>,
+    tool_choice: ToolChoice,
+    parallel_tool_calls: bool,
+    include_reasoning: bool,
+    /// Template kwargs with the render server's defaults already applied.
+    chat_template_kwargs: HashMap<String, Value>,
+    /// Tool calls already in the rendered conversation, for sequential IDs.
+    history_tool_call_cnt: usize,
+}
+
 async fn render_chat(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
-) -> Result<Json<GenerateRequest>, ApiError> {
+) -> Result<Json<RenderedChatRequest>, ApiError> {
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
+    let include_reasoning = body.include_reasoning;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
+    let mut parse_context = chat_parse_context(&chat_request, include_reasoning);
     let (text_request, _) = state
         .chat
         .prepare(chat_request, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
-    Ok(Json(lower_render_request(
-        &state,
-        text_request,
-        model,
-        stream,
-        stream_options,
-        return_token_ids,
-    )?))
+    // Like Python, Harmony output is parsed without template kwargs.
+    if !state.chat.parses_harmony_output() {
+        parse_context.chat_template_kwargs =
+            text_request.reasoning_parser_kwargs.chat_template_kwargs.clone();
+    }
+    Ok(Json(RenderedChatRequest {
+        request: lower_render_request(
+            &state,
+            text_request,
+            model,
+            stream,
+            stream_options,
+            return_token_ids,
+        )?,
+        parse_context,
+    }))
+}
+
+/// Build the request part of the `parse_context` a derender generate server
+/// parses this chat request's output with, like Python's
+/// `_build_parse_context`. The caller fills in `chat_template_kwargs` once the
+/// prompt is rendered.
+///
+/// Tools and `tool_choice` come from the resolved request, so tools declared on
+/// developer messages count as they do for Rust's own output parsing.
+fn chat_parse_context(request: &ChatRequest, include_reasoning: bool) -> ParseContext {
+    let tools = (request.tools().iter())
+        .map(|tool| Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                strict: tool.strict,
+                defer_loading: tool.defer_loading,
+            },
+            defer_loading: None,
+        })
+        .collect::<Vec<_>>();
+    let tool_choice = match request.tool_choice() {
+        ChatToolChoice::None => ToolChoice::Value(ToolChoiceValue::None),
+        ChatToolChoice::Auto => ToolChoice::Value(ToolChoiceValue::Auto),
+        ChatToolChoice::Required => ToolChoice::Value(ToolChoiceValue::Required),
+        ChatToolChoice::Function { name } => ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: FunctionChoice { name: name.clone() },
+        },
+    };
+    let history_tool_call_cnt = request
+        .messages
+        .iter()
+        .map(|message| match message {
+            ChatMessage::Assistant { content } => {
+                content.iter().filter(|block| block.as_tool_call().is_some()).count()
+            }
+            _ => 0,
+        })
+        .sum();
+    ParseContext {
+        tools: (!tools.is_empty()).then_some(tools),
+        tool_choice,
+        parallel_tool_calls: request.parallel_tool_calls(),
+        include_reasoning,
+        chat_template_kwargs: HashMap::new(),
+        history_tool_call_cnt,
+    }
 }
 
 async fn render_completion(

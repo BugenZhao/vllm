@@ -37,6 +37,12 @@ pub trait ChatBackend: Send + Sync {
         None
     }
 
+    /// Whether output is parsed as Harmony, which reads no chat-template
+    /// kwargs.
+    fn parses_harmony_output(&self) -> bool {
+        false
+    }
+
     /// Create a request-scoped output processor after request-level adjustments
     /// are applied.
     fn new_chat_output_processor(
