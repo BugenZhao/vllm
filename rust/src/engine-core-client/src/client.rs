@@ -384,9 +384,13 @@ impl EngineCoreClient {
             connected.output_socket,
             output_tx,
         )));
-        let dispatcher_task = AbortOnDropHandle::new(
-            runtime.spawn(run_output_dispatcher_loop(inner.clone(), output_rx)),
-        );
+        // Every engine reports the same `max_loras` (validated above).
+        let max_loras = engines[0].ready_response.max_loras;
+        let dispatcher_task = AbortOnDropHandle::new(runtime.spawn(run_output_dispatcher_loop(
+            inner.clone(),
+            output_rx,
+            max_loras,
+        )));
         let abort_task =
             AbortOnDropHandle::new(runtime.spawn(run_abort_loop(inner.clone(), abort_rx)));
 
