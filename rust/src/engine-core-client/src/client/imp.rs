@@ -434,10 +434,11 @@ fn output_iteration_tokens(output: &EngineCoreOutput) -> u64 {
 pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
+    max_loras: u32,
 ) {
     // LoRA phases come from request lifecycle events, which engines only emit
     // when they record stats.
-    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
+    let mut lora_info = inner.engine_stats_enabled.then(|| LoraInfoExporter::new(max_loras));
 
     let result: Result<()> = async {
         loop {
