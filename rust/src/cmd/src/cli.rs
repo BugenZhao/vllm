@@ -735,7 +735,7 @@ impl SharedRuntimeArgs {
                 ready_timeout,
                 local_input_address,
                 local_output_address,
-                handshake_listener: None,
+                handshake_listener_fd: None,
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: model.id,

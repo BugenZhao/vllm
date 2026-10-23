@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
-            handshake_listener: None,
+            handshake_listener_fd: None,
         },
         coordinator_mode: None,
         model_name: args.model.clone(),

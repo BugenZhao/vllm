@@ -21,7 +21,7 @@ use vllm_chat::{
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 use vllm_llm::Llm;
 use vllm_managed_engine::cli::ManagedEngineArgs;
-use vllm_managed_engine::{ManagedEngineConfig, ManagedEngineHandle, allocate_handshake_port};
+use vllm_managed_engine::{ManagedEngineConfig, ManagedEngineHandle};
 use vllm_text::TextLlm;
 use vllm_tracing::timing::RequestTimingStats;
 
@@ -143,10 +143,10 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
     }
 
     // Spawn the managed headless Python engine (real weights, real encoder).
-    let handshake_port = match args.engine.resolve_handshake_port() {
-        Some(port) => port,
-        None => allocate_handshake_port(&args.engine.handshake_host)?,
-    };
+    let handshake_port = args
+        .engine
+        .resolve_handshake_port()
+        .context("failed to allocate handshake port")?;
     let mut python_args = args.engine.python_args.clone();
     if args.trust_remote_code {
         python_args.push("--trust-remote-code".to_string());
@@ -226,7 +226,7 @@ async fn run_mm_processor_with_engine(
             ready_timeout: ENGINE_READY_TIMEOUT,
             local_input_address: None,
             local_output_address: None,
-            handshake_listener: None,
+            handshake_listener_fd: None,
         },
         coordinator_mode: None,
         model_name: args.model.clone(),

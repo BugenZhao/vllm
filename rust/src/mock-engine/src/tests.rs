@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::net::TcpListener;
+use std::os::fd::IntoRawFd as _;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,13 +27,33 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
             ready_timeout: Duration::from_secs(5),
             local_input_address: None,
             local_output_address: None,
-            handshake_listener: None,
+            handshake_listener_fd: None,
         },
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
         engine_stats_enabled: true,
     }
+}
+
+fn spawn_mock(
+    handshake_address: String,
+    engine_count: usize,
+    output_token_chunk_size: usize,
+) -> (CancellationToken, tokio::task::JoinHandle<Result<()>>) {
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(run(
+        Opt {
+            handshake_address,
+            engine_count,
+            output_token_chunk_size,
+            vocab_size: 32_000,
+            seed: 0,
+            log_requests: false,
+        },
+        shutdown.clone(),
+    ));
+    (shutdown, task)
 }
 
 async fn connect_with_mock(
@@ -43,18 +65,11 @@ async fn connect_with_mock(
     CancellationToken,
     tokio::task::JoinHandle<Result<()>>,
 ) {
-    let shutdown = CancellationToken::new();
-    let task = tokio::spawn(run(
-        Opt {
-            handshake_address: handshake_address.clone(),
-            engine_count,
-            output_token_chunk_size,
-            vocab_size: 32_000,
-            seed: 0,
-            log_requests: false,
-        },
-        shutdown.clone(),
-    ));
+    let (shutdown, task) = spawn_mock(
+        handshake_address.clone(),
+        engine_count,
+        output_token_chunk_size,
+    );
 
     let client = timeout(
         Duration::from_secs(5),
@@ -99,6 +114,34 @@ async fn mock_engine_connects_over_ipc() {
     assert_eq!(client.engine_identities()[0], &[0, 0]);
     assert_eq!(client.max_model_len(), 1024 * 1024);
     assert_eq!(client.vllm_version(), "test-vllm-version");
+    shutdown_mock(client, shutdown, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mock_engines_connect_through_prebound_handshake_listener() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind handshake listener");
+    let listener_address = listener.local_addr().expect("handshake listener address");
+    let handshake_address = format!("tcp://{listener_address}");
+    // The kernel-assigned port stays held until the client adopts the listener.
+    TcpListener::bind(listener_address).expect_err("pre-bound handshake port must stay held");
+
+    // Engines dial before the client adopts the listener, as managed Python engines do.
+    let (shutdown, task) = spawn_mock(handshake_address.clone(), 2, 1);
+    let mut config = client_config(handshake_address, 2);
+    let TransportMode::HandshakeOwner {
+        handshake_listener_fd,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("client_config returns handshake-owned transport");
+    };
+    *handshake_listener_fd = Some(listener.into_raw_fd());
+    let client = timeout(Duration::from_secs(5), EngineCoreClient::connect(config))
+        .await
+        .expect("client connect timeout")
+        .expect("connect client");
+
+    assert_eq!(client.engine_identities(), vec![&[0, 0][..], &[1, 0][..]]);
     shutdown_mock(client, shutdown, task).await;
 }
 

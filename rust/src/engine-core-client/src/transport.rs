@@ -6,7 +6,6 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -30,60 +29,6 @@ use crate::protocol::{decode_msgpack, encode_msgpack};
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.
 pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
-
-/// Handshake ROUTER that is bound before engines are spawned so the kernel
-/// assigned port stays owned by the final binder.
-pub struct HandshakeListener {
-    address: String,
-    socket: tokio::sync::Mutex<Option<RouterSocket>>,
-}
-
-impl std::fmt::Debug for HandshakeListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HandshakeListener")
-            .field("address", &self.address)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for HandshakeListener {
-    fn eq(&self, other: &Self) -> bool {
-        self.address == other.address
-    }
-}
-
-impl Eq for HandshakeListener {}
-
-impl HandshakeListener {
-    /// Bind the handshake ROUTER. `tcp://host:0` lets the kernel pick the port.
-    pub async fn bind(address: impl AsRef<str>) -> Result<Arc<Self>> {
-        let mut socket = RouterSocket::new();
-        let address = socket.bind(address.as_ref()).await?.to_string();
-        Ok(Arc::new(Self {
-            address,
-            socket: tokio::sync::Mutex::new(Some(socket)),
-        }))
-    }
-
-    /// Bound endpoint, including the kernel-assigned port when the bind used 0.
-    pub fn address(&self) -> &str {
-        &self.address
-    }
-
-    /// TCP port from the bound endpoint.
-    pub fn port(&self) -> Result<u16> {
-        let port = self.address.rsplit(':').next().ok_or_else(|| Error::InvalidClientConfig {
-            message: format!("handshake address {} has no port", self.address),
-        })?;
-        port.parse().map_err(|_| Error::InvalidClientConfig {
-            message: format!("handshake address {} has a non-numeric port", self.address),
-        })
-    }
-
-    async fn take_socket(&self) -> Option<RouterSocket> {
-        self.socket.lock().await.take()
-    }
-}
 
 /// Opaque routing identity of one engine on the frontend transport.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -204,7 +149,7 @@ pub async fn connect_handshake(
     local_output_address: Option<&str>,
     enable_inproc_coordinator: bool,
     ready_timeout: Duration,
-    handshake_listener: Option<Arc<HandshakeListener>>,
+    handshake_listener_fd: Option<RawFd>,
 ) -> Result<ConnectedTransport> {
     if engine_count == 0 {
         bail_unexpected_handshake_message!("expected engine_count >= 1");
@@ -233,19 +178,13 @@ pub async fn connect_handshake(
         None
     };
 
-    // 2. Bind the shared handshake socket once, or take a socket that was already
-    //    bound so engines can be spawned against the final port.
-    let mut handshake_socket = match handshake_listener {
-        Some(listener) => {
-            listener.take_socket().await.ok_or_else(|| Error::InvalidClientConfig {
-                message: "handshake listener socket was already taken".to_string(),
-            })?
-        }
-        None => {
-            let mut socket = RouterSocket::new();
-            socket.bind(handshake_address).await?;
-            socket
-        }
+    // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
+    //    identities, and startup order does not matter. A listener pre-bound by the caller is
+    //    adopted instead, so the port was never released while engines started.
+    let mut handshake_socket = RouterSocket::new();
+    match handshake_listener_fd {
+        Some(fd) => handshake_socket.bind_listener(adopt_listener(fd)?).await?,
+        None => handshake_socket.bind(handshake_address).await?,
     };
 
     let mut engines = BTreeMap::new();
@@ -466,8 +405,9 @@ fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
         });
     }
 
-    // SAFETY: Python's Popen(pass_fds) gives the frontend its own descriptor.
-    // The bootstrapped startup path calls this function once per descriptor,
+    // SAFETY: Python's Popen(pass_fds) gives the frontend its own descriptor,
+    // and a handshake-owner caller hands over the descriptor of a listener it
+    // bound itself. Each startup path calls this function once per descriptor,
     // transferring ownership to the listener constructed below.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let socket: socket2::Socket = fd.into();
@@ -707,13 +647,12 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
     use std::os::fd::IntoRawFd;
 
     use zeromq::RouterSocket;
     use zeromq::prelude::Socket;
 
-    use super::{HandshakeListener, adopt_listener, bind_local_sockets};
+    use super::{adopt_listener, bind_local_sockets};
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -765,18 +704,5 @@ mod tests {
         assert!(endpoint.to_string().starts_with("ipc://"), "{endpoint}");
         assert!(router.close().await.is_empty());
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[tokio::test]
-    async fn handshake_listener_holds_kernel_assigned_port() {
-        let listener = HandshakeListener::bind("tcp://127.0.0.1:0")
-            .await
-            .expect("bind handshake listener");
-        let port = listener.port().expect("handshake port");
-        assert_ne!(port, 0);
-        assert_eq!(listener.address(), format!("tcp://127.0.0.1:{port}"));
-
-        let stolen = TcpListener::bind(("127.0.0.1", port));
-        assert!(stolen.is_err(), "handshake port must stay reserved");
     }
 }
