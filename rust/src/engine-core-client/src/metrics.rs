@@ -419,6 +419,9 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.num_descriptors {
         handles.nixl_num_descriptors.observe(*value as f64);
     }
+    // Transfer, handshake and notification failures are grouped: all are
+    // sporadic lower-transport-layer events. KV expiry is reported separately
+    // as it signals autoscaler behavior, not transport health.
     handles.nixl_num_failed_transfers.inc_by(
         stats
             .num_failed_transfers

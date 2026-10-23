@@ -587,7 +587,8 @@ impl SchedulerMetrics {
             "vllm:nixl_num_notifications_after_expiry",
             "Number of completion notifications for requests that were no longer tracked, \
              usually because their KV lease expired. The KV blocks may have been reused \
-             before the transfer finished. Counted per notification (one per remote rank).",
+             before the transfer finished. Counted per notification (one per remote rank), \
+             not per request.",
             nixl_num_notifications_after_expiry.clone(),
         );
 
