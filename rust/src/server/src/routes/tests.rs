@@ -8874,7 +8874,7 @@ async fn start_profile_route_sends_expected_utility_call() {
     for content_type in [None, Some("application/json")] {
         let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
             boxed_test_future(async move {
-                let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+                let start = profile_start_without_overrides();
                 let call_id = recv_profile_call(dealer, start).await;
                 send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
             })
@@ -8914,6 +8914,10 @@ async fn start_profile_route_forwards_session_overrides() {
                 Value::from("sharegpt_run-1"),
                 Value::from(5000),
                 Value::from(20),
+                Value::Map(vec![
+                    (Value::from("record_shapes"), Value::from(true)),
+                    (Value::from("with_stack"), Value::from(false)),
+                ]),
             ];
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
@@ -8933,6 +8937,7 @@ async fn start_profile_route_forwards_session_overrides() {
                         "profile_prefix": "sharegpt_run-1",
                         "delay_iterations": 5000,
                         "max_iterations": 20,
+                        "profiler_kwargs": {"record_shapes": true, "with_stack": false},
                     })
                     .to_string(),
                 ))
@@ -8950,7 +8955,7 @@ async fn start_profile_route_forwards_session_overrides() {
 async fn start_profile_route_ignores_completion_payload() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides();
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -8987,7 +8992,7 @@ async fn start_profile_route_ignores_completion_payload() {
 async fn duplicate_start_profile_returns_conflict() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides();
             let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -9028,9 +9033,9 @@ async fn start_profile_succeeds_again_after_stop() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let expected_args = [
-                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                profile_start_without_overrides(),
                 vec![Value::from(false), Value::Nil],
-                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                profile_start_without_overrides(),
                 vec![Value::from(false), Value::Nil],
             ];
             for expected in expected_args {
@@ -9064,6 +9069,18 @@ async fn start_profile_succeeds_again_after_stop() {
     engine_task.await.expect("mock engine task");
 }
 
+/// `profile` utility arguments for a start without session overrides: Python's
+/// `profile_async(True, None, None, None, None)`.
+fn profile_start_without_overrides() -> Vec<Value> {
+    vec![
+        Value::from(true),
+        Value::Nil,
+        Value::Nil,
+        Value::Nil,
+        Value::Nil,
+    ]
+}
+
 /// Receive a `profile` utility call with the expected args and return its call id.
 async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
     let utility = recv_engine_message(dealer).await;
@@ -9084,7 +9101,7 @@ async fn start_profile_waits_for_inflight_stop() {
     let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
         boxed_test_future(async move {
-            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let start = profile_start_without_overrides;
 
             let call_id = recv_profile_call(dealer, start()).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
