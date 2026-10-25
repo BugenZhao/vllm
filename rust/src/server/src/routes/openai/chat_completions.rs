@@ -25,6 +25,7 @@ use vllm_chat::{
     ChatRequest, CollectedAssistantMessage, FinishReason,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_llm::WeightVersionSpan;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -148,6 +149,7 @@ async fn collect_chat_completion(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
         is_named_tool_choice,
     }: ResponseOptions,
 ) -> Result<ChatCompletionResponse, ApiError> {
@@ -171,6 +173,7 @@ async fn collect_chat_completion(
         finish_reason,
         kv_transfer_params,
         ec_transfer_params,
+        weight_versions,
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
@@ -276,7 +279,7 @@ async fn collect_chat_completion(
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
             routed_experts: None,
-            weight_versions: None,
+            weight_versions: weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
@@ -316,6 +319,7 @@ async fn chat_completion_chunk_stream(
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
         is_named_tool_choice,
     }: ResponseOptions,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
@@ -495,6 +499,7 @@ async fn chat_completion_chunk_stream(
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
+                weight_versions,
                 ..
             }) => {
                 if enable_log_requests {
@@ -527,6 +532,7 @@ async fn chat_completion_chunk_stream(
                     finish_reason,
                     saw_tool_calls && !is_named_tool_choice,
                     kv_transfer_params.map(|value| *value),
+                    weight_versions.filter(|_| return_weight_versions),
                 ) {
                     Ok(chunk) => {
                         let finish_reason = chunk.choices[0].finish_reason.as_deref();
@@ -969,6 +975,7 @@ fn final_chunk(
     finish_reason: FinishReason,
     use_tool_calls_finish_reason: bool,
     kv_transfer_params: Option<Value>,
+    weight_versions: Option<Vec<WeightVersionSpan>>,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, use_tool_calls_finish_reason)?;
@@ -983,6 +990,7 @@ fn final_chunk(
     chunk.choices.push(ChatCompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
+        weight_versions,
         ..Default::default()
     });
     chunk.kv_transfer_params = kv_transfer_params;
@@ -1108,6 +1116,7 @@ mod tests {
             FinishReason::Stop(Some(StopReason::Text("stop".to_string()))),
             false,
             None,
+            None,
         )
         .expect("finish reason is valid");
 
@@ -1117,7 +1126,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, false, None, None)
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
@@ -1126,7 +1135,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, false, None, None)
             .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
@@ -1135,13 +1144,28 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), false, None).is_err());
+        assert!(
+            final_chunk(
+                &stream_envelope(),
+                FinishReason::Error(None),
+                false,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), true, None)
-            .expect("finish reason is valid");
+        let chunk = final_chunk(
+            &stream_envelope(),
+            FinishReason::stop_eos(),
+            true,
+            None,
+            None,
+        )
+        .expect("finish reason is valid");
 
         assert_eq!(
             chunk.choices[0].finish_reason.as_deref(),
@@ -1197,6 +1221,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1291,6 +1316,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1338,6 +1364,7 @@ mod tests {
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
+                weight_versions: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1404,6 +1431,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1486,6 +1514,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1620,6 +1649,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1700,6 +1730,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1763,6 +1794,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1843,6 +1875,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1916,6 +1949,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -1972,6 +2006,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
