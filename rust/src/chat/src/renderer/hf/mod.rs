@@ -1115,6 +1115,23 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_passes_content_parts_to_macro_bound_content_loops() {
+        let template = "{% macro render_content(message_content) %}{% for item in message_content %}{{ item.text }}|{% endfor %}{% endmacro %}{% for message in messages %}{{ render_content(message.content) }}{% endfor %}";
+        let mut request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text("world"),
+        ])]);
+        let default = render(Some(template), &request).unwrap();
+        request.chat_options.chat_template = Some(template.to_string());
+        let overridden = render(None, &request).unwrap();
+
+        assert_eq!(
+            (default.as_str(), overridden.as_str()),
+            ("hello|world|", "hello|world|")
+        );
+    }
+
+    #[test]
     fn chat_template_per_request_override() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
 

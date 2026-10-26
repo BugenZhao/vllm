@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
 
-use minijinja::machinery::ast::{Expr, ForLoop, Set, Stmt};
+use minijinja::machinery::ast::{Call, CallArg, Expr, ForLoop, Macro, Set, Stmt};
 use minijinja::machinery::{WhitespaceConfig, parse};
 use minijinja::syntax::SyntaxConfig;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
@@ -70,7 +70,23 @@ impl fmt::Display for ChatTemplateContentFormatOption {
 }
 
 fn is_var_access(expr: &Expr, varname: &str) -> bool {
-    matches!(expr, Expr::Var(v) if v.id == varname)
+    match expr {
+        Expr::Var(v) => v.id == varname,
+        // `ns.rest` matches the dotted alias "ns.rest".
+        Expr::GetAttr(g) => varname
+            .rsplit_once('.')
+            .is_some_and(|(base, attr)| g.name == attr && is_var_access(&g.expr, base)),
+        _ => false,
+    }
+}
+
+/// Render an attribute-assignment target like `ns.rest` as a dotted name.
+fn attr_dotted_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(v) => Some(v.id.to_string()),
+        Expr::GetAttr(g) => attr_dotted_name(&g.expr).map(|base| format!("{base}.{}", g.name)),
+        _ => None,
+    }
 }
 
 fn is_const_str(expr: &Expr, value: &str) -> bool {
@@ -99,102 +115,210 @@ fn is_var_or_elems_access(expr: &Expr, varname: &str, key: Option<&str>) -> bool
     }
 }
 
-fn visit_stmt<'a>(
-    stmt: &'a Stmt<'a>,
-    assignments: &mut Vec<&'a Set<'a>>,
-    loops: &mut Vec<&'a ForLoop<'a>>,
-) {
-    match stmt {
-        Stmt::Template(t) => {
-            for child in &t.children {
-                visit_stmt(child, assignments, loops);
+/// The AST nodes content-format detection inspects, collected in one walk.
+#[derive(Default)]
+struct TemplateNodes<'a> {
+    assignments: Vec<&'a Set<'a>>,
+    /// Every for loop, with the indices into `macros` of the macros enclosing
+    /// it (outermost first).
+    loops: Vec<(&'a ForLoop<'a>, Vec<usize>)>,
+    macros: Vec<&'a Macro<'a>>,
+    /// Every call expression, including the call of a call block.
+    calls: Vec<&'a Call<'a>>,
+}
+
+impl<'a> TemplateNodes<'a> {
+    fn collect(root: &'a Stmt<'a>) -> Self {
+        let mut nodes = Self::default();
+        nodes.visit_stmt(root, &mut Vec::new());
+        nodes
+    }
+
+    fn visit_stmts(&mut self, stmts: &'a [Stmt<'a>], macros: &mut Vec<usize>) {
+        for stmt in stmts {
+            self.visit_stmt(stmt, macros);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &'a Stmt<'a>, macros: &mut Vec<usize>) {
+        match stmt {
+            Stmt::Template(t) => self.visit_stmts(&t.children, macros),
+            Stmt::EmitExpr(e) => self.visit_expr(&e.expr),
+            Stmt::ForLoop(fl) => {
+                self.loops.push((fl, macros.clone()));
+                self.visit_expr(&fl.iter);
+                if let Some(filter_expr) = &fl.filter_expr {
+                    self.visit_expr(filter_expr);
+                }
+                self.visit_stmts(&fl.body, macros);
+                self.visit_stmts(&fl.else_body, macros);
+            }
+            Stmt::IfCond(ic) => {
+                self.visit_expr(&ic.expr);
+                self.visit_stmts(&ic.true_body, macros);
+                self.visit_stmts(&ic.false_body, macros);
+            }
+            Stmt::WithBlock(wb) => {
+                for (_, expr) in &wb.assignments {
+                    self.visit_expr(expr);
+                }
+                self.visit_stmts(&wb.body, macros);
+            }
+            Stmt::Set(set_stmt) => {
+                self.assignments.push(set_stmt);
+                self.visit_expr(&set_stmt.expr);
+            }
+            Stmt::SetBlock(sb) => {
+                if let Some(filter) = &sb.filter {
+                    self.visit_expr(filter);
+                }
+                self.visit_stmts(&sb.body, macros);
+            }
+            Stmt::AutoEscape(ae) => {
+                self.visit_expr(&ae.enabled);
+                self.visit_stmts(&ae.body, macros);
+            }
+            Stmt::FilterBlock(fb) => {
+                self.visit_expr(&fb.filter);
+                self.visit_stmts(&fb.body, macros);
+            }
+            Stmt::Block(b) => self.visit_stmts(&b.body, macros),
+            Stmt::Macro(m) => {
+                for default in &m.defaults {
+                    self.visit_expr(default);
+                }
+                macros.push(self.macros.len());
+                self.macros.push(m);
+                self.visit_stmts(&m.body, macros);
+                macros.pop();
+            }
+            // The body of a call block is the anonymous `caller` macro, which
+            // Python's detection does not treat as a macro.
+            Stmt::CallBlock(cb) => {
+                self.visit_call(&cb.call);
+                for default in &cb.macro_decl.defaults {
+                    self.visit_expr(default);
+                }
+                self.visit_stmts(&cb.macro_decl.body, macros);
+            }
+            Stmt::Do(d) => self.visit_call(&d.call),
+            _ => {}
+        }
+    }
+
+    fn visit_call(&mut self, call: &'a Call<'a>) {
+        self.calls.push(call);
+        self.visit_expr(&call.expr);
+        for arg in &call.args {
+            self.visit_call_arg(arg);
+        }
+    }
+
+    fn visit_call_arg(&mut self, arg: &'a CallArg<'a>) {
+        match arg {
+            CallArg::Pos(expr)
+            | CallArg::Kwarg(_, expr)
+            | CallArg::PosSplat(expr)
+            | CallArg::KwargSplat(expr) => self.visit_expr(expr),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'a Expr<'a>) {
+        match expr {
+            Expr::Var(_) | Expr::Const(_) => {}
+            Expr::Slice(s) => {
+                self.visit_expr(&s.expr);
+                for bound in [&s.start, &s.stop, &s.step].into_iter().flatten() {
+                    self.visit_expr(bound);
+                }
+            }
+            Expr::UnaryOp(u) => self.visit_expr(&u.expr),
+            Expr::BinOp(b) => {
+                self.visit_expr(&b.left);
+                self.visit_expr(&b.right);
+            }
+            Expr::Compare(c) => {
+                self.visit_expr(&c.expr);
+                for op in &c.ops {
+                    self.visit_expr(&op.expr);
+                }
+            }
+            Expr::IfExpr(i) => {
+                self.visit_expr(&i.test_expr);
+                self.visit_expr(&i.true_expr);
+                if let Some(false_expr) = &i.false_expr {
+                    self.visit_expr(false_expr);
+                }
+            }
+            Expr::Filter(f) => {
+                if let Some(inner) = &f.expr {
+                    self.visit_expr(inner);
+                }
+                for arg in &f.args {
+                    self.visit_call_arg(arg);
+                }
+            }
+            Expr::Test(t) => {
+                self.visit_expr(&t.expr);
+                for arg in &t.args {
+                    self.visit_call_arg(arg);
+                }
+            }
+            Expr::GetAttr(g) => self.visit_expr(&g.expr),
+            Expr::GetItem(g) => {
+                self.visit_expr(&g.expr);
+                self.visit_expr(&g.subscript_expr);
+            }
+            Expr::Call(c) => self.visit_call(c),
+            Expr::List(l) => {
+                for item in &l.items {
+                    self.visit_expr(item);
+                }
+            }
+            Expr::Map(m) => {
+                for item in m.keys.iter().chain(&m.values) {
+                    self.visit_expr(item);
+                }
             }
         }
-        Stmt::ForLoop(fl) => {
-            loops.push(fl);
-            for child in &fl.body {
-                visit_stmt(child, assignments, loops);
-            }
-            for child in &fl.else_body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::IfCond(ic) => {
-            for child in &ic.true_body {
-                visit_stmt(child, assignments, loops);
-            }
-            for child in &ic.false_body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::WithBlock(wb) => {
-            for child in &wb.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::Set(set_stmt) => assignments.push(set_stmt),
-        Stmt::SetBlock(sb) => {
-            for child in &sb.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::AutoEscape(ae) => {
-            for child in &ae.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::FilterBlock(fb) => {
-            for child in &fb.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::Block(b) => {
-            for child in &b.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::Macro(m) => {
-            for child in &m.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        Stmt::CallBlock(cb) => {
-            for child in &cb.macro_decl.body {
-                visit_stmt(child, assignments, loops);
-            }
-        }
-        _ => {}
     }
 }
 
-fn collect_assignments_and_loops<'a>(
-    root: &'a Stmt<'a>,
-) -> (Vec<&'a Set<'a>>, Vec<&'a ForLoop<'a>>) {
-    let mut assignments = Vec::new();
-    let mut loops = Vec::new();
-    visit_stmt(root, &mut assignments, &mut loops);
-    (assignments, loops)
-}
-
-fn iter_nodes_assign_var_or_elems(root: &Stmt<'_>, varname: &str) -> Vec<String> {
-    let (assignments, _) = collect_assignments_and_loops(root);
-
+fn iter_nodes_assign_var_or_elems(nodes: &TemplateNodes<'_>, varname: &str) -> Vec<String> {
     let mut discovered = vec![varname.to_string()];
     let mut seen = HashSet::from([varname.to_string()]);
     let mut related = VecDeque::from([varname.to_string()]);
 
     while let Some(related_varname) = related.pop_front() {
-        for assign in &assignments {
-            let Expr::Var(lhs) = &assign.target else {
-                continue;
+        for assign in &nodes.assignments {
+            let aliases = match (&assign.target, &assign.expr) {
+                // `{% set ns = namespace(rest=messages) %}` aliases `ns.rest`.
+                (Expr::Var(lhs), Expr::Call(call)) if is_var_access(&call.expr, "namespace") => {
+                    call.args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            CallArg::Kwarg(key, value)
+                                if is_var_or_elems_access(value, &related_varname, None) =>
+                            {
+                                Some(format!("{}.{key}", lhs.id))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                }
+                (lhs @ (Expr::Var(_) | Expr::GetAttr(_)), rhs)
+                    if is_var_or_elems_access(rhs, &related_varname, None) =>
+                {
+                    attr_dotted_name(lhs).into_iter().collect()
+                }
+                _ => Vec::new(),
             };
 
-            if is_var_or_elems_access(&assign.expr, &related_varname, None) {
-                let lhs_name = lhs.id.to_string();
-                if seen.insert(lhs_name.clone()) {
-                    discovered.push(lhs_name.clone());
-                    if lhs_name != related_varname {
-                        related.push_back(lhs_name);
+            for alias in aliases {
+                if seen.insert(alias.clone()) {
+                    discovered.push(alias.clone());
+                    if alias != related_varname {
+                        related.push_back(alias);
                     }
                 }
             }
@@ -204,14 +328,13 @@ fn iter_nodes_assign_var_or_elems(root: &Stmt<'_>, varname: &str) -> Vec<String>
     discovered
 }
 
-fn iter_nodes_assign_messages_item(root: &Stmt<'_>) -> Vec<String> {
-    let message_varnames = iter_nodes_assign_var_or_elems(root, "messages");
-    let (_, loops) = collect_assignments_and_loops(root);
+fn iter_nodes_assign_messages_item(nodes: &TemplateNodes<'_>) -> Vec<String> {
+    let message_varnames = iter_nodes_assign_var_or_elems(nodes, "messages");
 
     let mut discovered = Vec::new();
     let mut seen = HashSet::new();
 
-    for loop_ast in loops {
+    for (loop_ast, _) in &nodes.loops {
         let Expr::Var(target) = &loop_ast.target else {
             continue;
         };
@@ -230,16 +353,92 @@ fn iter_nodes_assign_messages_item(root: &Stmt<'_>) -> Vec<String> {
     discovered
 }
 
-fn has_content_item_loop(root: &Stmt<'_>) -> bool {
-    let message_varnames = iter_nodes_assign_messages_item(root);
-    let (_, loops) = collect_assignments_and_loops(root);
+/// Parameters of a macro that some call binds to `message.content`, by
+/// position or by keyword.
+fn macro_content_params<'a>(
+    macro_decl: &'a Macro<'a>,
+    calls: &[&Call<'_>],
+    message_varnames: &[String],
+) -> HashSet<&'a str> {
+    let is_message_content = |expr: &Expr<'_>| {
+        message_varnames
+            .iter()
+            .any(|varname| is_var_or_elems_access(expr, varname, Some("content")))
+    };
+    let param_names = macro_decl
+        .args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Var(v) => Some(v.id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
-    loops.into_iter().any(|loop_ast| {
-        matches!(loop_ast.target, Expr::Var(_))
-            && (is_var_access(&loop_ast.iter, "content")
-                || message_varnames.iter().any(|varname| {
-                    is_var_or_elems_access(&loop_ast.iter, varname, Some("content"))
-                }))
+    let mut bound = HashSet::new();
+    for call in calls {
+        if !is_var_access(&call.expr, macro_decl.name) {
+            continue;
+        }
+        let positional = call.args.iter().filter_map(|arg| match arg {
+            CallArg::Pos(expr) => Some(expr),
+            _ => None,
+        });
+        for (param, arg) in param_names.iter().zip(positional) {
+            if let Some(param) = param
+                && is_message_content(arg)
+            {
+                bound.insert(*param);
+            }
+        }
+        for arg in &call.args {
+            if let CallArg::Kwarg(key, value) = arg
+                && let Some(param) = param_names.iter().flatten().find(|param| *param == key)
+                && is_message_content(value)
+            {
+                bound.insert(*param);
+            }
+        }
+    }
+    bound
+}
+
+fn has_content_item_loop(root: &Stmt<'_>) -> bool {
+    let nodes = TemplateNodes::collect(root);
+    let message_varnames = iter_nodes_assign_messages_item(&nodes);
+    let content_params = nodes
+        .macros
+        .iter()
+        .map(|m| macro_content_params(m, &nodes.calls, &message_varnames))
+        .collect::<Vec<_>>();
+
+    nodes.loops.iter().any(|(loop_ast, macros)| {
+        if !matches!(loop_ast.target, Expr::Var(_)) {
+            return false;
+        }
+        // `{% for part in message.content %}`, anywhere.
+        if message_varnames
+            .iter()
+            .any(|varname| is_var_or_elems_access(&loop_ast.iter, varname, Some("content")))
+        {
+            return true;
+        }
+        let Expr::Var(iter) = &loop_ast.iter else {
+            return false;
+        };
+        if macros.is_empty() {
+            // `{% for part in content %}` outside any macro.
+            iter.id == "content"
+        } else {
+            // Inside a macro, only a loop over a parameter bound to
+            // `message.content` counts; the nearest enclosing macro with bound
+            // parameters decides, like Python's detection.
+            macros
+                .iter()
+                .rev()
+                .map(|&index| &content_params[index])
+                .find(|params| !params.is_empty())
+                .is_some_and(|params| params.contains(iter.id))
+        }
     })
 }
 
@@ -324,6 +523,104 @@ mod tests {
             ),
             ChatTemplateContentFormat::OpenAi
         );
+    }
+
+    /// Cases from Python's `test_detect_content_format` (vllm-project/vllm#53824
+    /// and vllm-project/vllm#62622), plus a macro reached through a namespace
+    /// alias.
+    #[test]
+    fn detects_content_loops_through_macro_parameters_like_python() {
+        let cases = [
+            (
+                "positional parameter bound to message content",
+                "{% macro render_message(role, message_content) %}\
+                 {% for item in message_content %}{{ item['type'] }}{% endfor %}\
+                 {% endmacro %}\
+                 {% for message in messages %}\
+                 {{ render_message(message['role'], message['content']) }}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "keyword parameter bound to message content",
+                "{% macro render_message(role, message_content) %}\
+                 {% for item in message_content %}{{ item['type'] }}{% endfor %}\
+                 {% endmacro %}\
+                 {% for message in messages %}\
+                 {{ render_message(role=message['role'], message_content=message['content']) }}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "direct loop over message content",
+                "{% for message in messages %}\
+                 {% for item in message['content'] %}{{ item['type'] }}{% endfor %}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "macro parameter named content but bound to a literal",
+                "{% macro render_message(content) %}\
+                 {% for item in content %}{{ item['type'] }}{% endfor %}\
+                 {% endmacro %}\
+                 {% for message in messages %}\
+                 {{ render_message(content=['text only']) }}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::String,
+            ),
+            (
+                "no content loop",
+                "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+                ChatTemplateContentFormat::String,
+            ),
+            (
+                "messages aliased by a namespace argument",
+                "{% set ns = namespace(rest=messages) %}\
+                 {% for message in ns.rest %}\
+                 {% for item in message['content'] %}{{ item['type'] }}{% endfor %}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "messages aliased by a namespace attribute assignment",
+                "{% set ns = namespace(rest=[]) %}\
+                 {% set ns.rest = messages %}\
+                 {% for message in ns.rest %}\
+                 {% for item in message['content'] %}{{ item['type'] }}{% endfor %}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "macro called from a call block's caller defaults",
+                "{% macro render(content) %}{% for p in content %}{{ p.text }}{% endfor %}{% endmacro %}\
+                 {% macro wrap() %}{{ caller() }}{% endmacro %}\
+                 {% for message in messages %}\
+                 {% call(text=render(message.content)) wrap() %}{{ text }}{% endcall %}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "macro called from an autoescape condition",
+                "{% macro render(content) %}{% for p in content %}{{ p.text }}{% endfor %}{% endmacro %}\
+                 {% for message in messages %}\
+                 {% autoescape render(message.content) == 'hello' %}{{ message.role }}{% endautoescape %}\
+                 {% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+            (
+                "macro parameter bound through a namespace alias",
+                "{% macro render_content(content) %}\
+                 {% for part in content %}{{ part['type'] }}{% endfor %}\
+                 {% endmacro %}\
+                 {% set ns = namespace(rest=messages[1:]) %}\
+                 {% for message in ns.rest %}{{ render_content(message['content']) }}{% endfor %}",
+                ChatTemplateContentFormat::OpenAi,
+            ),
+        ];
+
+        for (name, template, expected) in cases {
+            assert_eq!(detect(template), expected, "{name}");
+        }
     }
 
     #[test]
