@@ -16,4 +16,4 @@ type get_weather = (_: {
 city: string,
 }) => any;
 
-} // namespace functions<|end|><|start|>user<|message|>Check Hangzhou weather.<|end|><|start|>assistant<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Hangzhou"}<|call|><|start|>functions.get_weather<|channel|>commentary to=assistant<|message|>{"temperature":20}<|end|><|start|>assistant
+} // namespace functions<|end|><|start|>user<|message|>Check Hangzhou weather.<|end|><|start|>assistant<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{"city":"Hangzhou"}<|call|><|start|>functions.get_weather<|channel|>commentary to=assistant<|message|>{"temperature":20}<|end|><|start|>assistant
