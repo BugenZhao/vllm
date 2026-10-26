@@ -205,6 +205,10 @@ mod tests {
         let cases = [
             json!({"include_usage": false}),
             json!({"continuous_usage_stats": true}),
+            // Python checks the raw object, so a key set to null or a key
+            // Rust does not model still counts as set.
+            json!({"include_usage": null}),
+            json!({"include_obfuscation": true}),
         ];
         for stream_options in cases {
             let request = non_streaming_request(stream_options.clone());
@@ -213,6 +217,25 @@ mod tests {
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
                 "{stream_options}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_stream_options_with_streaming() {
+        for stream_options in [
+            json!({"include_usage": null}),
+            json!({"include_obfuscation": true}),
+        ] {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "stream_options": stream_options,
+            }))
+            .expect("parse request");
+            request.validate().expect("schema validation accepts streaming options");
+            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+                .expect("streaming accepts stream_options");
         }
     }
 

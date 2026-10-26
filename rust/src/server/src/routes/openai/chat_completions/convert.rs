@@ -487,7 +487,7 @@ mod tests {
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
         AudioUrl, ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, InputAudio,
-        MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        MessageContent, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -968,10 +968,10 @@ mod tests {
     fn prepare_chat_request_maps_stream_usage_and_token_format_options() {
         let mut request = base_request();
         request.return_tokens_as_token_ids = Some(true);
-        request.stream_options = Some(StreamOptions {
-            include_usage: Some(true),
-            continuous_usage_stats: Some(true),
-        });
+        request.stream_options = Some(
+            serde_json::from_value(json!({"include_usage": true, "continuous_usage_stats": true}))
+                .expect("parse stream_options"),
+        );
 
         let prepared = prepare_chat_request(
             request,
@@ -988,10 +988,10 @@ mod tests {
     #[test]
     fn prepare_chat_request_gates_continuous_usage_on_include_usage() {
         let mut request = base_request();
-        request.stream_options = Some(StreamOptions {
-            include_usage: None,
-            continuous_usage_stats: Some(true),
-        });
+        request.stream_options = Some(
+            serde_json::from_value(json!({"continuous_usage_stats": true}))
+                .expect("parse stream_options"),
+        );
 
         let prepared = prepare_chat_request(
             request,

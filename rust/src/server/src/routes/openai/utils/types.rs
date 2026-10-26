@@ -255,23 +255,49 @@ impl StreamResponseEnvelope {
 }
 
 /// Mirrors the Python vLLM `StreamOptions` class.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StreamOptions {
     pub include_usage: Option<bool>,
     pub continuous_usage_stats: Option<bool>,
+    /// Whether the request sent an object without keys.
+    #[serde(skip)]
+    empty: bool,
 }
 
 impl StreamOptions {
-    /// Whether no option is set, as in `"stream_options": {}`.
+    /// Whether the request sent an object without keys, as in
+    /// `"stream_options": {}`.
     ///
     /// Python rejects `stream_options` without `stream=true` only when the
-    /// object is non-empty, so an empty object must pass that check.
+    /// raw object is non-empty, so an empty object must pass that check while
+    /// a key set to `null`, or a key Rust does not know, must not.
     pub fn is_empty(&self) -> bool {
-        let Self {
+        self.empty
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamOptions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Options {
+            include_usage: Option<bool>,
+            continuous_usage_stats: Option<bool>,
+        }
+
+        let object = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let empty = object.is_empty();
+        let Options {
             include_usage,
             continuous_usage_stats,
-        } = self;
-        include_usage.is_none() && continuous_usage_stats.is_none()
+        } = Options::deserialize(Value::Object(object)).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            include_usage,
+            continuous_usage_stats,
+            empty,
+        })
     }
 }
 
