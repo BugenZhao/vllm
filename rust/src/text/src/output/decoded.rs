@@ -123,6 +123,7 @@ pub async fn decoded_text_event_stream(
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
     let mut cached_token_count = 0_usize;
+    let mut cache_creation_token_count = 0_usize;
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
@@ -131,6 +132,8 @@ pub async fn decoded_text_event_stream(
     while let Some(next) = raw_stream.next().await {
         let output = next?;
         cached_token_count = cached_token_count.max(output.cached_token_count);
+        cache_creation_token_count =
+            cache_creation_token_count.max(output.cache_creation_token_count);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -313,6 +316,7 @@ pub async fn decoded_text_event_stream(
                         prompt_token_count,
                         output_token_count,
                         cached_token_count,
+                        cache_creation_token_count,
                     },
                     finish_reason: reason,
                     kv_transfer_params,
@@ -574,6 +578,7 @@ mod tests {
                                 prompt_token_count: 0,
                                 output_token_count: 3,
                                 cached_token_count: 0,
+                                cache_creation_token_count: 0,
                             },
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
@@ -610,6 +615,7 @@ mod tests {
                                 prompt_token_count: 0,
                                 output_token_count: 2,
                                 cached_token_count: 0,
+                                cache_creation_token_count: 0,
                             },
                             finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
                                 b'!' as u32,

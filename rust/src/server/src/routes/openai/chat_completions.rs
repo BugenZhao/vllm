@@ -210,7 +210,8 @@ async fn collect_chat_completion(
     };
     let metrics = enable_per_request_metrics
         .then(|| PerRequestMetrics::from_timestamps(timestamps, usage.output_token_count));
-    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details)
+        .with_created_cache_tokens(usage.cache_creation_token_count);
 
     if enable_log_requests {
         info!(
@@ -502,7 +503,8 @@ async fn chat_completion_chunk_stream(
                     });
                     y.yield_ok(usage_chunk(
                         &envelope,
-                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
+                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details)
+                            .with_created_cache_tokens(final_usage.cache_creation_token_count),
                         metrics,
                     ))
                     .await;
@@ -872,6 +874,7 @@ mod tests {
             prompt_token_count: prompt_tokens,
             output_token_count: output_tokens,
             cached_token_count: cached_tokens,
+            cache_creation_token_count: 0,
         }
         .into()
     }
@@ -990,7 +993,13 @@ mod tests {
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
-                usage: done_usage(1, 1, 1),
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 1,
+                    cache_creation_token_count: 2,
+                }
+                .into(),
                 timestamps: vllm_llm::RequestTimestamps {
                     queued_ts: 10.0,
                     scheduled_ts: 10.2,
@@ -1032,15 +1041,11 @@ mod tests {
         let logprobs = chunks[1].choices[0].logprobs.as_ref().expect("logprobs");
         let content = logprobs.content.as_ref().expect("logprobs content");
         assert_eq!(content[0].token, "hi");
+        let usage = serde_json::to_value(chunks[3].usage.as_ref().expect("usage"))
+            .expect("usage serializes");
         assert_eq!(
-            chunks[3]
-                .usage
-                .as_ref()
-                .expect("usage")
-                .prompt_tokens_details
-                .as_ref()
-                .map(|details| details.cached_tokens),
-            Some(1)
+            usage["prompt_tokens_details"],
+            json!({"cached_tokens": 1, "created_cache_tokens": 2})
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
@@ -1510,6 +1515,7 @@ mod tests {
                         prompt_token_count: 3,
                         output_token_count: 3,
                         cached_token_count: 0,
+                        cache_creation_token_count: 0,
                     },
                     reasoning_tokens: 2,
                 },
@@ -1582,6 +1588,7 @@ mod tests {
                         prompt_token_count: 1,
                         output_token_count: 2,
                         cached_token_count: 0,
+                        cache_creation_token_count: 0,
                     },
                     reasoning_tokens: 2,
                 },

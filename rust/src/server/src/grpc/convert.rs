@@ -932,6 +932,7 @@ mod tests {
                 prompt_token_count: 0,
                 output_token_count: 0,
                 cached_token_count: 0,
+                cache_creation_token_count: 0,
             },
             finish_reason: reason,
             kv_transfer_params: None,

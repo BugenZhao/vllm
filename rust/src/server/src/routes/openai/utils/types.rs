@@ -577,7 +577,10 @@ impl Usage {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens.map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: cached_tokens.map(|cached_tokens| PromptTokenUsageInfo {
+                cached_tokens,
+                created_cache_tokens: None,
+            }),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -594,12 +597,26 @@ impl Usage {
             usage.reasoning_tokens,
         )
     }
+
+    /// Report the prompt tokens newly written to the prefix cache alongside
+    /// the cached ones, as Python does on chat only.
+    pub fn with_created_cache_tokens(mut self, created_cache_tokens: usize) -> Self {
+        if let Some(details) = &mut self.prompt_tokens_details {
+            details.created_cache_tokens = Some(created_cache_tokens);
+        }
+        self
+    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache, reported on chat only.
+    /// Omitted when unset, as on Python's usage-only stream chunks; only
+    /// Python's non-streaming completions and generate responses show `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_cache_tokens: Option<usize>,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -622,6 +639,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 3,
+                cache_creation_token_count: 0,
             },
             false,
         );
@@ -638,6 +656,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 3,
+                cache_creation_token_count: 0,
             },
             true,
         );
@@ -655,11 +674,39 @@ mod usage_tests {
                 prompt_token_count: 8,
                 output_token_count: 2,
                 cached_token_count: 0,
+                cache_creation_token_count: 0,
             },
             true,
         );
         let json = serde_json::to_value(&usage).expect("usage serializes");
         assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
+    #[test]
+    fn created_cache_tokens_join_enabled_prompt_token_details() {
+        let usage = TokenUsage {
+            prompt_token_count: 5,
+            output_token_count: 2,
+            cached_token_count: 2,
+            cache_creation_token_count: 3,
+        };
+        let details = |usage: Usage| {
+            serde_json::to_value(usage).expect("usage serializes")["prompt_tokens_details"].clone()
+        };
+
+        assert_eq!(
+            details(Usage::from_token_usage(usage, true).with_created_cache_tokens(3)),
+            serde_json::json!({"cached_tokens": 2, "created_cache_tokens": 3})
+        );
+        // Completions never set it, so the key is omitted.
+        assert_eq!(
+            details(Usage::from_token_usage(usage, true)),
+            serde_json::json!({"cached_tokens": 2})
+        );
+        assert_eq!(
+            details(Usage::from_token_usage(usage, false).with_created_cache_tokens(3)),
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -670,6 +717,7 @@ mod usage_tests {
                     prompt_token_count: 5,
                     output_token_count: 4,
                     cached_token_count: 0,
+                    cache_creation_token_count: 0,
                 },
                 reasoning_tokens: 3,
             },
@@ -689,6 +737,7 @@ mod usage_tests {
                     prompt_token_count: 5,
                     output_token_count: 0,
                     cached_token_count: 0,
+                    cache_creation_token_count: 0,
                 },
                 reasoning_tokens: 0,
             },
@@ -706,6 +755,7 @@ mod usage_tests {
                 prompt_token_count: 5,
                 output_token_count: 2,
                 cached_token_count: 0,
+                cache_creation_token_count: 0,
             },
             false,
         );
