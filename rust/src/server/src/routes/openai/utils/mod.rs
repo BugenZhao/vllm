@@ -3,6 +3,7 @@
 
 pub mod logprobs;
 pub mod metrics;
+pub mod orca;
 pub mod structured_outputs;
 pub mod types;
 pub mod usage;

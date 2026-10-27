@@ -40,7 +40,7 @@ use vllm_engine_core_client::protocol::output::{
     StopReason, UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::stats::{PrefillStats, SchedulerStats};
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
@@ -5571,6 +5571,119 @@ async fn non_stream_completions_still_succeed() {
 
     assert_eq!(response.status(), StatusCode::OK);
     engine_task.await.expect("mock engine task");
+}
+
+/// Like Python, a non-streaming chat or completions response carries an ORCA
+/// `endpoint-load-metrics` header built from the exported scheduler gauges when
+/// the request names a supported `endpoint-load-metrics-format`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_non_stream_responses_report_orca_load_metrics() {
+    let cases = [
+        (None, false, None),
+        (
+            Some("TEXT"),
+            false,
+            Some(
+                "TEXT named_metrics.num_requests_waiting=3.0, named_metrics.kv_cache_usage_perc=0.25",
+            ),
+        ),
+        (
+            Some("json"),
+            false,
+            Some(
+                r#"JSON {"named_metrics":{"num_requests_waiting":3.0,"kv_cache_usage_perc":0.25}}"#,
+            ),
+        ),
+        (Some("xml"), false, None),
+        (Some("TEXT"), true, None),
+    ];
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for (format, stream, expected) in cases {
+            let ipc = IpcNamespace::new().expect("create ipc namespace");
+            let handshake_address = ipc.handshake_endpoint();
+            let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+                handshake_address.clone(),
+                // Engine index 0, so the client exports this engine's scheduler gauges.
+                0u16.to_le_bytes().to_vec(),
+                |dealer, push| {
+                    boxed_test_future(async move {
+                        let add = recv_engine_message(dealer).await;
+                        let request: EngineCoreRequest =
+                            rmp_serde::from_slice(&add[1]).expect("decode request");
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                scheduler_stats: Some(Box::new(SchedulerStats {
+                                    num_waiting_reqs: 2,
+                                    num_skipped_waiting_reqs: 1,
+                                    kv_cache_usage: 0.25,
+                                    ..Default::default()
+                                })),
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                        send_outputs(
+                            push,
+                            engine_outputs_for_request(
+                                &request.request_id,
+                                default_stream_output_specs(),
+                            ),
+                        )
+                        .await;
+                    })
+                },
+            ));
+            let client = EngineCoreClient::connect(
+                EngineCoreClientConfig::new_single(handshake_address)
+                    .with_model_name("test-model")
+                    .with_local_input_output_addresses(
+                        Some(ipc.input_endpoint()),
+                        Some(ipc.output_endpoint()),
+                    ),
+            )
+            .await
+            .expect("connect client");
+            let chat =
+                ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+            let mut app = build_router(Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )));
+
+            let mut body = json!({"stream": stream});
+            if endpoint == "/v1/chat/completions" {
+                body["messages"] = json!([{"role": "user", "content": "hi"}]);
+            } else {
+                body["prompt"] = json!("hi");
+            }
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(endpoint)
+                .header("content-type", "application/json");
+            if let Some(format) = format {
+                request = request.header("endpoint-load-metrics-format", format);
+            }
+            let response = app
+                .call(request.body(Body::from(body.to_string())).expect("build request"))
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::OK);
+            let header = response
+                .headers()
+                .get("endpoint-load-metrics")
+                .map(|value| value.to_str().expect("ascii header").to_string());
+            to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+            engine_task.await.expect("mock engine task");
+            assert_eq!(
+                header.as_deref(),
+                expected,
+                "{endpoint} format={format:?} stream={stream}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -40,6 +40,7 @@ use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
+use crate::routes::openai::utils::orca::attach_endpoint_load_metrics;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
     ToolCallDelta, Usage,
@@ -119,7 +120,9 @@ pub async fn chat_completions(
             Err(error) => return error.into_response(),
         };
 
-        Json(response).into_response()
+        let mut response = Json(response).into_response();
+        attach_endpoint_load_metrics(&mut response, &headers, state.engine_core_client());
+        response
     }
 }
 
