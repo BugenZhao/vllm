@@ -1446,8 +1446,13 @@ fn roundtrip_request(
     thinking: Option<bool>,
     thinking_behavior: ThinkingBehavior,
 ) -> ChatRequest {
-    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, tool_choice, true)
-        .expect("tool context should resolve");
+    let tool_context = vllm_chat::ResolvedToolContext::new(
+        &messages,
+        (!tools.is_empty()).then_some(tools),
+        tool_choice,
+        true,
+    )
+    .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),
         messages,

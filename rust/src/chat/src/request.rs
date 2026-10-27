@@ -471,8 +471,10 @@ impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
 /// Resolved tool state shared by rendering, output parsing, and constraints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedToolContext {
-    /// Request-level tools rendered before the ordered chat history.
-    pub initial_tools: Vec<ChatTool>,
+    /// Request-level tools rendered before the ordered chat history. `None`
+    /// when the request declares no `tools`, distinct from an explicit empty
+    /// list, which chat templates see as `tools == []`.
+    pub initial_tools: Option<Vec<ChatTool>>,
     /// Request-level and message-scoped tools available for this generation.
     pub effective_tools: Vec<ChatTool>,
     /// Resolved tool-choice behavior for this request.
@@ -485,7 +487,7 @@ impl ResolvedToolContext {
     /// Resolve one complete tool context from request and message declarations.
     pub fn new(
         messages: &[ChatMessage],
-        initial_tools: Vec<ChatTool>,
+        initial_tools: Option<Vec<ChatTool>>,
         requested_tool_choice: Option<ChatToolChoice>,
         parallel_tool_calls: bool,
     ) -> Result<Self> {
@@ -494,10 +496,11 @@ impl ResolvedToolContext {
             .filter_map(ChatMessage::declared_tools)
             .map(<[ChatTool]>::len)
             .sum::<usize>();
-        let mut effective_tools = Vec::with_capacity(initial_tools.len() + dynamic_tool_count);
+        let request_tools = initial_tools.as_deref().unwrap_or_default();
+        let mut effective_tools = Vec::with_capacity(request_tools.len() + dynamic_tool_count);
         let mut names = HashSet::with_capacity(effective_tools.capacity());
 
-        for tool in initial_tools
+        for tool in request_tools
             .iter()
             .chain(messages.iter().filter_map(ChatMessage::declared_tools).flatten())
         {
@@ -549,8 +552,9 @@ impl ResolvedToolContext {
     pub(crate) fn exclude_initial_tools_if_none(&mut self) {
         if matches!(self.tool_choice, ChatToolChoice::None) {
             // `new` places request-level tools first in `effective_tools`.
-            self.effective_tools.drain(..self.initial_tools.len());
-            self.initial_tools.clear();
+            if let Some(initial_tools) = self.initial_tools.take() {
+                self.effective_tools.drain(..initial_tools.len());
+            }
         }
     }
 }
@@ -558,7 +562,7 @@ impl ResolvedToolContext {
 impl Default for ResolvedToolContext {
     fn default() -> Self {
         Self {
-            initial_tools: Vec::new(),
+            initial_tools: None,
             effective_tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
             parallel_tool_calls: true,
@@ -673,7 +677,7 @@ impl ChatRequest {
     /// Renderers should use [`Self::tools`] unless their prompt format places
     /// initial and message-scoped declarations differently.
     pub fn initial_tools(&self) -> &[ChatTool] {
-        &self.tool_context.initial_tools
+        self.tool_context.initial_tools.as_deref().unwrap_or_default()
     }
 
     /// Return the resolved tool-choice behavior.
@@ -856,9 +860,9 @@ mod tests {
             ChatMessage::developer("", Some(vec![chat_tool("lookup")])),
         ];
 
-        let context = ResolvedToolContext::new(&messages, Vec::new(), None, false).unwrap();
+        let context = ResolvedToolContext::new(&messages, None, None, false).unwrap();
 
-        assert!(context.initial_tools.is_empty());
+        assert!(context.initial_tools.is_none());
         assert_eq!(context.effective_tools, vec![chat_tool("lookup")]);
         assert_eq!(context.tool_choice, ChatToolChoice::Auto);
         assert!(!context.parallel_tool_calls);
@@ -874,7 +878,7 @@ mod tests {
 
         let context = ResolvedToolContext::new(
             &messages,
-            vec![chat_tool("first")],
+            Some(vec![chat_tool("first")]),
             Some(ChatToolChoice::Required),
             true,
         )
@@ -896,7 +900,8 @@ mod tests {
         let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("lookup")]))];
 
         let error =
-            ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap_err();
+            ResolvedToolContext::new(&messages, Some(vec![chat_tool("lookup")]), None, true)
+                .unwrap_err();
 
         assert!(matches!(error, Error::DuplicateToolName { name } if name == "lookup"));
     }
@@ -906,7 +911,7 @@ mod tests {
         let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("lookup")]))];
         let context = ResolvedToolContext::new(
             &messages,
-            Vec::new(),
+            None,
             Some(ChatToolChoice::Function {
                 name: "lookup".to_string(),
             }),
@@ -922,7 +927,7 @@ mod tests {
 
         let error = ResolvedToolContext::new(
             &messages,
-            Vec::new(),
+            None,
             Some(ChatToolChoice::Function {
                 name: "missing".to_string(),
             }),

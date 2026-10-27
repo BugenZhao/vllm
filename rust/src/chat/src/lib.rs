@@ -221,12 +221,9 @@ impl ChatRequestProcessor {
         Ok(Some(features))
     }
 
-    async fn prepare_text_request(&self, mut request: ChatRequest) -> Result<TextRequest> {
+    async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        if self.exclude_tools_when_tool_choice_none {
-            request.tool_context.exclude_initial_tools_if_none();
-        }
         let renderer = self.backend.chat_renderer();
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))
@@ -287,6 +284,11 @@ impl ChatRequestProcessor {
                 tool_strict_level: self.tool_strict_level,
             },
         )?;
+        // Like Python, only generation and render leave request-level tools out
+        // of the prompt; tokenization renders them as declared.
+        if self.exclude_tools_when_tool_choice_none {
+            request.tool_context.exclude_initial_tools_if_none();
+        }
         let mut text_request = self.prepare_text_request(request).await?;
 
         // Initialize the output processor from the final prompt token IDs and apply

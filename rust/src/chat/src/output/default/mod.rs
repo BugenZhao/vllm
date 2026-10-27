@@ -342,7 +342,7 @@ mod tests {
             defer_loading: None,
         }];
         let mut request = ChatRequest {
-            tool_context: ResolvedToolContext::new(&[], tools, Some(choice), true).unwrap(),
+            tool_context: ResolvedToolContext::new(&[], Some(tools), Some(choice), true).unwrap(),
             ..ChatRequest::for_test()
         };
         let mut processor = DefaultChatOutputProcessor::new(
@@ -383,8 +383,13 @@ mod tests {
         }];
         let run = async |tool_choice| {
             let mut request = ChatRequest {
-                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
-                    .unwrap(),
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    Some(tools.clone()),
+                    Some(tool_choice),
+                    true,
+                )
+                .unwrap(),
                 ..ChatRequest::for_test()
             };
             let gemma4 = ParserSelection::Explicit("gemma4".to_string());
@@ -461,7 +466,7 @@ mod tests {
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(
                     &[],
-                    tools.clone(),
+                    Some(tools.clone()),
                     Some(ChatToolChoice::Auto),
                     true,
                 )
@@ -505,7 +510,7 @@ mod tests {
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(
                     &[],
-                    tools,
+                    Some(tools),
                     Some(ChatToolChoice::Auto),
                     parallel,
                 )

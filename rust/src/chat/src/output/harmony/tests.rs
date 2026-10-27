@@ -104,7 +104,7 @@ fn request_with_tools() -> ChatRequest {
         defer_loading: None,
     }];
     ChatRequest {
-        tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)
+        tool_context: ResolvedToolContext::new(&[], Some(tools), Some(ChatToolChoice::Auto), true)
             .expect("tool context should resolve"),
         ..ChatRequest::for_test()
     }

@@ -158,7 +158,7 @@ struct FixtureToolCallFunction {
 
 impl FixtureRequest {
     fn into_chat_request(self, options: FixtureRequestOptions) -> ChatRequest {
-        let tools = to_chat_tools(&self.tools);
+        let tools = (!self.tools.is_empty()).then(|| to_chat_tools(&self.tools));
 
         let messages = self
             .messages

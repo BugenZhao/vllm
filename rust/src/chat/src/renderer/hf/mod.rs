@@ -228,7 +228,10 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
+        // Like Transformers, a request that declares `tools` passes them even
+        // when empty, so the template sees `tools == []` rather than no tools.
+        let tools = (request.tool_context.initial_tools.is_some() || !request.tools().is_empty())
+            .then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -657,7 +660,7 @@ mod tests {
     const STEP5_VL_TEMPLATE: &str = include_str!("../../../tests/templates/step5_vl.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
-        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        let tool_context = ResolvedToolContext::new(&messages, None, None, true).unwrap();
         ChatRequest {
             messages,
             tool_context,
@@ -681,7 +684,7 @@ mod tests {
             ),
             ChatMessage::user("hello"),
         ];
-        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        let tool_context = ResolvedToolContext::new(&messages, None, None, true).unwrap();
         let request = ChatRequest {
             messages,
             tool_context,
@@ -1504,7 +1507,7 @@ mod tests {
         for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
             request.tool_context = crate::request::ResolvedToolContext::new(
                 &request.messages,
-                tools.clone(),
+                Some(tools.clone()),
                 Some(tool_choice),
                 true,
             )
@@ -1520,6 +1523,30 @@ mod tests {
         }
     }
 
+    /// Like Transformers, an explicit empty `tools` list reaches the template
+    /// as `tools == []`. Without `tools`, Transformers passes `tools=None`; the
+    /// template checks both so it holds for either.
+    #[test]
+    fn chat_template_distinguishes_empty_tools_from_absent_tools() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let template = Some(
+            "{% if tools is defined and tools is not none %}tools={{ tools | length }}{% else %}none{% endif %}",
+        );
+
+        let rendered = render(template, &request).unwrap();
+        assert_eq!(rendered, "none");
+
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            Some(Vec::new()),
+            None,
+            true,
+        )
+        .expect("tool context should resolve");
+        let rendered = render(template, &request).unwrap();
+        assert_eq!(rendered, "tools=0");
+    }
+
     #[test]
     fn chat_template_preserves_openai_tool_field_order() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
@@ -1532,7 +1559,7 @@ mod tests {
         }];
         request.tool_context = crate::request::ResolvedToolContext::new(
             &request.messages,
-            tools,
+            Some(tools),
             Some(ChatToolChoice::Auto),
             true,
         )
@@ -1575,7 +1602,7 @@ mod tests {
         ];
         request.tool_context = crate::request::ResolvedToolContext::new(
             &request.messages,
-            tools,
+            Some(tools),
             Some(ChatToolChoice::Auto),
             true,
         )

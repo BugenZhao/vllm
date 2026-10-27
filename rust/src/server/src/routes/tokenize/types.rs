@@ -225,6 +225,32 @@ mod tests {
         );
     }
 
+    /// Python passes an explicit empty `tools` list to the chat template, so
+    /// lowering keeps it apart from an omitted `tools`.
+    #[test]
+    fn tokenize_request_keeps_empty_tools_apart_from_absent_tools() {
+        let lower = |body: serde_json::Value| {
+            let TokenizeRequest::Chat(request) =
+                serde_json::from_value(body).expect("chat body deserializes")
+            else {
+                panic!("messages body should parse as the chat variant");
+            };
+            request
+                .into_chat_request("tokenize-test".to_string())
+                .expect("request is valid")
+        };
+        let messages = json!([{"role": "user", "content": "hi"}]);
+
+        let absent = lower(json!({"messages": messages}));
+        assert_eq!(absent.tool_context.initial_tools, None);
+
+        let null = lower(json!({"messages": messages, "tools": null}));
+        assert_eq!(null.tool_context.initial_tools, None);
+
+        let empty = lower(json!({"messages": messages, "tools": []}));
+        assert_eq!(empty.tool_context.initial_tools, Some(Vec::new()));
+    }
+
     /// Python declares `return_token_strs` as `bool | None` on both bodies, so
     /// an explicit `null` means `false` instead of matching neither variant.
     #[test]

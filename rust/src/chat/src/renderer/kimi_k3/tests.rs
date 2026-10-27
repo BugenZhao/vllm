@@ -181,7 +181,7 @@ fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
         defer_loading: None,
     }];
     request.tool_context =
-        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+        crate::request::ResolvedToolContext::new(&request.messages, Some(tools), None, true)
             .expect("tool context should resolve");
 
     let rendered = render_request(&request);
@@ -204,7 +204,7 @@ fn tool_declare_preserves_present_optional_fields() {
         defer_loading: None,
     }];
     request.tool_context =
-        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+        crate::request::ResolvedToolContext::new(&request.messages, Some(tools), None, true)
             .expect("tool context should resolve");
 
     let rendered = render_request(&request);

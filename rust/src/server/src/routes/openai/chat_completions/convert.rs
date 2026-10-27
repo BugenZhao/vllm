@@ -415,28 +415,25 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
-    tools
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tool| {
-            if tool.tool_type != "function" {
-                bail_invalid_request!("Only function tools are supported.");
-            }
-            Ok(ChatTool {
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: tool.function.parameters,
-                strict: tool.function.strict,
-                defer_loading: tool.function.defer_loading.or(tool.defer_loading),
-            })
-        })
-        .collect()
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
+    tools.map(|tools| tools.into_iter().map(convert_tool).collect()).transpose()
+}
+
+fn convert_tool(tool: Tool) -> Result<ChatTool, ApiError> {
+    if tool.tool_type != "function" {
+        bail_invalid_request!("Only function tools are supported.");
+    }
+    Ok(ChatTool {
+        name: tool.function.name,
+        description: tool.function.description,
+        parameters: tool.function.parameters,
+        strict: tool.function.strict,
+        defer_loading: tool.function.defer_loading.or(tool.defer_loading),
+    })
 }
 
 fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
-    let tools = convert_tools(tools)?;
-    Ok((!tools.is_empty()).then_some(tools))
+    Ok(convert_tools(tools)?.filter(|tools| !tools.is_empty()))
 }
 
 fn convert_tool_choice(tool_choice: &ToolChoice) -> Result<ChatToolChoice, ApiError> {

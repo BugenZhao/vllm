@@ -156,8 +156,13 @@ fn request_level_tools_are_lowered_as_synthetic_leading_system_message() {
     }];
     let mut request = ChatRequest {
         request_id: "deepseek-v32-tools".to_string(),
-        tool_context: ResolvedToolContext::new(&messages, tools, Some(ChatToolChoice::Auto), true)
-            .expect("tool context should resolve"),
+        tool_context: ResolvedToolContext::new(
+            &messages,
+            Some(tools),
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve"),
         messages,
         ..ChatRequest::for_test()
     };

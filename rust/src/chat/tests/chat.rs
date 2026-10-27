@@ -28,7 +28,7 @@ use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
-    TextBackend,
+    TextBackend, TextRequestProcessor,
 };
 use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -312,7 +312,7 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
     }];
     request.tool_context = vllm_chat::ResolvedToolContext::new(
         &request.messages,
-        tools,
+        Some(tools),
         Some(ChatToolChoice::Auto),
         true,
     )
@@ -1629,7 +1629,7 @@ async fn processor_excludes_request_tools_for_tool_choice_none_when_configured()
         strict: None,
         defer_loading: None,
     };
-    let render = async |tool_choice, exclude| {
+    let render = async |tool_choice, exclude, tokenize: bool| {
         let mut request = sample_request("exclude-tools");
         request.messages.insert(
             0,
@@ -1637,29 +1637,52 @@ async fn processor_excludes_request_tools_for_tool_choice_none_when_configured()
         );
         request.tool_context = ResolvedToolContext::new(
             &request.messages,
-            vec![tool("get_weather")],
+            Some(vec![tool("get_weather")]),
             Some(tool_choice),
             true,
         )
         .unwrap();
-        let processor = ChatRequestProcessor::render_only(Arc::new(FakeChatBackend::new()))
+        let backend = Arc::new(FakeChatBackend::new());
+        let processor = ChatRequestProcessor::render_only(backend.clone())
+            .with_parser_selections(
+                ParserSelection::Explicit("hermes".to_string()),
+                ParserSelection::None,
+            )
             .with_exclude_tools_when_tool_choice_none(exclude);
-        let text_request = processor.prepare_for_tokenization(request).await.unwrap();
-        let Prompt::Text(prompt) = text_request.prompt else {
-            panic!("expected a text prompt");
+        let prompt = if tokenize {
+            let text_request = processor.prepare_for_tokenization(request).await.unwrap();
+            let Prompt::Text(prompt) = text_request.prompt else {
+                panic!("expected a text prompt");
+            };
+            prompt
+        } else {
+            let text_processor = TextRequestProcessor::new(backend.clone(), u32::MAX);
+            let (text_request, _) = processor.prepare(request, &text_processor).await.unwrap();
+            let Prompt::TokenIds(token_ids) = text_request.prompt else {
+                panic!("expected prompt token IDs");
+            };
+            backend.tokenizer().decode(&token_ids, false).unwrap()
         };
         prompt.lines().next().unwrap().to_string()
     };
 
     // Like Python, tools stay in the prompt for `none` unless the server opts out.
     assert_eq!(
-        render(ChatToolChoice::None, false).await,
+        render(ChatToolChoice::None, false, false).await,
         "tools: get_weather,lookup"
     );
     // Opting out drops request-level tools only; message-scoped ones belong to the history.
-    assert_eq!(render(ChatToolChoice::None, true).await, "tools: lookup");
     assert_eq!(
-        render(ChatToolChoice::Auto, true).await,
+        render(ChatToolChoice::None, true, false).await,
+        "tools: lookup"
+    );
+    assert_eq!(
+        render(ChatToolChoice::Auto, true, false).await,
+        "tools: get_weather,lookup"
+    );
+    // Tokenization renders tools as declared, as Python's `/tokenize` does.
+    assert_eq!(
+        render(ChatToolChoice::None, true, true).await,
         "tools: get_weather,lookup"
     );
 }
