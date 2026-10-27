@@ -28,7 +28,7 @@ use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
-use crate::config::ApiServerOptions;
+use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
@@ -46,7 +46,7 @@ use crate::routes::openai::utils::types::{
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, chat_output_text, log_output};
+use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -245,7 +245,7 @@ async fn collect_chat_completion(
             }),
         );
         if !output.is_empty() {
-            log_output(
+            log_outputs.log(
                 LoggedOutput::Response,
                 &output,
                 Some(&token_ids),
@@ -335,7 +335,7 @@ async fn chat_completion_chunk_stream(
     let mut inside_hidden_reasoning = false;
     let mut suppress_current_update_metadata = false;
     let mut continuous_usage = ContinuousUsage::default();
-    let mut delta_log = log_outputs.logs_deltas().then(StreamDeltaLog::default);
+    let mut delta_log = log_outputs.logs_deltas().then(|| StreamDeltaLog::new(log_outputs));
 
     /// Yield a chunk with optional continuous usage attached.
     macro_rules! yield_chunk {
@@ -534,7 +534,7 @@ async fn chat_completion_chunk_stream(
                             delta_log.finish(finish_reason);
                         }
                         if log_outputs.logs_complete() {
-                            log_output(
+                            log_outputs.log(
                                 LoggedOutput::StreamComplete,
                                 &chat_output_text(
                                     &message.text(),
@@ -649,8 +649,10 @@ impl UpdateOutput {
 /// last delta line carries the finish reason: `vllm-chat` emits `Done` after
 /// the last update's `LogprobsDelta`, and a parser may release held-back output
 /// in between, which belongs to that last update.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct StreamDeltaLog {
+    /// Where the deltas are logged.
+    log_outputs: OutputLogConfig,
     /// Output of the update in progress.
     current: UpdateOutput,
     /// The last ended update and its output token IDs.
@@ -658,13 +660,21 @@ struct StreamDeltaLog {
 }
 
 impl StreamDeltaLog {
+    fn new(log_outputs: OutputLogConfig) -> Self {
+        Self {
+            log_outputs,
+            current: UpdateOutput::default(),
+            ended: None,
+        }
+    }
+
     /// End the update in progress, whose output token IDs are `token_ids`,
     /// and log the update before it.
     fn end_update(&mut self, token_ids: &[u32]) {
         if let Some((output, token_ids)) = self.ended.take()
             && let Some(delta) = output.describe()
         {
-            log_output(LoggedOutput::StreamDelta, &delta, Some(&token_ids), None);
+            self.log_outputs.log(LoggedOutput::StreamDelta, &delta, Some(&token_ids), None);
         }
         self.ended = Some((std::mem::take(&mut self.current), token_ids.to_vec()));
     }
@@ -677,7 +687,7 @@ impl StreamDeltaLog {
         };
         output.append(std::mem::take(&mut self.current));
         if let Some(delta) = output.describe() {
-            log_output(
+            self.log_outputs.log(
                 LoggedOutput::StreamDelta,
                 &delta,
                 token_ids.as_deref(),
