@@ -213,7 +213,7 @@ impl InklingChatRenderer {
             ChatContent::Parts(parts) => {
                 for part in parts {
                     match part {
-                        ChatContentPart::Text { text } => {
+                        ChatContentPart::Text { text, .. } => {
                             self.write_text_block(out, role_token_id, None, text)?;
                         }
                         ChatContentPart::ImageUrl { .. } => {

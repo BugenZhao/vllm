@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_parser::tool::Tool as ChatTool;
 use vllm_text::TextDecodeOptions;
@@ -35,7 +35,13 @@ pub enum ChatRole {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatContentPart {
     /// One plain-text content block.
-    Text { text: String },
+    Text {
+        text: String,
+        /// Keys beyond `type` and `text`, passed through to OpenAI-format chat
+        /// templates that read them, like Python.
+        #[serde(flatten)]
+        extra_fields: Map<String, Value>,
+    },
     /// One image URL/data URL content block.
     ImageUrl {
         image_url: String,
@@ -66,7 +72,10 @@ pub enum ChatContentPart {
 impl ChatContentPart {
     /// Construct one text content part with plain string content.
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
+        Self::Text {
+            text: text.into(),
+            extra_fields: Map::new(),
+        }
     }
 
     /// Construct one image URL content part with the given URL string.
@@ -107,7 +116,7 @@ impl ChatContentPart {
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
-            Self::Text { text } => Ok(text),
+            Self::Text { text, .. } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
@@ -117,7 +126,7 @@ impl ChatContentPart {
 
     /// Return whether this part is a text block with empty content.
     pub(crate) fn is_empty_text(&self) -> bool {
-        matches!(self, Self::Text { text } if text.is_empty())
+        matches!(self, Self::Text { text, .. } if text.is_empty())
     }
 
     /// Return whether this part contains any multimodal content.

@@ -276,7 +276,7 @@ fn content_is_empty(content: &ChatContent) -> bool {
     match content {
         ChatContent::Text(text) => text.is_empty(),
         ChatContent::Parts(parts) => parts.iter().all(|part| match part {
-            ChatContentPart::Text { text } => text.is_empty(),
+            ChatContentPart::Text { text, .. } => text.is_empty(),
             ChatContentPart::ImageUrl { .. }
             | ChatContentPart::VideoUrl { .. }
             | ChatContentPart::InputAudio { .. }
@@ -472,7 +472,7 @@ fn write_content(
         ChatContent::Parts(parts) => {
             for (content_part_index, part) in parts.iter().enumerate() {
                 match part {
-                    ChatContentPart::Text { text } => write_text_with_images(out, text)?,
+                    ChatContentPart::Text { text, .. } => write_text_with_images(out, text)?,
                     ChatContentPart::ImageUrl { .. } => {
                         out.image(message_index, content_part_index)?;
                     }

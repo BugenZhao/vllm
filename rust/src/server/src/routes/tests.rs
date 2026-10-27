@@ -581,7 +581,7 @@ fn render_fake_content(content: &ChatContent, placeholder: &str) -> vllm_chat::R
             let mut out = String::new();
             for part in parts {
                 match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::Text { text, .. } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. }
                     | ChatContentPart::VideoUrl { .. }
                     | ChatContentPart::InputAudio { .. }

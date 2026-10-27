@@ -271,7 +271,7 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -345,7 +345,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::Text { text, extra_fields } => {
+                    Ok(ChatContentPart::Text { text, extra_fields })
+                }
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
                     detail: image_url.detail,
@@ -380,7 +382,7 @@ fn convert_assistant_text_blocks(
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                ContentPart::Text { text, .. } => Ok(AssistantContentBlock::Text { text }),
                 _ => bail_invalid_request!(
                     "Only text content parts are supported for assistant messages."
                 ),
@@ -918,6 +920,7 @@ mod tests {
         request.messages = vec![ChatMessage::Assistant {
             content: Some(MessageContent::Parts(vec![ContentPart::Text {
                 text: "hello".to_string(),
+                extra_fields: Default::default(),
             }])),
             name: None,
             tool_calls: None,
@@ -1207,6 +1210,7 @@ mod tests {
                 content: MessageContent::Parts(vec![
                     ContentPart::Text {
                         text: "describe ".to_string(),
+                        extra_fields: Default::default(),
                     },
                     ContentPart::ImageUrl {
                         image_url: ImageUrl {
@@ -1217,6 +1221,7 @@ mod tests {
                     },
                     ContentPart::Text {
                         text: " briefly".to_string(),
+                        extra_fields: Default::default(),
                     },
                 ]),
                 name: None,
@@ -1242,6 +1247,44 @@ mod tests {
                 },
                 ChatContentPart::text(" briefly"),
             ])]
+        );
+    }
+
+    /// Like Python, extra keys on a text part survive request parsing so chat
+    /// templates can read them.
+    #[test]
+    fn prepare_chat_request_keeps_text_part_extra_fields() {
+        let message = serde_json::from_value::<ChatMessage>(json!({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Hello",
+                "source_lang_code": "en",
+                "target_lang_code": "es",
+            }],
+        }))
+        .expect("message deserializes");
+        let request = ChatCompletionRequest {
+            messages: vec![message],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::Text {
+                text: "Hello".to_string(),
+                extra_fields: json!({"source_lang_code": "en", "target_lang_code": "es"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            }])]
         );
     }
 
