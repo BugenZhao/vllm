@@ -11,6 +11,8 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{HarmonyEncoding, StreamableParser};
+use thiserror_ext::AsReport as _;
+use tracing::warn;
 use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
@@ -55,8 +57,12 @@ struct OpenHarmonyToolCall {
 }
 
 struct HarmonyState {
+    /// Encoding that decodes the raw tokens of an unfinished message.
+    encoding: &'static HarmonyEncoding,
     /// Incremental Harmony parser over assistant token IDs.
     parser: StreamableParser,
+    /// Index into the parser's tokens where the unfinished message starts.
+    current_message_start: usize,
     /// Whether tool-call content should surface as structured tool events.
     tool_calls_enabled: bool,
     /// Count of completed visible assistant messages for newline insertion.
@@ -119,10 +125,12 @@ impl ChatOutputProcessor for HarmonyChatOutputProcessor {
 
 impl HarmonyState {
     /// Create one fresh Harmony streaming state for a new assistant response.
-    fn new(encoding: HarmonyEncoding, tool_calls_enabled: bool) -> Result<Self> {
+    fn new(encoding: &'static HarmonyEncoding, tool_calls_enabled: bool) -> Result<Self> {
         Ok(Self {
-            parser: StreamableParser::new(encoding, Some(Role::Assistant))
+            encoding,
+            parser: StreamableParser::new(encoding.clone(), Some(Role::Assistant))
                 .map_err(harmony_output_parsing_error)?,
+            current_message_start: 0,
             tool_calls_enabled,
             completed_visible_messages: 0,
             completed_reasoning_messages: 0,
@@ -164,6 +172,7 @@ impl HarmonyState {
             }
 
             if completed_after > completed_before {
+                self.current_message_start = self.parser.tokens().len();
                 if let Some(group) = pending_group.take() {
                     self.emit_group(group, &mut events);
                 }
@@ -191,6 +200,11 @@ impl HarmonyState {
 
     /// Flush Harmony parser state at EOS and emit any newly finalized assistant
     /// events.
+    ///
+    /// Like Python, output that ends in a non-terminal state, such as a `final`
+    /// header that never reaches `<|message|>`, keeps the messages parsed so
+    /// far and returns the raw text of the unfinished message as final content
+    /// instead of failing the request.
     fn process_eos(&mut self) -> Result<Vec<AssistantEvent>> {
         let completed_before = self.parser.messages().len();
         let pending_key = HarmonyGroupKey {
@@ -201,7 +215,13 @@ impl HarmonyState {
         let pending_content =
             self.parser.current_content().map_err(harmony_output_parsing_error)?;
 
-        self.parser.process_eos().map_err(harmony_output_parsing_error)?;
+        if let Err(error) = self.parser.process_eos() {
+            warn!(
+                error = %harmony_output_parsing_error(error).as_report(),
+                "Harmony output ended in a non-terminal state; returning the raw unfinished message"
+            );
+            return self.recover_unfinished_message();
+        }
 
         let completed_after = self.parser.messages().len();
         let mut events = Vec::new();
@@ -235,6 +255,37 @@ impl HarmonyState {
             self.handle_completed_message(key);
         }
 
+        Ok(events)
+    }
+
+    /// Emit the raw text of the unfinished message, including its header and
+    /// special tokens, as one completed `final` message.
+    fn recover_unfinished_message(&mut self) -> Result<Vec<AssistantEvent>> {
+        let unfinished = &self.parser.tokens()[self.current_message_start..];
+        let bytes = self
+            .encoding
+            .tokenizer()
+            .decode_bytes(unfinished)
+            .map_err(harmony_output_parsing_error)?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let mut events = Vec::new();
+        if text.is_empty() {
+            return Ok(events);
+        }
+
+        let key = HarmonyGroupKey {
+            serial: self.parser.messages().len(),
+            channel: Some("final".to_string()),
+            recipient: None,
+        };
+        self.emit_group(
+            HarmonyGroup {
+                key: key.clone(),
+                text,
+            },
+            &mut events,
+        );
+        self.handle_completed_message(key);
         Ok(events)
     }
 
@@ -334,7 +385,7 @@ async fn harmony_assistant_event_stream(
     tool_calls_enabled: bool,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
-    let mut state = HarmonyState::new(encoding.clone(), tool_calls_enabled)?;
+    let mut state = HarmonyState::new(encoding, tool_calls_enabled)?;
     futures::pin_mut!(decoded);
 
     while let Some(event) = decoded.next().await.transpose()? {

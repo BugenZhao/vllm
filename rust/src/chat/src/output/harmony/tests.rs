@@ -163,6 +163,56 @@ fn eos_flush_preserves_trailing_replacement_text() {
     assert_eq!(message.text(), format!("Hi{}", char::REPLACEMENT_CHARACTER));
 }
 
+/// Like Python's `HarmonyParser.flush`, output that ends while a message
+/// header is still open keeps the earlier messages and returns the raw
+/// unfinished message, header and special tokens included, as final content.
+#[test]
+fn non_terminal_eos_returns_raw_unfinished_message_as_content() {
+    let unfinished = r#"<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>"#;
+    let output = format!(
+        "<|channel|>analysis<|message|>thinking<|end|>\
+         <|start|>assistant<|channel|>commentary<|message|>preamble<|end|>\
+         {unfinished}"
+    );
+    let tokens = harmony_encoding().unwrap().tokenizer().encode_with_special_tokens(&output);
+
+    // One update, and one token per update, as when streaming.
+    let streamed = tokens.iter().enumerate().map(|(index, &token_id)| {
+        let finished = (index + 1 == tokens.len()).then(finished);
+        decoded_tokens(vec![token_id], None, finished)
+    });
+    for updates in [
+        vec![decoded_tokens(tokens.clone(), None, Some(finished()))],
+        streamed.collect(),
+    ] {
+        let events = block_on(collect_events(
+            HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+            std::iter::once(decoded_start()).chain(updates).collect(),
+        ));
+
+        let ChatEvent::Done {
+            message,
+            finish_reason,
+            ..
+        } = events.last().unwrap()
+        else {
+            panic!("expected done");
+        };
+        assert_eq!(
+            message.content,
+            vec![
+                crate::AssistantContentBlock::Reasoning {
+                    text: "thinking".to_string(),
+                },
+                crate::AssistantContentBlock::Text {
+                    text: format!("preamble\n{unfinished}"),
+                },
+            ]
+        );
+        assert_eq!(finish_reason, &FinishReason::stop_eos());
+    }
+}
+
 #[test]
 fn interrupted_analysis_message_is_preserved() {
     let tokens = completion_tokens(&[text_message("analysis", "think")]);
