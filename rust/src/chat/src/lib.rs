@@ -498,6 +498,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_parser_overrides_accepts_python_gpt_oss_parser_names() {
+        validate_parser_overrides(
+            &ParserSelection::Explicit("openai".to_string()),
+            &ParserSelection::Explicit("openai_gptoss".to_string()),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn validate_parser_overrides_accepts_auto_and_none() {
         validate_parser_overrides(&ParserSelection::Auto, &ParserSelection::None).unwrap();
     }

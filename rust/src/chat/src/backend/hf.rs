@@ -229,16 +229,22 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use futures::executor::block_on;
+    use futures::{TryStreamExt as _, stream};
     use tempfile::tempdir;
     use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
+    use vllm_text::output::{DecodedText, DecodedTextEvent, Finished, SampledDelta};
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
+    use crate::renderer::harmony::encoding::harmony_encoding;
     use crate::request::{ChatContent, ChatMessage, ChatRequest};
-    use crate::{ParserSelection, RendererSelection};
+    use crate::{
+        AssistantContentBlock, ChatEvent, FinishReason, ParserSelection, RendererSelection,
+    };
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -432,6 +438,84 @@ mod tests {
             error.to_report_string(),
             "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
         );
+    }
+
+    /// The Python launcher forwards `none` for unset parser flags, and Python
+    /// names the gpt-oss parsers `openai` and `openai_gptoss`; all of them run
+    /// native Harmony output parsing.
+    #[test]
+    fn gpt_oss_runs_harmony_under_none_and_python_parser_names() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"gpt_oss"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+        let token_ids = harmony_encoding().unwrap().tokenizer().encode_with_special_tokens(
+            "<|channel|>analysis<|message|>think<|end|>\
+             <|start|>assistant<|channel|>final<|message|>hi<|return|>",
+        );
+
+        for (tool_call_parser, reasoning_parser) in [
+            (ParserSelection::None, ParserSelection::None),
+            (
+                ParserSelection::Explicit("openai".to_string()),
+                ParserSelection::Explicit("openai_gptoss".to_string()),
+            ),
+        ] {
+            let processor = backend
+                .new_chat_output_processor(
+                    &mut request_with_user_text("hello"),
+                    NewChatOutputProcessorOptions {
+                        tool_strict_level: None,
+                        tool_call_parser: &tool_call_parser,
+                        reasoning_parser: &reasoning_parser,
+                    },
+                )
+                .unwrap();
+            let decoded = stream::iter(
+                [
+                    DecodedTextEvent::Start {
+                        prompt_token_ids: Arc::from([]),
+                        prompt_logprobs: None,
+                    },
+                    DecodedTextEvent::TextDelta {
+                        decoded: DecodedText::default(),
+                        sampled: SampledDelta {
+                            token_ids: token_ids.clone(),
+                            logprobs: None,
+                        },
+                        finished: Some(Box::new(Finished {
+                            usage: Default::default(),
+                            finish_reason: FinishReason::stop_eos(),
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                            sampling_mask: None,
+                            spec_decode_metrics: None,
+                            timestamps: Default::default(),
+                        })),
+                    },
+                ]
+                .map(Ok),
+            );
+            let events: Vec<ChatEvent> =
+                block_on(processor.process(Box::pin(decoded)).unwrap().try_collect()).unwrap();
+
+            let Some(ChatEvent::Done { message, .. }) = events.last() else {
+                panic!("expected done");
+            };
+            assert_eq!(
+                message.content,
+                vec![
+                    AssistantContentBlock::Reasoning {
+                        text: "think".to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "hi".to_string(),
+                    },
+                ],
+                "{tool_call_parser} / {reasoning_parser}"
+            );
+        }
     }
 
     #[test]
