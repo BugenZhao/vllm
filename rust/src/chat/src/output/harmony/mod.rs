@@ -80,30 +80,41 @@ impl HarmonyChatOutputProcessor {
     }
 }
 
+/// Python's tool parser name for `gpt_oss`, which names Harmony output parsing.
+pub(crate) const HARMONY_TOOL_PARSER_NAME: &str = "openai";
+/// Python's reasoning parser name for `gpt_oss`, which names Harmony output
+/// parsing.
+pub(crate) const HARMONY_REASONING_PARSER_NAME: &str = "openai_gptoss";
+
 /// Validate that the generic parser selections are compatible with native
 /// Harmony output parsing.
 ///
-/// `gpt_oss` uses a model-specific token-level parser, so any generic
-/// reasoning/tool parser override is rejected instead of being silently
-/// ignored.
+/// `gpt_oss` uses a model-specific token-level parser. Harmony is the output
+/// protocol rather than a pluggable parser, so `auto`, `none`, and Python's
+/// gpt-oss parser names all select it, while any other generic reasoning/tool
+/// parser override is rejected instead of being silently ignored.
 pub(crate) fn validate_harmony_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
 ) -> ChatResult<()> {
-    validate_harmony_override("tool", tool_call_parser)?;
-    validate_harmony_override("reasoning", reasoning_parser)?;
+    validate_harmony_override("tool", tool_call_parser, HARMONY_TOOL_PARSER_NAME)?;
+    validate_harmony_override("reasoning", reasoning_parser, HARMONY_REASONING_PARSER_NAME)?;
     Ok(())
 }
 
-fn validate_harmony_override(kind: &'static str, selection: &ParserSelection) -> ChatResult<()> {
-    if matches!(selection, ParserSelection::Auto) {
-        return Ok(());
+fn validate_harmony_override(
+    kind: &'static str,
+    selection: &ParserSelection,
+    harmony_name: &str,
+) -> ChatResult<()> {
+    match selection {
+        ParserSelection::Auto | ParserSelection::None => Ok(()),
+        ParserSelection::Explicit(name) if name == harmony_name => Ok(()),
+        ParserSelection::Explicit(_) => Err(Error::HarmonyParserOverrideUnsupported {
+            kind,
+            selection: selection.to_string(),
+        }),
     }
-
-    Err(Error::HarmonyParserOverrideUnsupported {
-        kind,
-        selection: selection.to_string(),
-    })
 }
 
 impl ChatOutputProcessor for HarmonyChatOutputProcessor {

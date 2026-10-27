@@ -17,6 +17,7 @@ pub use vllm_parser::output_grammar::ToolStrictLevel;
 use self::reasoning::ReasoningParserFactory;
 use self::tool::ToolParserFactory;
 use self::unified::UnifiedParserFactory;
+use crate::output::{HARMONY_REASONING_PARSER_NAME, HARMONY_TOOL_PARSER_NAME};
 
 /// Specify which reasoning or tool-call parser implementation to use.
 #[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
@@ -60,15 +61,24 @@ impl ParserSelection {
 }
 
 /// Validate explicit parser override names without starting request processing.
+///
+/// Python's gpt-oss parser names are accepted too: they select native Harmony
+/// output parsing, which the backend checks per model.
 pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
 ) -> crate::Result<()> {
-    validate_selection(tool_call_parser, "tool", ToolParserFactory::global())?;
+    validate_selection(
+        tool_call_parser,
+        "tool",
+        ToolParserFactory::global(),
+        HARMONY_TOOL_PARSER_NAME,
+    )?;
     validate_selection(
         reasoning_parser,
         "reasoning",
         ReasoningParserFactory::global(),
+        HARMONY_REASONING_PARSER_NAME,
     )
 }
 
@@ -76,9 +86,11 @@ fn validate_selection<C>(
     selection: &ParserSelection,
     kind: &'static str,
     factory: &ParserFactory<C>,
+    harmony_name: &str,
 ) -> crate::Result<()> {
     let unified = UnifiedParserFactory::global();
     if let ParserSelection::Explicit(name) = selection
+        && name != harmony_name
         && !factory.contains(name)
         && !unified.contains(name)
     {

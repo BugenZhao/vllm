@@ -316,12 +316,14 @@ fn semantic_events_precede_same_update_logprobs() {
 
 #[test]
 fn rejects_generic_parser_overrides() {
-    let reasoning_error =
-        validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::None)
-            .unwrap_err();
+    let reasoning_error = validate_harmony_parser_overrides(
+        &ParserSelection::Auto,
+        &ParserSelection::Explicit("deepseek_r1".to_string()),
+    )
+    .unwrap_err();
     assert_eq!(
         reasoning_error.to_string(),
-        "gpt_oss uses native Harmony output parsing; generic reasoning parser override `none` is not supported"
+        "gpt_oss uses native Harmony output parsing; generic reasoning parser override `deepseek_r1` is not supported"
     );
 
     let tool_error = validate_harmony_parser_overrides(
@@ -333,10 +335,17 @@ fn rejects_generic_parser_overrides() {
         tool_error.to_string(),
         "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
     );
+
+    // Python's names are not interchangeable between the two parser kinds.
+    validate_harmony_parser_overrides(
+        &ParserSelection::Explicit("openai_gptoss".to_string()),
+        &ParserSelection::Auto,
+    )
+    .unwrap_err();
 }
 
 #[test]
-fn allows_auto_auto_only() {
+fn allows_auto_selections() {
     validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::Auto).unwrap();
     let _ = HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap();
 }

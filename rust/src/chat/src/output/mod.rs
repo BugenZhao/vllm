@@ -23,7 +23,9 @@ mod structured;
 
 pub use default::DefaultChatOutputProcessor;
 pub use harmony::HarmonyChatOutputProcessor;
-pub(crate) use harmony::validate_harmony_parser_overrides;
+pub(crate) use harmony::{
+    HARMONY_REASONING_PARSER_NAME, HARMONY_TOOL_PARSER_NAME, validate_harmony_parser_overrides,
+};
 pub(crate) use structural_tag::apply_output_grammar;
 
 /// Internal assistant event before final assembly.
