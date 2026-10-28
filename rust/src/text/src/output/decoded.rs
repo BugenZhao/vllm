@@ -14,7 +14,8 @@ use vllm_llm::{FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
-    DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
+    DecodedLogprobs, DecodedPromptLogprobs, LogprobTokenContext, decode_logprobs,
+    decode_prompt_logprobs,
 };
 use crate::error::Error;
 
@@ -175,6 +176,7 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
+    let mut logprob_context = LogprobTokenContext::default();
     let mut sampling_mask: Option<SamplingMask> = None;
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
@@ -284,7 +286,13 @@ pub async fn decoded_text_event_stream(
         let mut decoded_logprobs = new_logprobs
             .as_ref()
             .map(|logprobs| {
-                decode_logprobs(text_tokenizer, logprobs, decode_options.skip_special_tokens)
+                decode_logprobs(
+                    text_tokenizer,
+                    logprobs,
+                    decode_options.skip_special_tokens,
+                    &mut logprob_context,
+                    finish_reason.is_some(),
+                )
             })
             .transpose()?;
 
@@ -450,6 +458,78 @@ mod tests {
     /// Convert ASCII string to token IDs (one byte per token).
     fn ascii_tokens(s: &str) -> Vec<u32> {
         s.bytes().map(u32::from).collect()
+    }
+
+    /// Logprob token strings join to the generated text when a character is
+    /// split across engine updates, streamed or not, and when the request ends
+    /// with a literal U+FFFD.
+    #[tokio::test]
+    async fn logprob_tokens_repair_characters_split_across_updates() {
+        fn output(prompt: Option<Arc<[u32]>>, token_ids: Vec<u32>) -> GenerateOutput {
+            let finish_reason = prompt.is_none().then_some(FinishReason::Length);
+            let mut output = GenerateOutput::for_test(prompt, token_ids.clone(), finish_reason);
+            output.logprobs = Some(Logprobs {
+                positions: token_ids
+                    .into_iter()
+                    .map(|token_id| PositionLogprobs {
+                        entries: vec![TokenLogprob {
+                            token_id,
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    })
+                    .collect(),
+            });
+            output
+        }
+
+        let cases = [
+            (
+                vec![0xc3],
+                vec![0xa9, u32::from(b'!')],
+                ["", "é", "!"],
+                "é!",
+            ),
+            (
+                vec![u32::from(b'a')],
+                vec![u32::from(b'b'), 300],
+                ["a", "b", "\u{fffd}"],
+                "ab\u{fffd}",
+            ),
+        ];
+        for (first, last, expected_tokens, expected_text) in cases {
+            for intermediate in [false, true] {
+                let prompt: Arc<[u32]> = Arc::from([]);
+                let tokenizer: DynTokenizer =
+                    Arc::new(TestTokenizer::new().with_regular_token("\u{fffd}", 300));
+                let collected = decoded_text_event_stream(
+                    "test-split-logprobs".into(),
+                    tokenizer,
+                    stream::iter([
+                        Ok(output(Some(prompt), first.clone())),
+                        Ok(output(None, last.clone())),
+                    ]),
+                    TextDecodeOptions::default(),
+                    intermediate,
+                )
+                .collect_output()
+                .await
+                .unwrap();
+
+                let tokens = collected
+                    .logprobs
+                    .unwrap()
+                    .positions
+                    .into_iter()
+                    .map(|position| position.entries.into_iter().next().unwrap().token);
+                assert_eq!(
+                    tokens.collect::<Vec<_>>(),
+                    expected_tokens,
+                    "{first:?} {last:?} intermediate={intermediate}"
+                );
+                assert_eq!(collected.text, expected_text);
+            }
+        }
     }
 
     #[tokio::test]
