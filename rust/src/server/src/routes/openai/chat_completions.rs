@@ -67,6 +67,7 @@ pub async fn chat_completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    state.api_server_options.log_request_body(&request_context.request_id, &body);
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 

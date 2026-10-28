@@ -53,7 +53,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
-use vllm_text::TextLlm;
+use vllm_text::{RequestLogConfig, TextLlm};
 
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
@@ -137,7 +137,11 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
+    let request_log = config.api_server_options.enable_log_requests.then_some(RequestLogConfig {
+        max_log_len: config.api_server_options.log_outputs.max_log_len,
+    });
     let text = TextLlm::new(llm, text_backend)
+        .with_request_log(request_log)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
 

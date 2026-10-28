@@ -23,6 +23,7 @@ pub use output::{
     TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
+pub use request_log::{RequestLogConfig, truncate_log_ids, truncate_log_text};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -35,6 +36,7 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
+mod request_log;
 mod truncation;
 pub use truncation::{PromptTruncation, PromptTruncationLimit, TruncationSide};
 pub use vllm_tokenizer as tokenizer;
@@ -189,6 +191,8 @@ pub struct TextLlm {
     llm: Llm,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
+    /// Request input logging (`--enable-log-requests`); `None` logs nothing.
+    request_log: Option<RequestLogConfig>,
 }
 
 impl TextLlm {
@@ -202,7 +206,14 @@ impl TextLlm {
         Self {
             llm,
             processor: TextRequestProcessor::new(backend, max_model_len),
+            request_log: None,
         }
+    }
+
+    /// Log each submitted request's engine input, or nothing with `None`.
+    pub fn with_request_log(mut self, request_log: Option<RequestLogConfig>) -> Self {
+        self.request_log = request_log;
+        self
     }
 
     /// Override the maximum accepted logprobs count.
@@ -281,6 +292,9 @@ impl TextLlm {
             text_request,
             generate_request,
         } = self.processor.prepare(request)?;
+        if let Some(request_log) = self.request_log {
+            request_log.log_inputs(&generate_request, self.processor.tokenizer().as_ref());
+        }
 
         let raw_stream = self.llm.generate(generate_request).await?;
         Ok((text_request, raw_stream))
