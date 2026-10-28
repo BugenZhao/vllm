@@ -170,6 +170,7 @@ async fn collect_chat_completion(
     let CollectedAssistantMessage {
         message,
         prompt_token_ids,
+        prompt_text,
         prompt_logprobs,
         logprobs,
         token_ids,
@@ -292,7 +293,7 @@ async fn collect_chat_completion(
         system_fingerprint: None,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
-        prompt_text: None,
+        prompt_text,
         kv_transfer_params,
         ec_transfer_params,
     })
@@ -367,13 +368,15 @@ async fn chat_completion_chunk_stream(
     while let Some(next) = stream.next().await {
         match next {
             Ok(ChatEvent::Start {
-                prompt_token_ids, ..
+                prompt_token_ids,
+                prompt_text,
+                ..
             }) => {
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 let mut chunk = start_chunk(&envelope);
                 chunk.prompt = Some(ChatCompletionStreamPrompt {
                     prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
-                    prompt_text: None,
+                    prompt_text,
                 });
                 yield_chunk!(chunk);
                 // When echo=true, emit the last assistant message content as a delta chunk.
@@ -1162,6 +1165,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1266,6 +1270,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1333,6 +1338,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1390,6 +1396,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1446,6 +1453,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1540,6 +1548,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1681,6 +1690,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::ToolCallStart {
@@ -1751,6 +1761,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![7, 8, 9].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1817,6 +1828,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![7, 8, 9].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1901,6 +1913,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1964,6 +1977,7 @@ mod tests {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {

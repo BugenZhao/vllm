@@ -20,6 +20,8 @@ use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatToken
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
     pub prompt_token_ids: Arc<[u32]>,
+    /// See [`ChatEvent::Start`]'s `prompt_text`.
+    pub prompt_text: Option<String>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
@@ -62,6 +64,7 @@ impl ChatEventStream {
         let mut message = AssistantMessage::default();
         let mut prompt_logprobs = None;
         let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
+        let mut prompt_text = None;
         let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
         let mut token_ids: Vec<u32> = Vec::new();
         while let Some(event) = self.next().await.transpose()? {
@@ -69,9 +72,11 @@ impl ChatEventStream {
                 ChatEvent::Start {
                     prompt_logprobs: start_prompt_logprobs,
                     prompt_token_ids: start_prompt_token_ids,
+                    prompt_text: start_prompt_text,
                 } => {
                     prompt_logprobs = start_prompt_logprobs;
                     prompt_token_ids = start_prompt_token_ids;
+                    prompt_text = start_prompt_text;
                 }
                 ChatEvent::BlockEnd { block, .. } => message.push_block(block),
                 ChatEvent::LogprobsDelta {
@@ -95,6 +100,7 @@ impl ChatEventStream {
                     return Ok(CollectedAssistantMessage {
                         message: done,
                         prompt_token_ids,
+                        prompt_text,
                         prompt_logprobs,
                         logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
                             positions: logprob_positions,
@@ -158,6 +164,7 @@ mod tests {
             "chat-missing-done".to_string(),
             stream::iter([Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
+                prompt_text: None,
                 prompt_logprobs: None,
             })]),
         );
@@ -177,6 +184,7 @@ mod tests {
             stream::iter(vec![
                 Ok(ChatEvent::Start {
                     prompt_token_ids: vec![10, 11].into(),
+                    prompt_text: Some("user: hi\nassistant:".to_string()),
                     prompt_logprobs: Some(DecodedPromptLogprobs {
                         first_token_id: 0,
                         first_token: "o".to_string(),
@@ -230,6 +238,7 @@ mod tests {
             CollectedAssistantMessage {
                 message: Default::default(),
                 prompt_token_ids: vec![10, 11].into(),
+                prompt_text: Some("user: hi\nassistant:".to_string()),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
                     first_token_id: 0,
                     first_token: "o".to_string(),

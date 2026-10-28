@@ -191,6 +191,11 @@ pub enum ChatEvent {
     Start {
         /// The actual prompt token IDs for this request.
         prompt_token_ids: Arc<[u32]>,
+        /// The prompt text rendered from the chat template, when requested
+        /// with [`ChatRequest::return_prompt_text`](crate::ChatRequest::return_prompt_text)
+        /// and the renderer produced text rather than token IDs. With
+        /// multimodal content, placeholders are not expanded yet.
+        prompt_text: Option<String>,
         /// Once-only prompt logprobs metadata, when requested.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
