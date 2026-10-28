@@ -400,8 +400,9 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub return_tokens_as_token_ids: bool,
 
-    /// Log a summary line for each completed request, including prompt/output
-    /// token counts and finish reason.
+    /// Log each request: its sampling parameters and LoRA adapter at INFO when
+    /// it is submitted, its JSON body and prompt at DEBUG, and a summary line
+    /// with prompt/output token counts and finish reason when it completes.
     #[arg(long)]
     #[serde(default)]
     pub enable_log_requests: bool,
@@ -428,7 +429,8 @@ pub struct SharedRuntimeArgs {
     /// Max number of prompt characters or prompt ID numbers being printed in
     /// log. The default of None means unlimited.
     ///
-    /// Also bounds logged output characters and output token IDs.
+    /// Also bounds logged request body characters, output characters, and
+    /// output token IDs.
     #[arg(long)]
     #[serde(default)]
     pub max_log_len: Option<usize>,

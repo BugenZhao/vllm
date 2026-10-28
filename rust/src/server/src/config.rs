@@ -63,7 +63,8 @@ pub enum CoordinatorMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Educe)]
 #[educe(Default)]
 pub struct ApiServerOptions {
-    /// Log a summary line for each completed request.
+    /// Log each request's JSON body, engine input, and a summary line when it
+    /// completes.
     pub enable_log_requests: bool,
     /// Which generated outputs to log (`--enable-log-outputs`), and how much
     /// of each (`--max-log-len`).
@@ -123,7 +124,8 @@ pub struct OutputLogConfig {
     /// Which generated outputs to log.
     pub outputs: OutputLogging,
     /// Maximum number of characters or token IDs of each logged output
-    /// (`--max-log-len`); `None` logs them in full.
+    /// (`--max-log-len`); `None` logs them in full. Also bounds the logged
+    /// request JSON body.
     pub max_log_len: Option<usize>,
 }
 

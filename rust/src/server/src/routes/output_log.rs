@@ -5,6 +5,7 @@
 //! `RequestLogger.log_outputs`.
 
 use tracing::{debug, info};
+use vllm_text::{truncate_log_ids, truncate_log_text};
 
 use crate::config::OutputLogConfig;
 
@@ -38,17 +39,10 @@ impl OutputLogConfig {
             LoggedOutput::StreamComplete => Some("complete"),
         };
         if let Some(token_ids) = token_ids {
-            let token_ids = match self.max_log_len {
-                Some(max_log_len) => &token_ids[..token_ids.len().min(max_log_len)],
-                None => token_ids,
-            };
+            let token_ids = truncate_log_ids(token_ids, self.max_log_len);
             debug!(stream, ?token_ids, "generated response details");
         }
-        let output =
-            match self.max_log_len.and_then(|max_log_len| output.char_indices().nth(max_log_len)) {
-                Some((end, _)) => &output[..end],
-                None => output,
-            };
+        let output = truncate_log_text(output, self.max_log_len);
         info!(stream, ?output, finish_reason, "generated response");
     }
 }

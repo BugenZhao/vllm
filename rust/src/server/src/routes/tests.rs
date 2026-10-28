@@ -51,7 +51,7 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
+use vllm_text::{Prompt, RequestLogConfig, TextBackend, TextLlm, TextRequestProcessor};
 use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -686,7 +686,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
     outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
     check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
-    backend: Arc<dyn ChatTextBackend>,
+    build_chat: impl FnOnce(Llm) -> ChatLlm,
 ) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -717,10 +717,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .await
     .expect("connect client");
 
-    (
-        ChatLlm::from_shared_backend(test_llm(client), backend),
-        engine_task,
-    )
+    (build_chat(test_llm(client)), engine_task)
 }
 
 async fn test_models_with_engine_outputs_and_backend(
@@ -732,7 +729,7 @@ async fn test_models_with_engine_outputs_and_backend(
         engine_id,
         move |request_id| engine_outputs_for_request(request_id, output_specs),
         |_| {},
-        backend,
+        |llm| ChatLlm::from_shared_backend(llm, backend),
     )
     .await
 }
@@ -1814,7 +1811,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                 json!({"do_remote_encode": true})
             );
         },
-        Arc::new(FakeChatBackend::new()),
+        |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
     )
     .await;
     let mut generate_app = build_router_with_scale_out_endpoints(
@@ -4412,7 +4409,7 @@ async fn engine_request_errors_map_to_http_status() {
                     .into()
                 },
                 |_| {},
-                Arc::new(FakeChatBackend::new()),
+                |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
             )
             .await;
             let mut app = build_router_with_scale_out_endpoints(
@@ -4760,7 +4757,7 @@ async fn prompt_tokens_details_report_created_cache_tokens() {
                 .into()
             },
             |_| {},
-            Arc::new(FakeChatBackend::new()),
+            |llm| ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new())),
         )
         .await;
         let mut app = build_router(Arc::new(
@@ -9512,8 +9509,8 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     engine_task.abort_and_join().await;
 }
 
-/// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
-/// line per event.
+/// Captures the events `--enable-log-requests` and `--enable-log-outputs` log,
+/// one `LEVEL field=value ...` line per event.
 #[derive(Clone, Default)]
 struct OutputLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
 
@@ -9565,7 +9562,12 @@ where
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() != "vllm_server::routes::output_log" {
+        const TARGETS: [&str; 3] = [
+            "vllm_server::routes::output_log",
+            "vllm_server::routes::request_log",
+            "vllm_text::request_log",
+        ];
+        if !TARGETS.contains(&event.metadata().target()) {
             return;
         }
         let mut line = event.metadata().level().to_string();
@@ -9585,17 +9587,26 @@ where
 }
 
 /// Send one request to a fresh app whose engine replies with `output_specs`,
-/// and return the logged outputs.
+/// and return the logged requests and outputs.
 async fn output_logs_for_request(
     api_server_options: ApiServerOptions,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     uri: &str,
     body: serde_json::Value,
 ) -> String {
-    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+    // Request input logging is configured on the text layer, as at startup.
+    let request_log = (api_server_options.enable_log_requests).then_some(RequestLogConfig {
+        max_log_len: api_server_options.log_outputs.max_log_len,
+    });
+    let backend = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-log-outputs",
-        output_specs,
-        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        move |request_id| engine_outputs_for_request(request_id, output_specs),
+        |_| {},
+        |llm| {
+            let text = TextLlm::new(llm, backend.clone()).with_request_log(request_log);
+            ChatLlm::new(text, backend)
+        },
     )
     .await;
     let mut app = build_router(Arc::new(
@@ -9868,6 +9879,121 @@ fn max_log_len_counts_characters() {
         DEBUG message=generated response details token_ids=[1, 2, 3]
         INFO message=generated response output="中😀a" finish_reason="stop""#]]
     .assert_eq(&capture.lines());
+}
+
+/// Elide the sampling parameters of the `received request` line, which spell
+/// out every engine field, after checking they carry `expected`.
+fn elide_logged_params(logs: &str, expected: &str) -> String {
+    logs.lines()
+        .map(|line| match line.split_once(" params=") {
+            Some((head, tail)) => {
+                let (params, tail) = tail.split_once(" lora_request=").expect("lora_request");
+                assert!(params.contains(expected), "{params}");
+                format!("{head} params=.. lora_request={tail}")
+            }
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_requests_logs_chat_body_and_engine_input() {
+    let mut body = chat_body(false);
+    body["request_id"] = json!("req-1");
+    body["max_tokens"] = json!(3);
+    let logs = output_logs_for_request(
+        ApiServerOptions {
+            enable_log_requests: true,
+            ..Default::default()
+        },
+        default_stream_output_specs(),
+        "/v1/chat/completions",
+        body,
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG <outside request span> message=request JSON body request_id="req-1" body="{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"Qwen/Qwen1.5-0.5B-Chat\",\"logprobs\":false,\"max_completion_tokens\":3,\"stream\":false,\"use_beam_search\":false,\"include_stop_str_in_output\":false,\"ignore_eos\":false,\"skip_special_tokens\":true,\"spaces_between_special_tokens\":true,\"include_reasoning\":true,\"echo\":false,\"continue_final_message\":false,\"add_special_tokens\":false,\"request_id\":\"req-1\"}"
+        DEBUG message=request details prompt=Some("user: hello\nassistant:") prompt_token_ids=[117, 115, 101, 114, 58, 32, 104, 101, 108, 108, 111, 10, 97, 115, 115, 105, 115, 116, 97, 110, 116, 58]
+        INFO message=received request params=.. lora_request=None"#]].assert_eq(&elide_logged_params(&logs, "max_tokens: 3"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn max_log_len_truncates_logged_request_body_and_prompt() {
+    let logs = output_logs_for_request(
+        ApiServerOptions {
+            enable_log_requests: true,
+            log_outputs: crate::config::OutputLogConfig {
+                outputs: crate::config::OutputLogging::Disabled,
+                max_log_len: Some(4),
+            },
+            ..Default::default()
+        },
+        default_stream_output_specs(),
+        "/v1/completions",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello world",
+            "request_id": "req-1",
+            "max_tokens": 3,
+        }),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG <outside request span> message=request JSON body request_id="req-1" body="{\"mo"
+        DEBUG message=request details prompt=Some("<bos") prompt_token_ids=[256, 104, 101, 108]
+        INFO message=received request params=.. lora_request=None"#]]
+    .assert_eq(&elide_logged_params(&logs, "max_tokens: 3"));
+}
+
+/// The logged prompt keeps whole characters: "é" is two byte tokens, and
+/// `--max-log-len 1` keeps one token ID but the whole character.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn max_log_len_keeps_whole_characters_of_logged_generate_prompt() {
+    let logs = output_logs_for_request(
+        ApiServerOptions {
+            enable_log_requests: true,
+            log_outputs: crate::config::OutputLogConfig {
+                outputs: crate::config::OutputLogging::Disabled,
+                max_log_len: Some(1),
+            },
+            ..Default::default()
+        },
+        default_stream_output_specs(),
+        "/inference/v1/generate",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": token_ids("éx"),
+            "request_id": "req-1",
+            "sampling_params": {"max_tokens": 3},
+        }),
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        DEBUG <outside request span> message=request JSON body request_id="req-1" body="{"
+        DEBUG message=request details prompt=Some("é") prompt_token_ids=[195]
+        INFO message=received request params=.. lora_request=None"#]]
+    .assert_eq(&elide_logged_params(&logs, "max_tokens: 3"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn log_requests_disabled_logs_no_request() {
+    let logs = output_logs_for_request(
+        ApiServerOptions::default(),
+        default_stream_output_specs(),
+        "/inference/v1/generate",
+        json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "token_ids": [1, 2, 3], "sampling_params": {"max_tokens": 3}}),
+    )
+    .await;
+
+    assert_eq!(logs, "");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
