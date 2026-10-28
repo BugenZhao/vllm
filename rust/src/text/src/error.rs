@@ -60,6 +60,18 @@ pub enum Error {
     InvalidRepetitionDetection { message: String },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
+    /// The request uses a field this engine does not carry out.
+    #[error("`{field}` is not supported by this engine")]
+    UnsupportedByEngine { field: &'static str },
+    /// The engine cannot take the request now; retrying later may succeed.
+    #[error("engine unavailable: {message}")]
+    Unavailable { message: String },
+    /// A remote engine rejected the request as invalid.
+    #[error("{message}")]
+    RemoteInvalidRequest { message: String },
+    /// A remote engine failed the request.
+    #[error("remote engine error: {message}")]
+    Remote { message: String },
     #[error(transparent)]
     Llm(#[from] LlmError),
     #[error(transparent)]
@@ -86,6 +98,8 @@ impl Error {
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
+            | Self::UnsupportedByEngine { .. }
+            | Self::RemoteInvalidRequest { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
@@ -95,6 +109,12 @@ impl Error {
             | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
         }
+    }
+
+    /// Whether the engine could not take the request now, so retrying later
+    /// may succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable { .. })
     }
 
     /// The request parameter a validation error refers to, reported as the

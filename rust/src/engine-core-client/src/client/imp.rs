@@ -17,7 +17,7 @@ use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    EngineLoad, OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
@@ -202,6 +202,11 @@ impl ClientInner {
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot every engine's load, ordered by engine index.
+    pub fn engine_loads(&self) -> Vec<EngineLoad> {
+        self.request_reg.lock().engine_loads()
     }
 
     /// Snapshot the adapter names of tracked LoRA requests as

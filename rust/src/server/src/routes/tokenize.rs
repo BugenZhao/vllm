@@ -56,8 +56,8 @@ pub async fn tokenize(
     ValidatedJson(body): ValidatedJson<TokenizeRequest>,
 ) -> Response {
     let request_id = tokenize_request_id(&headers);
-    let tokenizer = state.chat.text().tokenizer();
-    let max_model_len = state.chat.engine_core_client().max_model_len();
+    let tokenizer = state.chat.text().request_processor().tokenizer();
+    let max_model_len = state.chat.text().info().max_model_len;
 
     let result = match body {
         TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req),
@@ -130,7 +130,7 @@ pub async fn detokenize(
     if let Err(error) = check_model(&state, body.model.as_deref()) {
         return error.into_response();
     }
-    let tokenizer = state.chat.text().tokenizer();
+    let tokenizer = state.chat.text().request_processor().tokenizer();
     match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
         Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
         Err(e) => server_error!("detokenize failed: {}", e.to_report_string()).into_response(),

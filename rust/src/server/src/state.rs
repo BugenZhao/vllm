@@ -12,6 +12,7 @@ use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
+use vllm_text::TextLlm;
 
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
@@ -158,27 +159,30 @@ impl AppState {
     }
 
     /// Snapshot the loaded LoRA adapters in load order, for `/v1/models` cards.
-    pub async fn served_loras(&self) -> Vec<LoadedLora> {
+    pub(crate) async fn served_loras(&self) -> Vec<LoadedLora> {
         self.lora_manager.served_loras().await
     }
 
     /// Snapshot loaded LoRA adapters for the lifecycle API.
     ///
     /// Returns error if the engine was started without LoRA support.
-    pub async fn list_loras(&self) -> Result<Vec<LoadedLora>, LoraDisabledError> {
+    pub(crate) async fn list_loras(&self) -> Result<Vec<LoadedLora>, LoraDisabledError> {
         self.ensure_lora_enabled()?;
         Ok(self.lora_manager.served_loras().await)
     }
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
-    pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
+    pub(crate) async fn resolve_model_with_loras(
+        &self,
+        model_name: Option<&str>,
+    ) -> LoraModelResolution {
         self.lora_manager.resolve_model(&self.served_model_names, model_name).await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.
     ///
     /// Returns error if the engine was started without LoRA support.
-    pub async fn load_lora(
+    pub(crate) async fn load_lora(
         &self,
         module: LoraModulePath,
         load_inplace: bool,
@@ -198,7 +202,7 @@ impl AppState {
     /// model name.
     ///
     /// Returns error if the engine was started without LoRA support.
-    pub async fn load_static_lora(
+    pub(crate) async fn load_static_lora(
         &self,
         module: &LoraModulePath,
     ) -> Result<LoadedLora, LoadLoraError> {
@@ -212,7 +216,7 @@ impl AppState {
     /// registry.
     ///
     /// Returns error if the engine was started without LoRA support.
-    pub async fn unload_lora(
+    pub(crate) async fn unload_lora(
         &self,
         lora_name: &str,
         lora_int_id: Option<u64>,
@@ -224,17 +228,29 @@ impl AppState {
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
-        self.engine_core_client()
-            .ready_response()
-            .supports_lora
-            .then_some(())
-            .ok_or(LoraDisabledError)
+        self.chat.text().info().supports_lora.then_some(()).ok_or(LoraDisabledError)
+    }
+
+    /// Whether the text engine is local, so routes that need the engine-core
+    /// client or raw token output can be served.
+    pub(crate) fn has_local_engine(&self) -> bool {
+        self.chat.text().local().is_some()
+    }
+
+    /// Return the local text engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the text engine is not local. Routes that call this are only
+    /// built when [`Self::has_local_engine`] holds.
+    pub(crate) fn local_text(&self) -> &TextLlm {
+        self.chat.text().local().expect("route requires a local text engine")
     }
 
     /// Return a reference to the underlying engine core client for utility
-    /// calls.
+    /// calls. Panics like [`Self::local_text`].
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        self.chat.engine_core_client()
+        self.local_text().engine_core_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

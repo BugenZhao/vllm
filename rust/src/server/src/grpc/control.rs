@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use asynk_strim_attr::{TryYielder, try_stream};
+use futures::Stream;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
+use vllm_engine_core_client::{EngineCoreClient, EngineLoad};
 
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
@@ -21,19 +26,26 @@ use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
 
+/// Minimum interval between `WatchLoads` snapshots when the client sets none.
+const DEFAULT_LOAD_WATCH_INTERVAL: Duration = Duration::from_millis(50);
+
 /// gRPC control service backed by the shared application state.
 pub struct ControlServiceImpl {
     state: Arc<AppState>,
     rl_lock: Mutex<()>,
     engine_shutdown: Option<CancellationToken>,
+    /// Ends open `WatchLoads` streams, which never finish on their own, so
+    /// they do not hold up a graceful server shutdown.
+    server_shutdown: CancellationToken,
 }
 
 impl ControlServiceImpl {
-    pub fn new(state: Arc<AppState>) -> Self {
+    pub fn new(state: Arc<AppState>, server_shutdown: CancellationToken) -> Self {
         Self {
             state,
             rl_lock: Mutex::new(()),
             engine_shutdown: None,
+            server_shutdown,
         }
     }
 
@@ -186,8 +198,73 @@ fn list_loras_status(error: LoraDisabledError) -> Status {
     Status::failed_precondition(error.to_report_string())
 }
 
+/// Stream engine loads: one snapshot right away, then one per tick whenever
+/// the loads changed.
+#[try_stream]
+async fn load_snapshots(
+    state: Arc<AppState>,
+    min_interval: Duration,
+    shutdown: CancellationToken,
+    mut y: TryYielder<pb::LoadSnapshot, Status>,
+) -> Result<(), Status> {
+    let mut ticker = tokio::time::interval(min_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut last: Option<Vec<EngineLoad>> = None;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            () = shutdown.cancelled() => return Ok(()),
+        }
+        let loads = state.engine_core_client().engine_loads();
+        if last.as_ref() == Some(&loads) {
+            continue;
+        }
+        y.yield_ok(load_snapshot_to_proto(&loads, Instant::now())).await;
+        last = Some(loads);
+    }
+}
+
+fn load_snapshot_to_proto(loads: &[EngineLoad], now: Instant) -> pb::LoadSnapshot {
+    pb::LoadSnapshot {
+        engines: loads
+            .iter()
+            .map(|load| pb::EngineLoad {
+                data_parallel_rank: load.engine_index,
+                num_inflight_requests: saturating_u32(load.inflight),
+                scheduler: load.scheduler.map(|scheduler| pb::SchedulerLoad {
+                    num_running_requests: saturating_u32(scheduler.running),
+                    num_waiting_requests: saturating_u32(scheduler.waiting),
+                    kv_cache_usage: scheduler.kv_cache_usage as f32,
+                    age_ms: now.saturating_duration_since(scheduler.received_at).as_millis() as u64,
+                }),
+            })
+            .collect(),
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
+    type WatchLoadsStream = Pin<Box<dyn Stream<Item = Result<pb::LoadSnapshot, Status>> + Send>>;
+
+    async fn watch_loads(
+        &self,
+        request: Request<pb::WatchLoadsRequest>,
+    ) -> Result<Response<Self::WatchLoadsStream>, Status> {
+        let min_interval = match request.into_inner().min_interval_ms {
+            0 => DEFAULT_LOAD_WATCH_INTERVAL,
+            ms => Duration::from_millis(u64::from(ms)),
+        };
+        Ok(Response::new(Box::pin(load_snapshots(
+            self.state.clone(),
+            min_interval,
+            self.server_shutdown.clone(),
+        ))))
+    }
+
     async fn shutdown(
         &self,
         _request: Request<pb::ShutdownRequest>,
@@ -228,7 +305,7 @@ impl pb::control_server::Control for ControlServiceImpl {
     ) -> Result<Response<pb::ModelInfo>, Status> {
         let served = self.state.served_model_names();
         Ok(Response::new(pb::ModelInfo {
-            model_id: self.state.chat.text().model_id().to_string(),
+            model_id: self.state.chat.model_id().to_string(),
             served_model_name: self.state.primary_model_name().to_string(),
             served_model_aliases: served.iter().skip(1).cloned().collect(),
             // GenerateRequest accepts both prompt representations.

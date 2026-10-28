@@ -14,7 +14,8 @@ use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{
-    DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
+    DecodedText, DecodedTextEvent, Prompt, SampledDelta, TextOutputStream,
+    TextOutputStreamExt as _, TextRequest,
 };
 
 use super::convert::{self, ResponseOpts};
@@ -139,7 +140,7 @@ impl InferenceServiceImpl {
             text_request.data_parallel_rank = data_parallel_rank;
 
             if !lora_name.is_empty() {
-                if !self.state.engine_core_client().ready_response().supports_lora {
+                if !self.state.chat.text().info().supports_lora {
                     return Err(Status::failed_precondition(
                         "engine was not started with LoRA enabled",
                     ));
@@ -226,6 +227,12 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+        // The collected output keeps only the text, not its token attributions.
+        if response_opts.output_token_attributions {
+            return Err(Status::invalid_argument(
+                "output_token_attributions requires GenerateStream",
+            ));
+        }
         let PreparedGrpcRequest {
             text_request,
             request_span,
@@ -263,7 +270,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         };
 
         let outputs = convert::to_sequence_output(
-            &collected.text,
+            &DecodedText::unattributed(collected.text),
             &collected.token_ids,
             collected.logprobs.as_ref(),
             Some(&finish_info),
@@ -353,7 +360,7 @@ async fn generate_stream_responses(
                     },
                 finished,
             }) => convert::to_sequence_output(
-                &decoded.text,
+                &decoded,
                 &token_ids,
                 logprobs.as_ref(),
                 finished.as_deref(),

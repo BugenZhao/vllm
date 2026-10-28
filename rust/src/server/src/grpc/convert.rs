@@ -11,11 +11,13 @@ use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
-    PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
+    DecodedLogprobs, DecodedPromptLogprobs, DecodedText, FinishReason, Finished, Prompt,
+    PromptTruncation, PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest,
+    TokenAnchor, TruncationSide,
 };
 
 use super::pb;
+use super::pb::json::{json_to_proto_struct, proto_struct_to_json, proto_value_to_json};
 
 fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
     KvHintsEnvelope {
@@ -64,6 +66,11 @@ pub fn to_text_request(
         )));
     }
 
+    let temperature = match req.omitted_temperature() {
+        pb::OmittedTemperature::Greedy => req.temperature.or(Some(0.0)),
+        pb::OmittedTemperature::ModelDefault => req.temperature,
+    };
+
     // Proto3 uses zero as unset; positive values select fixed left truncation.
     // The -1 input-budget sentinel is outside the uint32 field domain.
     let prompt_truncation = (req.truncate_prompt_tokens != 0).then_some(PromptTruncation {
@@ -93,7 +100,7 @@ pub fn to_text_request(
     let kv = req.kv.as_ref();
 
     let mut sampling_params =
-        build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+        build_sampling_params(temperature, sampling, decoding, stopping, response)?;
     sampling_params.watermarking = req.watermarking;
 
     // Thread KVCacheParameters → SamplingParams fields.
@@ -159,11 +166,10 @@ fn build_sampling_params(
     stopping: Option<&pb::StoppingCriteria>,
     response: Option<&pb::ResponseOptions>,
 ) -> Result<SamplingParams, Status> {
-    // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
-    // the gRPC API when the caller does not specify a value. This differs from
-    // the HTTP/OpenAI API (which defaults to 1.0) and matches the convention of
-    // programmatic generation APIs.
-    let temperature = temperature.or(Some(0.0));
+    // Temperature is a top-level GenerateRequest field, already resolved by
+    // `omitted_temperature`: greedy (0.0) by default for the gRPC API, which
+    // differs from the HTTP/OpenAI API (which defaults to 1.0) and matches the
+    // convention of programmatic generation APIs.
     let mut params = SamplingParams {
         temperature,
         ..SamplingParams::default()
@@ -187,15 +193,9 @@ fn build_sampling_params(
 
     // DecodingParameters
     if let Some(d) = decoding {
-        if d.presence_penalty != 0.0 {
-            params.presence_penalty = Some(d.presence_penalty);
-        }
-        if d.frequency_penalty != 0.0 {
-            params.frequency_penalty = Some(d.frequency_penalty);
-        }
-        if d.repetition_penalty != 0.0 {
-            params.repetition_penalty = Some(d.repetition_penalty);
-        }
+        params.presence_penalty = d.presence_penalty;
+        params.frequency_penalty = d.frequency_penalty;
+        params.repetition_penalty = d.repetition_penalty;
         if !d.logit_bias.is_empty() {
             params.logit_bias = Some(d.logit_bias.clone());
         }
@@ -335,7 +335,7 @@ pub fn to_prompt_info(
 
 /// Convert a `DecodedTextEvent::TextDelta` into a gRPC `SequenceOutput`.
 pub fn to_sequence_output(
-    delta: &str,
+    delta: &DecodedText,
     token_ids: &[u32],
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
@@ -355,7 +355,7 @@ pub fn to_sequence_output(
     Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
-            delta.to_string()
+            delta.text.clone()
         } else {
             String::new()
         },
@@ -370,7 +370,30 @@ pub fn to_sequence_output(
         candidate_tokens: candidates,
         finish_info,
         sampling_mask,
+        token_attributions: if opts.output_token_attributions {
+            token_attributions_to_proto(delta)
+        } else {
+            vec![]
+        },
     })
+}
+
+fn token_attributions_to_proto(delta: &DecodedText) -> Vec<pb::TokenAttribution> {
+    delta
+        .attributions
+        .iter()
+        .map(|attribution| {
+            let (byte_offset, zero_width) = match attribution.anchor {
+                TokenAnchor::Visible { byte_offset } => (byte_offset, false),
+                TokenAnchor::ZeroWidth { byte_offset } => (byte_offset, true),
+            };
+            pb::TokenAttribution {
+                token_id: attribution.token_id,
+                byte_offset,
+                zero_width,
+            }
+        })
+        .collect()
 }
 
 fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishInfo, Status> {
@@ -475,64 +498,6 @@ fn positions_to_proto(
 }
 
 // ========================================================================================
-// KV transfer params conversion (serde_json::Value ↔ prost_types::Struct)
-// ========================================================================================
-
-/// Largest integer exactly representable as `f64` (2^53 - 1). Integral
-/// numbers within this bound are emitted as JSON integers so consumers
-/// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
-const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
-
-fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
-    serde_json::Value::Object(
-        s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
-    )
-}
-
-fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
-    use prost_types::value::Kind;
-    match v.kind.as_ref() {
-        None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
-        Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
-        Some(Kind::NumberValue(n)) if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER_F64 => {
-            serde_json::Value::Number(serde_json::Number::from(*n as i64))
-        }
-        Some(Kind::NumberValue(n)) => serde_json::json!(*n),
-        Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
-        Some(Kind::ListValue(list)) => {
-            serde_json::Value::Array(list.values.iter().map(proto_value_to_json).collect())
-        }
-        Some(Kind::StructValue(s)) => proto_struct_to_json(s),
-    }
-}
-
-pub(super) fn json_to_proto_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {
-    match value {
-        serde_json::Value::Object(map) => Some(prost_types::Struct {
-            fields: map.iter().map(|(k, v)| (k.clone(), json_to_proto_value(v))).collect(),
-        }),
-        _ => None,
-    }
-}
-
-fn json_to_proto_value(v: &serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match v {
-        serde_json::Value::Null => Kind::NullValue(0),
-        serde_json::Value::Bool(b) => Kind::BoolValue(*b),
-        serde_json::Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(s) => Kind::StringValue(s.clone()),
-        serde_json::Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
-            values: arr.iter().map(json_to_proto_value).collect(),
-        }),
-        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
-            fields: map.iter().map(|(k, v)| (k.clone(), json_to_proto_value(v))).collect(),
-        }),
-    };
-    prost_types::Value { kind: Some(kind) }
-}
-
-// ========================================================================================
 // Options extracted from the request for response building
 // ========================================================================================
 
@@ -544,6 +509,7 @@ pub struct ResponseOpts {
     pub output_text: bool,
     pub output_token_ids: bool,
     pub output_logprobs: bool,
+    pub output_token_attributions: bool,
 }
 
 impl ResponseOpts {
@@ -555,6 +521,7 @@ impl ResponseOpts {
                 output_text: r.output_text.unwrap_or(true),
                 output_token_ids: r.output_token_ids,
                 output_logprobs: r.output_logprobs,
+                output_token_attributions: r.output_token_attributions,
             },
             None => Self {
                 output_text: true,
@@ -571,14 +538,14 @@ mod tests {
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
-        FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
+        DecodedText, FinishReason, Finished, Prompt, SamplingHints, SamplingLimits,
+        lower_sampling_params,
     };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    use super::{
-        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
-    };
+    use super::pb::json::json_to_proto_struct;
+    use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -1046,8 +1013,14 @@ mod tests {
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
-            .expect("sequence output");
+        let out = to_sequence_output(
+            &DecodedText::unattributed("hello"),
+            &[10, 20, 30],
+            None,
+            Some(&fin),
+            &opts,
+        )
+        .expect("sequence output");
         let out = pb::SequenceOutput::decode(out.encode_to_vec().as_slice()).unwrap();
 
         let finish = out.finish_info.expect("finish_info should be present");
@@ -1063,11 +1036,22 @@ mod tests {
             rows: vec![vec![1, 10], vec![2, 20]],
         });
 
-        let terminal =
-            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
-                .expect("terminal output");
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
-            .expect("intermediate output");
+        let terminal = to_sequence_output(
+            &DecodedText::default(),
+            &[10, 20],
+            None,
+            Some(&fin),
+            &ResponseOpts::default(),
+        )
+        .expect("terminal output");
+        let intermediate = to_sequence_output(
+            &DecodedText::default(),
+            &[9],
+            None,
+            None,
+            &ResponseOpts::default(),
+        )
+        .expect("intermediate output");
 
         assert_eq!(
             terminal.sampling_mask,

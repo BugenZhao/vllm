@@ -54,9 +54,9 @@ use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
-use crate::routes::build_router;
+pub use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
-use crate::state::AppState;
+pub use crate::state::AppState;
 
 /// How often the server PINGs an idle gRPC connection to reap a dead peer;
 /// tonic enables no keepalive by default. 2h matches the gRPC-core default.
@@ -228,6 +228,12 @@ where
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr_display()?;
 
+    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
+    // token. Caller cancellation propagates into both protocols; if either
+    // protocol exits first, we cancel this child token so its sibling also
+    // begins a graceful drain.
+    let server_shutdown = shutdown.child_token();
+
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
@@ -244,11 +250,11 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = state.engine_core_client().subscribe_health();
+        let engine_health = state.chat.text().subscribe_health();
         health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
         let control_service = grpc::ControlGrpcService::new(
-            grpc::ControlServiceImpl::new(state.clone())
+            grpc::ControlServiceImpl::new(state.clone(), server_shutdown.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
@@ -281,11 +287,6 @@ where
     };
     let model = model.as_str();
 
-    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
-    // token. Caller cancellation propagates into both protocols; if either
-    // protocol exits first, we cancel this child token so its sibling also
-    // begins a graceful drain.
-    let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
 

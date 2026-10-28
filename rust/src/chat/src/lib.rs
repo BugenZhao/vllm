@@ -68,7 +68,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
+use vllm_text::{DynTextEngine, Prompt, TextEngine, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -94,12 +94,12 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor with multimodal support using the effective model
-    /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
+    /// Create a processor using the effective model dtype and context length
+    /// reported by the engine. Multimodal inputs need the model dtype.
+    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
         Self {
             backend,
-            model_dtype: Some(model_dtype),
+            model_dtype,
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -289,27 +289,29 @@ impl ChatRequestProcessor {
     }
 }
 
-/// Structured chat facade above [`TextLlm`].
+/// Structured chat facade above a [`TextEngine`].
 ///
 /// This layer stays above raw text semantics: it takes care of chat-template
 /// rendering, exposes structured assistant events, and adds chat-specific
 /// request semantics such as tool calls.
 pub struct ChatLlm {
-    text: TextLlm,
+    text: DynTextEngine,
     processor: ChatRequestProcessor,
 }
 
 impl ChatLlm {
-    /// Create a new chat facade from a text-generation facade plus a chat
+    /// Create a new chat facade from a text-generation engine plus a chat
     /// backend.
-    pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
-        let model_dtype = text.engine_core_client().model_dtype();
-        let max_model_len = text.engine_core_client().max_model_len();
+    pub fn new(text: impl TextEngine, backend: DynChatBackend) -> Self {
+        Self::from_dyn(Box::new(text), backend)
+    }
 
-        Self {
-            text,
-            processor: ChatRequestProcessor::new(backend, model_dtype, max_model_len),
-        }
+    /// Like [`Self::new`], for an already boxed text-generation engine.
+    pub fn from_dyn(text: DynTextEngine, backend: DynChatBackend) -> Self {
+        let info = text.info();
+        let processor = ChatRequestProcessor::new(backend, info.model_dtype, info.max_model_len);
+
+        Self { text, processor }
     }
 
     /// Convenience constructor for one shared backend object that implements
@@ -353,18 +355,18 @@ impl ChatLlm {
 
     /// Tokenizer vocabulary size.
     pub fn tokenizer_vocab_size(&self) -> usize {
-        self.text.tokenizer_vocab_size()
+        self.text.request_processor().tokenizer_vocab_size()
     }
 
     /// Model vocabulary size from the model config.
     pub fn model_vocab_size(&self) -> usize {
-        self.text.model_vocab_size()
+        self.text.request_processor().model_vocab_size()
     }
 
-    /// Expose the underlying text facade for raw text-generation routes such as
+    /// Expose the underlying text engine for raw text-generation routes such as
     /// `/v1/completions`.
-    pub fn text(&self) -> &TextLlm {
-        &self.text
+    pub fn text(&self) -> &dyn TextEngine {
+        self.text.as_ref()
     }
 
     /// Return the chat request processor.
@@ -374,13 +376,13 @@ impl ChatLlm {
 
     /// Return the model ID reported by the underlying text backend.
     pub fn model_id(&self) -> &str {
-        self.text.model_id()
+        self.text.request_processor().model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.text.engine_core_client()
+    /// Expose the local engine-core client for low-level utility/admin calls,
+    /// when the text engine is local.
+    pub fn engine_core_client(&self) -> Option<&EngineCoreClient> {
+        self.text.local().map(TextLlm::engine_core_client)
     }
 
     /// Whether the loaded backend has a registered multimodal processor.

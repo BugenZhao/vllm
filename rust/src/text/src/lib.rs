@@ -12,8 +12,9 @@ use std::mem::take;
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
 };
+pub use engine::{BoxTextOutputStream, DynTextEngine, EngineInfo, TextEngine};
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
 };
@@ -23,6 +24,7 @@ pub use output::{
     TextOutputStreamExt, TokenAnchor, TokenAttribution,
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
+use tokio::sync::watch;
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -31,6 +33,7 @@ use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod engine;
 mod error;
 mod lower;
 pub mod output;
@@ -96,6 +99,23 @@ impl TextRequestProcessor {
     /// Return the effective model context length.
     pub fn max_model_len(&self) -> u32 {
         self.max_model_len
+    }
+
+    /// Return the backend model ID.
+    pub fn model_id(&self) -> &str {
+        self.backend.model_id()
+    }
+
+    /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
+    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.backend.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size from the model config, used to bound generated
+    /// token IDs and logits-domain sampling controls.
+    pub fn model_vocab_size(&self) -> usize {
+        self.backend.model_vocab_size()
     }
 
     fn prepare_prompt_tokens(
@@ -189,6 +209,8 @@ pub struct TextLlm {
     llm: Llm,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
+    /// Engine facts from the engine-core startup handshake.
+    info: EngineInfo,
 }
 
 impl TextLlm {
@@ -197,11 +219,19 @@ impl TextLlm {
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
-        let max_model_len = llm.engine_core_client().max_model_len();
+        let client = llm.engine_core_client();
+        let max_model_len = client.max_model_len();
+        let info = EngineInfo {
+            max_model_len,
+            model_dtype: Some(client.model_dtype()),
+            supports_lora: client.ready_response().supports_lora,
+            vllm_version: client.vllm_version().to_string(),
+        };
 
         Self {
             llm,
             processor: TextRequestProcessor::new(backend, max_model_len),
+            info,
         }
     }
 
@@ -219,7 +249,7 @@ impl TextLlm {
 
     /// Return the backend model ID.
     pub fn model_id(&self) -> &str {
-        self.processor.backend.model_id()
+        self.processor.model_id()
     }
 
     /// Expose the underlying engine-core client for low-level utility/admin
@@ -241,13 +271,13 @@ impl TextLlm {
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
     /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
-        self.processor.backend.tokenizer_vocab_size()
+        self.processor.tokenizer_vocab_size()
     }
 
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
     pub fn model_vocab_size(&self) -> usize {
-        self.processor.backend.model_vocab_size()
+        self.processor.model_vocab_size()
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw
@@ -296,6 +326,37 @@ impl TextLlm {
     pub async fn shutdown(self) -> Result<()> {
         self.llm.shutdown().await?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TextEngine for TextLlm {
+    fn request_processor(&self) -> &TextRequestProcessor {
+        &self.processor
+    }
+
+    fn info(&self) -> &EngineInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> watch::Receiver<bool> {
+        self.engine_core_client().subscribe_health()
+    }
+
+    async fn generate(&self, request: TextRequest) -> Result<BoxTextOutputStream> {
+        Ok(TextLlm::generate(self, request).await?.boxed())
+    }
+
+    async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        TextLlm::abort(self, external_ids).await
+    }
+
+    fn local(&self) -> Option<&TextLlm> {
+        Some(self)
+    }
+
+    async fn shutdown(self: Box<Self>) -> Result<()> {
+        TextLlm::shutdown(*self).await
     }
 }
 

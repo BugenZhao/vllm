@@ -95,8 +95,7 @@ pub async fn generate(
     let api_server_options = state.api_server_options;
     let stream = prepared.stream;
     let raw_stream = match state
-        .chat
-        .text()
+        .local_text()
         .generate_raw(prepared.text_request)
         .instrument(request_span.clone())
         .await

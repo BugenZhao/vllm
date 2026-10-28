@@ -70,7 +70,7 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let tokenizer = state.chat.text().tokenizer();
+    let tokenizer = state.chat.text().request_processor().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,

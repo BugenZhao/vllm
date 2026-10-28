@@ -58,9 +58,9 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
-use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
+use super::pb::json::json_to_proto_struct;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
@@ -429,7 +429,10 @@ where
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
             .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
-        ControlServer::new(ControlServiceImpl::new(state).with_engine_shutdown(engine_shutdown)),
+        ControlServer::new(
+            ControlServiceImpl::new(state, tokio_util::sync::CancellationToken::new())
+                .with_engine_shutdown(engine_shutdown),
+        ),
         engine_health,
         engine_task,
     )
@@ -2394,7 +2397,8 @@ async fn control_aggregates_multi_engine_capacity() {
             Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);
-        let service = ControlServiceImpl::new(Arc::new(state));
+        let service =
+            ControlServiceImpl::new(Arc::new(state), tokio_util::sync::CancellationToken::new());
 
         let server = pb::control_server::Control::get_server_info(
             &service,
@@ -2632,4 +2636,300 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         .await
         .expect("timed out waiting for gRPC server shutdown")
         .expect("gRPC server task failed");
+}
+
+// ========================================================================================
+// RemoteTextEngine round trip
+// ========================================================================================
+
+/// What one scripted engine run observed: the request the engine received and
+/// the events the text-engine caller saw.
+#[derive(Debug, PartialEq)]
+struct TextEngineRun {
+    engine_request: EngineCoreRequest,
+    events: Vec<vllm_text::DecodedTextEvent>,
+}
+
+impl TextEngineRun {
+    /// Clear values that legitimately differ between runs: generated request
+    /// IDs, arrival times, and engine timestamps.
+    fn normalized(mut self) -> Self {
+        self.engine_request.request_id.clear();
+        self.engine_request.external_req_id = None;
+        self.engine_request.arrival_time = 0.0;
+        for event in &mut self.events {
+            if let vllm_text::DecodedTextEvent::TextDelta {
+                finished: Some(finished),
+                ..
+            } = event
+            {
+                finished.timestamps = Default::default();
+            }
+        }
+        self
+    }
+
+    fn text(&self) -> String {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                vllm_text::DecodedTextEvent::TextDelta { decoded, .. } => {
+                    Some(decoded.text.as_str())
+                }
+                vllm_text::DecodedTextEvent::Start { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// A mock engine script that records the submitted request and replies with
+/// `outputs`, addressed to that request.
+fn recording_engine_script(
+    outputs: Vec<EngineCoreOutput>,
+    recorded: tokio::sync::oneshot::Sender<EngineCoreRequest>,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            let request_id = request.request_id.clone();
+            let _ = recorded.send(request);
+            // One engine step per output, so each becomes its own update.
+            for output in outputs {
+                let output = EngineCoreOutput {
+                    request_id: request_id.clone(),
+                    ..output
+                };
+                let batch = RequestBatchOutputs {
+                    outputs: vec![output],
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+            }
+        })
+    }
+}
+
+async fn collect_events(
+    engine: &dyn vllm_text::TextEngine,
+    request: vllm_text::TextRequest,
+) -> Vec<vllm_text::DecodedTextEvent> {
+    use futures::TryStreamExt as _;
+
+    engine
+        .generate(request)
+        .await
+        .expect("submit text request")
+        .try_collect()
+        .await
+        .expect("collect text events")
+}
+
+/// Run `request` against a local `TextLlm` over a scripted engine.
+async fn run_local_text_engine(
+    request: vllm_text::TextRequest,
+    outputs: Vec<EngineCoreOutput>,
+) -> TextEngineRun {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (recorded_tx, recorded_rx) = tokio::sync::oneshot::channel();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-local-text",
+        default_ready_response(),
+        recording_engine_script(outputs, recorded_tx),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let text = vllm_text::TextLlm::new(Llm::new(client), Arc::new(FakeTextBackend));
+
+    let events = collect_events(&text, request).await;
+    engine_task.await.expect("mock engine task");
+    TextEngineRun {
+        engine_request: recorded_rx.await.expect("engine received a request"),
+        events,
+    }
+}
+
+/// Run `request` against a `RemoteTextEngine` connected to a gRPC server whose
+/// own text engine runs over a scripted engine.
+async fn run_remote_text_engine(
+    request: vllm_text::TextRequest,
+    outputs: Vec<EngineCoreOutput>,
+) -> TextEngineRun {
+    let (recorded_tx, recorded_rx) = tokio::sync::oneshot::channel();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-remote-text",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            None,
+            recording_engine_script(outputs, recorded_tx),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let remote = vllm_grpc_client::RemoteTextEngine::connect(channel, Arc::new(FakeTextBackend))
+        .await
+        .expect("connect remote text engine");
+
+    let events = collect_events(&remote, request).await;
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+    TextEngineRun {
+        engine_request: recorded_rx.await.expect("engine received a request"),
+        events,
+    }
+}
+
+/// The same request and engine outputs give the same engine request and the
+/// same decoded events, locally and through `RemoteTextEngine` and the gRPC
+/// server.
+async fn assert_remote_matches_local(
+    request: vllm_text::TextRequest,
+    outputs: Vec<EngineCoreOutput>,
+    expected_text: &str,
+) {
+    let local = run_local_text_engine(request.clone(), outputs.clone()).await.normalized();
+    let remote = run_remote_text_engine(request, outputs).await.normalized();
+    assert_eq!(local.text(), expected_text);
+    assert_eq!(remote, local);
+}
+
+fn round_trip_request() -> vllm_text::TextRequest {
+    vllm_text::TextRequest {
+        request_id: "round-trip".to_string(),
+        prompt: Prompt::TokenIds(b"hello".iter().map(|&b| u32::from(b)).collect()),
+        sampling_params: vllm_text::SamplingParams {
+            // Omitted temperature resolves to the model default, not greedy.
+            temperature: None,
+            // An explicit zero penalty stays explicit.
+            presence_penalty: Some(0.0),
+            top_k: Some(5),
+            seed: Some(7),
+            max_tokens: Some(16),
+            stop_token_ids: Some(vec![3]),
+            vllm_xargs: Some(
+                [(
+                    "kv_transfer_params".to_string(),
+                    serde_json::json!({"do_remote_decode": true, "port": 5600}),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        },
+        decode_options: vllm_text::TextDecodeOptions {
+            stop_strings: Some(vec!["!".to_string()]),
+            ..Default::default()
+        },
+        priority: 3,
+        cache_salt: Some("tenant-a".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..vllm_text::TextRequest::for_test()
+    }
+}
+
+fn byte_outputs(chunks: &[&[u8]], finish_reason: EngineCoreFinishReason) -> Vec<EngineCoreOutput> {
+    let last = chunks.len() - 1;
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            request_output(
+                "",
+                chunk.iter().map(|&b| u32::from(b)).collect(),
+                (index == last).then_some(finish_reason),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_text_engine_matches_local_with_stop_string() {
+    let outputs = byte_outputs(&[b"hel", b"lo!", b"xy"], EngineCoreFinishReason::Length);
+    assert_remote_matches_local(round_trip_request(), outputs, "hello").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_text_engine_matches_local_without_intermediate_output() {
+    let request = vllm_text::TextRequest {
+        intermediate: false,
+        ..round_trip_request()
+    };
+    let outputs = byte_outputs(&[b"hel", b"lo!", b"xy"], EngineCoreFinishReason::Length);
+    assert_remote_matches_local(request, outputs, "hello").await;
+}
+
+/// Token attributions survive when a token completes a character that an
+/// earlier update started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_text_engine_matches_local_across_split_characters() {
+    let outputs = byte_outputs(
+        &[&[0xC3], &[0xA9, b'a'], &[0xE2, 0x82], &[0xAC]],
+        EngineCoreFinishReason::Length,
+    );
+    assert_remote_matches_local(round_trip_request(), outputs, "éa€").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_text_engine_matches_local_with_logprobs() {
+    use vllm_engine_core_client::protocol::logprobs::{
+        Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
+    };
+
+    fn position(token_id: u8, rank: u32) -> PositionLogprobs {
+        PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: u32::from(token_id),
+                    logprob: -0.25,
+                    rank,
+                },
+                TokenLogprob {
+                    token_id: u32::from(b'z'),
+                    logprob: -1.5,
+                    rank: 1,
+                },
+            ],
+        }
+    }
+
+    let request = vllm_text::TextRequest {
+        sampling_params: vllm_text::SamplingParams {
+            logprobs: Some(1),
+            prompt_logprobs: Some(1),
+            ..round_trip_request().sampling_params
+        },
+        ..round_trip_request()
+    };
+    let mut outputs = byte_outputs(&[b"o", b"k"], EngineCoreFinishReason::Length);
+    outputs[0].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'o', 2)],
+    }));
+    outputs[0].new_prompt_logprobs_tensors = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: b"ello".iter().map(|&b| position(b, 3)).collect(),
+    }));
+    outputs[1].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'k', 1)],
+    }));
+    assert_remote_matches_local(request, outputs, "ok").await;
 }

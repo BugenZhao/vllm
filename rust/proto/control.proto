@@ -23,6 +23,9 @@ service Control {
 
   // KV event discovery.
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
+  // Streams per-engine load: a snapshot on subscription, then one whenever the
+  // load changes, at most once per `min_interval_ms`.
+  rpc WatchLoads (WatchLoadsRequest) returns (stream LoadSnapshot) {}
 
   // Reinforcement-learning lifecycle and weight updates.
   rpc PauseGeneration (PauseGenerationRequest) returns (PauseGenerationResponse) {}
@@ -197,4 +200,32 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
+}
+
+message WatchLoadsRequest {
+  // Minimum interval between snapshots; 0 selects the server default.
+  uint32 min_interval_ms = 1;
+}
+
+message LoadSnapshot {
+  repeated EngineLoad engines = 1;
+}
+
+message EngineLoad {
+  // Data parallel rank of the engine, as accepted by `x-data-parallel-rank`.
+  uint32 data_parallel_rank = 1;
+  // Requests this server submitted to the engine that have not finished.
+  uint32 num_inflight_requests = 2;
+  // The engine's latest scheduler report; absent until the first one, or when
+  // the server runs with stats logging disabled.
+  SchedulerLoad scheduler = 3;
+}
+
+message SchedulerLoad {
+  uint32 num_running_requests = 1;
+  uint32 num_waiting_requests = 2;
+  // Fraction of KV cache blocks in use, in [0, 1].
+  float kv_cache_usage = 3;
+  // Milliseconds since the engine sent this report.
+  uint64 age_ms = 4;
 }

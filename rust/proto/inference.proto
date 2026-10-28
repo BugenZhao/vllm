@@ -27,7 +27,7 @@ message GenerateRequest {
     TokenIds token_ids = 4;
   }
 
-  // Temperature, defaults to model-specific default or 0
+  // Temperature; `omitted_temperature` selects the value used when omitted.
   optional float temperature = 5;
   // Parameters controlling random sampling, not applicable if temperature == 0
   RandomSampling sampling = 6;
@@ -64,6 +64,16 @@ message GenerateRequest {
   // output after reasoning. Prefer a constraint that covers the full output
   // from the first generated token.
   EngineReasoningGate engine_reasoning_gate = 18;
+
+  // How an omitted `temperature` is resolved.
+  OmittedTemperature omitted_temperature = 19;
+}
+
+enum OmittedTemperature {
+  // Greedy sampling (0.0), the convention of programmatic generation APIs.
+  OMITTED_TEMPERATURE_GREEDY = 0;
+  // The model's generation config default, as in the OpenAI-compatible API.
+  OMITTED_TEMPERATURE_MODEL_DEFAULT = 1;
 }
 
 // Inputs to the engine's reasoning gate, which keeps a structured-output
@@ -101,10 +111,11 @@ message RandomSampling {
 }
 
 message DecodingParameters {
-  // Penalties
-  float presence_penalty = 1;  // Default (0.0) means no penalty
-  float frequency_penalty = 2;  // Default (0.0) means no penalty
-  float repetition_penalty = 3;  // Default (0.0) means no penalty
+  // Penalties; omitted means the model's generation config default, or no
+  // penalty without one.
+  optional float presence_penalty = 1;
+  optional float frequency_penalty = 2;
+  optional float repetition_penalty = 3;
   map<uint32, float> logit_bias = 4;
   repeated uint32 allowed_token_ids = 5;
 
@@ -155,6 +166,8 @@ message ResponseOptions {
   optional CandidateTokens output_candidates = 7;
   // Defaults to true when omitted.
   optional bool skip_special_tokens = 8;
+  // Attribute each generated token to its position in the output text.
+  bool output_token_attributions = 9;
 }
 
 message KVCacheParameters {
@@ -202,6 +215,20 @@ message SequenceOutput {
   optional FinishInfo finish_info = 8;
   // Only present in final output when sampling-mask capture is enabled.
   repeated TokenIds sampling_mask = 10;
+  // If requested: the tokens of this chunk in generation order, each
+  // attributed to its position in `text`. A token can be attributed to an
+  // earlier chunk's text when it completes a multi-byte character, and tokens
+  // removed before decoding, such as a terminal stop token, are absent.
+  repeated TokenAttribution token_attributions = 11;
+}
+
+// One generated token's position in `SequenceOutput.text`.
+message TokenAttribution {
+  uint32 token_id = 1;
+  // Byte offset into the chunk's `text`.
+  uint32 byte_offset = 2;
+  // The token produced no visible text; `byte_offset` is where it falls.
+  bool zero_width = 3;
 }
 
 // Prompt info, returned in the first response

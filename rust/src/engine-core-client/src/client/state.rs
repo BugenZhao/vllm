@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use tokio::sync::oneshot;
 use tracing::trace;
@@ -59,6 +60,29 @@ struct EngineLoadSnapshot {
     running: usize,
 }
 
+/// One engine's load as tracked by this client, published for external
+/// routers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineLoad {
+    /// Engine index, which is also the engine's data parallel rank.
+    pub engine_index: u32,
+    /// Requests submitted through this client that have not finished.
+    pub inflight: usize,
+    /// The engine's latest scheduler report, if any.
+    pub scheduler: Option<SchedulerLoad>,
+}
+
+/// Load counters from one engine scheduler report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SchedulerLoad {
+    pub running: usize,
+    pub waiting: usize,
+    /// Fraction of KV cache blocks in use. `1.0` means 100% usage.
+    pub kv_cache_usage: f64,
+    /// When this client received the report.
+    pub received_at: Instant,
+}
+
 #[derive(Debug, Default)]
 struct EngineRoutingState {
     /// Requests admitted by this frontend that have not finished yet.
@@ -76,6 +100,8 @@ struct EngineRoutingState {
     admitted_since_stats: usize,
     /// Identifies admissions made after the latest scheduler snapshot.
     stats_generation: u64,
+    /// The latest scheduler report, kept for [`EngineLoad`] only.
+    last_scheduler_load: Option<SchedulerLoad>,
 }
 
 impl EngineRoutingState {
@@ -324,13 +350,36 @@ impl RequestRegistry {
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
-        self.apply_scheduler_counts(
-            engine_index,
-            EngineLoadSnapshot {
-                waiting: stats.num_waiting_reqs as usize,
-                running: stats.num_running_reqs as usize,
-            },
-        )
+        let snapshot = EngineLoadSnapshot {
+            waiting: stats.num_waiting_reqs as usize,
+            running: stats.num_running_reqs as usize,
+        };
+        if !self.apply_scheduler_counts(engine_index, snapshot) {
+            return false;
+        }
+        let state = self
+            .routing_per_engine
+            .get_mut(&EngineId::from_engine_index(engine_index as u16))
+            .expect("engine was found by apply_scheduler_counts");
+        state.last_scheduler_load = Some(SchedulerLoad {
+            running: snapshot.running,
+            waiting: snapshot.waiting,
+            kv_cache_usage: stats.kv_cache_usage,
+            received_at: Instant::now(),
+        });
+        true
+    }
+
+    /// Snapshot every engine's load, ordered by engine index.
+    pub fn engine_loads(&self) -> Vec<EngineLoad> {
+        self.routing_per_engine
+            .iter()
+            .map(|(engine_id, state)| EngineLoad {
+                engine_index: engine_id.engine_index().expect("engine id must encode as u16"),
+                inflight: state.inflight,
+                scheduler: state.last_scheduler_load,
+            })
+            .collect()
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.

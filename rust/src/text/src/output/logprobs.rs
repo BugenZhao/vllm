@@ -57,7 +57,7 @@ pub struct DecodedPromptLogprobs {
 ///
 /// Each returned position corresponds to one generated token position from the
 /// same `llm` update.
-pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
+pub fn decode_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
     logprobs: &Logprobs,
     skip_special_tokens: bool,
@@ -77,7 +77,7 @@ pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
 /// The returned payload stores the first prompt token separately and decodes
 /// the remaining scored prompt positions into `scored_positions`, matching
 /// vLLM's prompt-logprobs semantics.
-pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
+pub fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
     tokenizer: &T,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,

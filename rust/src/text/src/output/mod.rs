@@ -8,6 +8,7 @@ pub use decoded::{
 };
 pub use logprobs::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
+    decode_logprobs, decode_prompt_logprobs,
 };
 pub use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 
