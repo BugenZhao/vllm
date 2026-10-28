@@ -22,7 +22,7 @@ use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::parser::unified::{HfTemplateError, ResponseTemplate};
-use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
+use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo, replacement_chat_template};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
     HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
@@ -76,6 +76,7 @@ impl HfChatBackend {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(
                 &files,
+                replacement_chat_template(&files, options.chat_template.as_deref())?,
                 options,
                 multimodal_render_info,
             )?),
