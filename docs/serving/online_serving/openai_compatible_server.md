@@ -207,8 +207,8 @@ Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../.
     Set `stream: true` for SSE events; omitted or null `stream` selects a
     non-streaming response. Token limits terminate with `response.incomplete`;
     generation failures terminate with `response.failed` and retain partial output.
-    A token limit marks the response and its last message or function-call
-    output item as `incomplete`; earlier output items remain `completed`.
+    A token limit marks the response and its last output item as
+    `incomplete`; earlier output items remain `completed`.
 
     Responses are never retained: `store: true` executes without storage,
     `background: true` is rejected, and `previous_response_id`, retrieval, and
