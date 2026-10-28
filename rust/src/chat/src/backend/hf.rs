@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
+use serde_json::value::{RawValue, to_raw_value};
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 use vllm_text::backend::hf::{
-    HfTextBackend, ModelFileSources, ModelSource, ResolvedModelFiles, load_model_config,
-    load_tokenizer_config,
+    HfTextBackend, ModelFileSources, ModelSource, RawTokenizerConfig, ResolvedModelFiles,
+    TokenizerSource, load_model_config, load_raw_tokenizer_config, load_tokenizer_config,
 };
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -40,6 +41,8 @@ pub struct HfChatBackend {
     /// `response_template` from `tokenizer_config.json` for the `hf` parser, or
     /// why it is unavailable.
     response_template: std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+    /// `tokenizer_config.json` as reported by [`ChatBackend::tokenizer_config`].
+    tokenizer_config: RawTokenizerConfig,
 }
 
 impl HfChatBackend {
@@ -70,13 +73,37 @@ impl HfChatBackend {
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
+        let replacement_template =
+            replacement_chat_template(&files, options.chat_template.as_deref());
+        let mut tokenizer_config =
+            load_raw_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+        if tokenizer_config
+            .get("tokenizer_class")
+            .is_none_or(|class| class.get() == "null")
+        {
+            let class = raw_string(default_tokenizer_class(&files.tokenizer));
+            tokenizer_config.insert("tokenizer_class".to_string(), class);
+        }
+        match &replacement_template {
+            // Transformers loads a dedicated template file into the tokenizer
+            // config, and Python reports `--chat-template` in its place.
+            Ok(Some(template)) => {
+                tokenizer_config.insert("chat_template".to_string(), raw_string(template));
+            }
+            Ok(None) => {}
+            // Only the `hf` renderer uses the template, and it fails below.
+            Err(error) => warn!(
+                error = %error.as_report(),
+                "cannot load the chat template; reporting the tokenizer config's"
+            ),
+        }
 
         let renderer = options.renderer.resolve(model_type);
         let chat_renderer: DynChatRenderer = match renderer {
             RendererSelection::Auto => unreachable!("renderer auto should be resolved above"),
             RendererSelection::Hf => Arc::new(HfChatRenderer::load(
                 &files,
-                replacement_chat_template(&files, options.chat_template.as_deref())?,
+                replacement_template?,
                 options,
                 multimodal_render_info,
             )?),
@@ -116,8 +143,26 @@ impl HfChatBackend {
             chat_renderer,
             multimodal_model_info,
             response_template,
+            tokenizer_config,
         })
     }
+}
+
+/// The `tokenizer_class` to report when `tokenizer_config.json` declares none:
+/// the class that loads the tokenizer file the model was loaded from.
+fn default_tokenizer_class(tokenizer: &TokenizerSource) -> &'static str {
+    match tokenizer {
+        // Transformers loads a bare `tokenizer.json` or tiktoken file with its
+        // generic fast tokenizer.
+        TokenizerSource::HuggingFace(_) | TokenizerSource::Tiktoken(_) => "PreTrainedTokenizerFast",
+        // Python serves `tekken.json` with vLLM's `MistralTokenizer`.
+        TokenizerSource::Tekken(_) => "MistralTokenizer",
+    }
+}
+
+/// A JSON string as a raw value.
+fn raw_string(value: &str) -> Box<RawValue> {
+    to_raw_value(value).expect("a string serializes to JSON")
 }
 
 /// Load and compile the checkpoint's `response_template`, if any.
@@ -151,6 +196,10 @@ impl ChatBackend for HfChatBackend {
 
     fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
         self.multimodal_model_info.as_ref()
+    }
+
+    fn tokenizer_config(&self) -> Option<&RawTokenizerConfig> {
+        Some(&self.tokenizer_config)
     }
 
     fn new_chat_output_processor(
@@ -407,6 +456,73 @@ mod tests {
                 ["dedicated:hello", "dedicated:hello"],
             ]
             .map(|row| row.map(str::to_owned))
+        );
+    }
+
+    /// Like Transformers' tokenizer config plus Python's `--chat-template`
+    /// override: a configured or dedicated template replaces `chat_template`,
+    /// named templates are otherwise kept whole, and a template a native
+    /// renderer never uses cannot fail its startup. Other values are kept as
+    /// written, and a missing or null `tokenizer_class` names the loading
+    /// class.
+    #[test]
+    fn tokenizer_config_reports_chat_template_like_python() {
+        let named_templates = r#"{"model_max_length":1000000000000000019884624838656,"tokenizer_class":null,"chat_template":[
+            {"name":"default","template":"default"},
+            {"name":"tool_use","template":"tool_use"}
+        ]}"#;
+        let load = |config: &str, dedicated: Option<&str>, chat_template: Option<&str>| {
+            let mut files = resolved_files(config, named_templates);
+            if let Some(dedicated) = dedicated {
+                let dedicated_path =
+                    files.config_path.as_ref().unwrap().with_file_name("chat_template.json");
+                std::fs::write(&dedicated_path, dedicated).unwrap();
+                files.chat_template_path = Some(dedicated_path);
+            }
+            let backend = HfChatBackend::from_resolved_model_files(
+                files,
+                "test-model".to_string(),
+                LoadModelBackendsOptions {
+                    chat_template: chat_template.map(str::to_owned),
+                    ..Default::default()
+                },
+                test_tokenizer(),
+            )
+            .unwrap();
+            let config = backend.tokenizer_config().unwrap();
+            assert_eq!(
+                config["model_max_length"].get(),
+                "1000000000000000019884624838656"
+            );
+            assert_eq!(
+                config["tokenizer_class"].get(),
+                r#""PreTrainedTokenizerFast""#
+            );
+            serde_json::from_str::<serde_json::Value>(config["chat_template"].get()).unwrap()
+        };
+        let llama = r#"{"model_type":"llama"}"#;
+        let deepseek_v4 = r#"{"model_type":"deepseek_v4"}"#;
+        let dedicated = Some(r#"{"chat_template":"dedicated"}"#);
+        let unusable = Some(r#"{"chat_template":null}"#);
+
+        let named =
+            serde_json::from_str::<serde_json::Value>(named_templates).unwrap()["chat_template"]
+                .clone();
+        assert_eq!(
+            [
+                load(llama, None, None),
+                load(llama, dedicated, None),
+                load(llama, dedicated, Some("configured {{ x }}")),
+                load(deepseek_v4, dedicated, None),
+                load(deepseek_v4, unusable, None),
+            ],
+            [
+                named.clone(),
+                "dedicated".into(),
+                "configured {{ x }}".into(),
+                "dedicated".into(),
+                named,
+            ]
         );
     }
 

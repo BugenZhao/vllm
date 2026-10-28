@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, ModelSource, RawTokenizerConfig};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -34,6 +34,13 @@ pub trait ChatBackend: Send + Sync {
     /// Return model files/config needed for request-scoped multimodal
     /// preprocessing, if supported.
     fn multimodal_model_info(&self) -> Option<&MultimodalModelInfo> {
+        None
+    }
+
+    /// Return the model's `tokenizer_config.json`, with `chat_template`
+    /// replaced by `--chat-template` or a dedicated chat template file, if
+    /// supported.
+    fn tokenizer_config(&self) -> Option<&RawTokenizerConfig> {
         None
     }
 

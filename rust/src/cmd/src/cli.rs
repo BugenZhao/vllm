@@ -460,9 +460,6 @@ pub struct SharedRuntimeArgs {
 
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
-    ///
-    /// The Rust frontend does not implement `/tokenizer_info` yet, so the
-    /// endpoint returns 501.
     #[arg(
         long,
         default_missing_value = "true",

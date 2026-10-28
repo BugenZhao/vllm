@@ -182,8 +182,7 @@ fn build_router_with_options(
     }
 
     if state.api_server_options.enable_tokenizer_info_endpoint {
-        // TODO: implement `/tokenizer_info`.
-        router = router.route("/tokenizer_info", get(not_supported));
+        router = router.route("/tokenizer_info", get(tokenize::tokenizer_info));
     }
 
     // Process checkpoint lifecycle, which requires sleep mode.
