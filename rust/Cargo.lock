@@ -5736,10 +5736,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-grpc-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "prost-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-proto",
+]
+
+[[package]]
 name = "vllm-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "easy-ext",
@@ -5831,11 +5850,12 @@ dependencies = [
 
 [[package]]
 name = "vllm-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "prost",
  "prost-types",
  "protox",
+ "serde_json",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -5895,6 +5915,7 @@ dependencies = [
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
+ "vllm-grpc-client",
  "vllm-llm",
  "vllm-metrics",
  "vllm-proto",

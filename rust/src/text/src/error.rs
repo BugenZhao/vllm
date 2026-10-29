@@ -89,12 +89,20 @@ impl Error {
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::UnsupportedByEngine { .. })
+            | Self::Llm(LlmError::RemoteInvalidRequest { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
             | Self::EngineCore(EngineCoreError::InvalidStructuredOutputsParams { .. }) => true,
             _ => false,
         }
+    }
+
+    /// Whether the engine could not take the request now, so retrying later
+    /// may succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Llm(LlmError::Unavailable { .. }))
     }
 
     /// The request parameter a validation error refers to, reported as the

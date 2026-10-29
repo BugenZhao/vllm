@@ -8,6 +8,7 @@ use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_metrics::METRICS;
 
+mod engine;
 mod error;
 mod inflight;
 mod log_stats;
@@ -15,6 +16,7 @@ mod output;
 mod request;
 mod request_metrics;
 
+pub use engine::{BoxGenerateOutputStream, EngineClient, EngineInfo};
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
@@ -37,6 +39,8 @@ use crate::request_metrics::RequestMetricsTracker;
 /// ids can be resolved to the internal engine ids that engine-core understands.
 pub struct Llm {
     client: EngineCoreClient,
+    /// Engine facts from the engine-core startup handshake.
+    info: EngineInfo,
     randomize_request_id: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
@@ -48,8 +52,17 @@ impl Llm {
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
         METRICS.request.set_max_model_len(client.max_model_len());
+        // The engine-reported value reflects the post-profiling, auto-fitted
+        // KV cache limit used at runtime.
+        let info = EngineInfo {
+            max_model_len: client.max_model_len(),
+            model_dtype: Some(client.model_dtype()),
+            supports_lora: client.ready_response().supports_lora,
+            vllm_version: client.vllm_version().to_string(),
+        };
         Self {
             client,
+            info,
             randomize_request_id: true,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,

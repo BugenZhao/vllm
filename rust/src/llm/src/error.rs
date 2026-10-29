@@ -22,4 +22,16 @@ pub enum Error {
     },
     #[error("routed experts for request `{request_id}` changed dtype or shape")]
     RoutedExpertsShapeMismatch { request_id: String },
+    /// The request uses a field this engine does not carry out.
+    #[error("`{field}` is not supported by this engine")]
+    UnsupportedByEngine { field: &'static str },
+    /// The engine cannot take the request now; retrying later may succeed.
+    #[error("engine unavailable: {message}")]
+    Unavailable { message: String },
+    /// A remote engine rejected the request as invalid.
+    #[error("{message}")]
+    RemoteInvalidRequest { message: String },
+    /// A remote engine failed the request.
+    #[error("remote engine error: {message}")]
+    Remote { message: String },
 }

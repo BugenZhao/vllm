@@ -30,6 +30,7 @@ mod output_channel;
 mod state;
 mod stream;
 
+pub use state::{EngineLoad, SchedulerLoad};
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
@@ -567,6 +568,12 @@ impl EngineCoreClient {
     /// Return whether the connected engines record stats.
     pub fn engine_stats_enabled(&self) -> bool {
         self.config.engine_stats_enabled
+    }
+
+    /// Snapshot every engine's load, ordered by engine index. Scheduler
+    /// counts are present only when engine stats are enabled.
+    pub fn engine_loads(&self) -> Vec<EngineLoad> {
+        self.inner.engine_loads()
     }
 
     /// Return whether the client still considers the engine healthy.

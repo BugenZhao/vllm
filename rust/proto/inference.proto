@@ -12,6 +12,10 @@ service Inference {
   rpc Generate (GenerateRequest) returns (GenerateResponse) {}
   // Generates text given a prompt, streaming the outputs
   rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
+  // Generates tokens for an already tokenized and lowered request, streaming
+  // the outputs. For frontends that run their own text layer in front of this
+  // server; see `GenerateTokensRequest`.
+  rpc GenerateTokens (GenerateTokensRequest) returns (stream GenerateTokensResponse) {}
 }
 
 // ======================================================================================
@@ -290,4 +294,200 @@ message PreprocessedMediaFeatures {
   uint64 length = 4;
   optional string mm_hash = 5;
   repeated bool is_embed = 6;
+}
+
+// ======================================================================================
+// Generate Tokens
+// ======================================================================================
+
+// A request at the server's engine boundary: prompt tokens plus sampling
+// parameters that the caller's text layer has already resolved, including
+// model defaults and the stop and EOS token IDs. The server applies no
+// defaults, does not detokenize, and leaves stop strings to the caller, so the
+// caller must load the same model and run the same vLLM revision
+// (`ServerInfo.proto_version`).
+message GenerateTokensRequest {
+  // External request ID; aborts and outputs refer to it.
+  string request_id = 1;
+  repeated uint32 prompt_token_ids = 2;
+  EngineSamplingParams sampling_params = 3;
+  // Unix timestamp, in seconds, when the request arrived at the caller.
+  optional double arrival_time = 4;
+  optional string cache_salt = 5;
+  // Tracing headers forwarded to the engine; absent when not traced.
+  TraceHeaders trace_headers = 6;
+  int32 priority = 7;
+  optional uint32 data_parallel_rank = 8;
+  optional string session_id = 9;
+  KVHintsEnvelope kv_hints = 10;
+  EngineReasoningGate reasoning_gate = 11;
+  // TODO: multimodal features and LoRA adapters.
+}
+
+message TraceHeaders {
+  map<string, string> headers = 1;
+}
+
+// Engine sampling parameters, as resolved by the caller's text layer. Every
+// field is explicit; a message-typed field is absent when unset.
+message EngineSamplingParams {
+  float temperature = 1;
+  bool watermarking = 2;
+  float top_p = 3;
+  uint32 top_k = 4;
+  optional int64 seed = 5;
+  uint32 max_tokens = 6;
+  uint32 min_tokens = 7;
+  optional uint64 thinking_token_budget = 8;
+  optional int32 logprobs = 9;
+  optional int32 prompt_logprobs = 10;
+  optional uint32 prompt_logprob_start = 11;
+  float min_p = 12;
+  float frequency_penalty = 13;
+  float presence_penalty = 14;
+  float repetition_penalty = 15;
+  RepetitionDetection repetition_detection = 16;
+  repeated uint32 stop_token_ids = 17;
+  optional uint32 eos_token_id = 18;
+  // Stop token IDs plus the EOS and generation-config stop tokens.
+  repeated uint32 all_stop_token_ids = 19;
+  LogitBias logit_bias = 20;
+  TokenIds allowed_token_ids = 21;
+  TokenIdSequences bad_words_token_ids = 22;
+  EngineStructuredOutputs structured_outputs = 23;
+  TokenIds logprob_token_ids = 24;
+  optional bool skip_reading_prefix_cache = 25;
+  // Extra arguments, such as `kv_transfer_params`, forwarded to the engine.
+  google.protobuf.Struct extra_args = 26;
+  uint32 routed_experts_prompt_start = 27;
+  // Minimum number of tokens per streamed output after the first; absent or 1
+  // streams every step.
+  optional uint32 stream_interval = 28;
+  // TODO: prompt_logprob_token_ids.
+}
+
+message RepetitionDetection {
+  uint32 max_pattern_size = 1;
+  uint32 min_pattern_size = 2;
+  uint32 min_count = 3;
+}
+
+message LogitBias {
+  map<uint32, float> bias = 1;
+}
+
+message TokenIdSequences {
+  repeated TokenIds sequences = 1;
+}
+
+message EngineStructuredOutputs {
+  oneof constraint {
+    // JSON text of the schema, which is itself a JSON object or string.
+    string json = 1;
+    string regex = 2;
+    DecodingParameters.StringChoices choice = 3;
+    string grammar = 4;
+    bool json_object = 5;
+    string structural_tag = 6;
+  }
+  bool disable_any_whitespace = 7;
+  bool disable_additional_properties = 8;
+  optional string whitespace_pattern = 9;
+
+  enum Backend {
+    BACKEND_XGRAMMAR = 0;
+    BACKEND_GUIDANCE = 1;
+    BACKEND_OUTLINES = 2;
+    BACKEND_LM_FORMAT_ENFORCER = 3;
+  }
+  Backend backend = 10;
+}
+
+message GenerateTokensResponse {
+  // Only present in the first response.
+  TokenPromptInfo prompt_info = 1;
+  // The engine's internal request ID; only present in the first response.
+  string engine_request_id = 12;
+  // Tokens generated since the previous response.
+  repeated uint32 token_ids = 2;
+  // Sample logprobs for `token_ids`, when requested.
+  TokenLogprobs logprobs = 3;
+  // Only present in the final response.
+  TokenFinish finish = 4;
+  // Prompt tokens served from cache, once prefill stats arrive.
+  uint64 num_cached_tokens = 5;
+  google.protobuf.Struct kv_transfer_params = 6;
+  google.protobuf.Struct ec_transfer_params = 7;
+  // Sampling support sets aligned with `token_ids`, when captured.
+  TokenIdSequences sampling_mask = 8;
+  // The fields below are only present in the final response.
+  SpecDecodeMetrics spec_decode_metrics = 9;
+  WeightVersions weight_versions = 10;
+  // Engine lifecycle timestamps after this response.
+  EngineTimestamps timestamps = 11;
+  // TODO: prompt_token_id_logprobs and routed_experts.
+}
+
+message TokenPromptInfo {
+  repeated uint32 prompt_token_ids = 1;
+  TokenLogprobs prompt_logprobs = 2;
+}
+
+// Logprobs per scored position: the scored token first, then the requested
+// candidates.
+message TokenLogprobs {
+  message Position {
+    repeated uint32 token_ids = 1;
+    repeated float logprobs = 2;
+    repeated uint32 ranks = 3;
+  }
+  repeated Position positions = 1;
+}
+
+message TokenFinish {
+  enum Reason {
+    REASON_STOP = 0;
+    REASON_LENGTH = 1;
+    REASON_ABORT = 2;
+    REASON_ERROR = 3;
+    REASON_REPETITION = 4;
+  }
+  Reason reason = 1;
+  // Set for STOP and REPETITION when an explicit stop token or string matched.
+  oneof stop_reason {
+    uint32 stop_token_id = 2;
+    string stop_string = 3;
+  }
+  // The engine's details for ERROR, when it sent any.
+  RequestError error = 4;
+}
+
+message RequestError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message SpecDecodeMetrics {
+  uint64 num_spec_tokens = 1;
+  repeated uint64 histogram = 2;
+  uint64 num_draft_tokens = 3;
+  repeated uint64 per_step_accepted = 4;
+  repeated uint64 per_step_drafted = 5;
+}
+
+message WeightVersions {
+  message Span {
+    string version = 1;
+    uint64 start = 2;
+    uint64 end = 3;
+  }
+  repeated Span spans = 1;
+}
+
+message EngineTimestamps {
+  double queued = 1;
+  double scheduled = 2;
+  double first_token = 3;
+  double last_token = 4;
 }

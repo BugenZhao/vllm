@@ -140,13 +140,18 @@ fn build_router_with_options(
     runtime_lora_updating_enabled: bool,
     scale_out_endpoints_enabled: bool,
 ) -> Router {
+    // Admin, LoRA lifecycle, profiling, and KV event routes still drive the
+    // engine-core client directly, so only a local engine serves them.
+    let local_engine = state.has_local_engine();
+    let dev_mode_enabled = dev_mode_enabled && local_engine;
+    let runtime_lora_updating_enabled = runtime_lora_updating_enabled && local_engine;
+
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
-        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -240,7 +245,11 @@ fn build_router_with_options(
             .route("/get_world_size", get(world_size::get_world_size))
     }
 
-    if let Some(profiler) = &state.profiler {
+    if local_engine {
+        router = router.route("/kv_event_sources", get(kv_event_sources::kv_event_sources));
+    }
+
+    if let Some(profiler) = state.profiler.as_ref().filter(|_| local_engine) {
         warn!(
             mode = profiler,
             "profiler is enabled in the API server; \
