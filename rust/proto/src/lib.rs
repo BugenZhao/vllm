@@ -5,7 +5,5 @@
 
 tonic::include_proto!("vllm");
 
-pub mod json;
-
 /// Schema version of this crate, reported by servers as `ServerInfo.proto_version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

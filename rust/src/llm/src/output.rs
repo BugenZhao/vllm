@@ -26,7 +26,7 @@ use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
 /// Output tokens `[start, end)` were sampled by weights labelled `version`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeightVersionSpan {
     pub version: Arc<str>,
     pub start: usize,
@@ -71,7 +71,8 @@ pub struct CollectedGenerateOutput {
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
 /// one request.
-#[derive(Debug, Clone, PartialEq)]
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeneratePromptInfo {
     /// Original prompt token IDs for this request.
     pub prompt_token_ids: Arc<[u32]>,
@@ -162,7 +163,8 @@ fn finish_reason_from_engine(
 ///
 /// Original Python output reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/outputs.py#L85-L143>
-#[derive(Debug, Clone, PartialEq)]
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateOutput {
     /// Unique ID of the request that produced this output.
     pub request_id: String,

@@ -8,7 +8,7 @@ use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 use tracing::{info, warn};
 
-use super::{ControlGrpcService, InferenceGrpcService};
+use super::{ControlGrpcService, EngineRpcGrpcService, InferenceGrpcService};
 
 pub(crate) async fn monitor_health(
     mut health_reporter: HealthReporter,
@@ -17,6 +17,7 @@ pub(crate) async fn monitor_health(
 ) {
     let inference_service = InferenceGrpcService::NAME;
     let control_service = ControlGrpcService::NAME;
+    let engine_service = EngineRpcGrpcService::NAME;
     let status = ServingStatus::NotServing;
     let health_event_first = tokio::select! {
         result = engine_health.wait_for(|healthy| !*healthy) => {
@@ -47,7 +48,8 @@ pub(crate) async fn monitor_health(
 
     health_reporter.set_not_serving::<InferenceGrpcService>().await;
     health_reporter.set_not_serving::<ControlGrpcService>().await;
-    // Both gRPC services use the same engine client, so overall server health
+    health_reporter.set_not_serving::<EngineRpcGrpcService>().await;
+    // All gRPC services use the same engine client, so overall server health
     // mirrors their shared engine health.
     health_reporter.set_service_status("", status).await;
 
@@ -61,5 +63,6 @@ pub(crate) async fn monitor_health(
 
     health_reporter.clear_service_status(inference_service).await;
     health_reporter.clear_service_status(control_service).await;
+    health_reporter.clear_service_status(engine_service).await;
     health_reporter.clear_service_status("").await;
 }

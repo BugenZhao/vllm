@@ -58,10 +58,13 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
+use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
-use super::pb::json::json_to_proto_struct;
-use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
+use super::{
+    ControlServer, ControlServiceImpl, EngineRpcGrpcService, EngineRpcServiceImpl, InferenceServer,
+    InferenceServiceImpl, pb,
+};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -2684,30 +2687,44 @@ impl EngineHarness {
     /// `TextLlm` over a `RemoteEngineClient` connected to a gRPC server whose
     /// engine is a local `Llm`.
     async fn remote(outputs: Vec<EngineCoreOutput>) -> Self {
-        let (recorded_tx, recorded) = tokio::sync::oneshot::channel();
-        let (inference_service, control_service, engine_health, engine_task) =
-            setup_grpc_service_with_engine_script(
-                b"engine-remote",
-                default_ready_response(),
-                Arc::new(FakeTextBackend),
-                None,
-                recording_engine_script(outputs, recorded_tx),
-            )
-            .await;
-        let (channel, server_task) = start_grpc_test_server(
-            inference_service,
-            control_service,
-            engine_health,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-        let engine = vllm_grpc_client::RemoteEngineClient::connect(channel)
+        let local = Self::local(outputs).await;
+        let engine_health = local.text.engine().subscribe_health();
+        let chat = ChatLlm::new(local.text, Arc::new(FakeTextBackend));
+        let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (health_reporter, health_service) = health_reporter();
+        health_reporter.set_serving::<EngineRpcGrpcService>().await;
+
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server_task = tokio::spawn(async move {
+            let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+            let server = TonicServer::builder()
+                .add_service(health_service)
+                .add_service(ControlServer::new(ControlServiceImpl::new(
+                    state.clone(),
+                    shutdown.clone(),
+                )))
+                .add_service(EngineRpcGrpcService::new(EngineRpcServiceImpl::new(state)))
+                .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
+            let health_monitor =
+                super::monitor_health(health_reporter, engine_health, shutdown.clone());
+            let (server_result, ()) = tokio::join!(server, health_monitor);
+            server_result.expect("grpc server");
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("grpc endpoint")
+            .connect()
+            .await
+            .expect("connect grpc channel");
+        let engine = vllm_remote_engine::RemoteEngineClient::connect(channel)
             .await
             .expect("connect remote engine");
         Self {
             text: vllm_text::TextLlm::new(engine, Arc::new(FakeTextBackend)),
-            recorded,
-            engine_task,
+            recorded: local.recorded,
+            engine_task: local.engine_task,
             server_task: Some(server_task),
         }
     }

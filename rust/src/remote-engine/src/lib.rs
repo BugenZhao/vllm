@@ -1,23 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! [`EngineClient`] over the `vllm-proto` `GenerateTokens` API of a remote
-//! `vllm-rs` server.
+//! The internal engine protocol between vLLM Rust frontends: the
+//! [`EngineClient`] of a remote `vllm-rs` server, reached over gRPC with
+//! [`GenerateRequest`] and [`GenerateOutput`](vllm_llm::GenerateOutput)
+//! carried as MessagePack.
 //!
 //! The caller runs the text layer itself: requests arrive lowered, with model
 //! defaults and stop tokens resolved, and outputs return raw tokens for the
 //! caller to detokenize. The remote server only runs the engine.
+//!
+//! The payloads are the engine client's own types, not a published schema, so
+//! both ends are expected to run the same vLLM revision. Fields are encoded by
+//! name: a new `Option` or `#[serde(default)]` field keeps adjacent revisions
+//! working, while renames, type changes, and new enum variants do not.
 
-mod request;
-mod response;
+mod codec;
+
+/// Generated client and server for the `vllm.internal.EngineRpc` service.
+pub mod rpc {
+    include!(concat!(env!("OUT_DIR"), "/vllm.internal.EngineRpc.rs"));
+}
 
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 use tonic::transport::Channel;
+use tonic::{Code, Status};
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
@@ -25,28 +36,16 @@ use tracing::debug;
 use vllm_llm::{BoxGenerateOutputStream, EngineClient, EngineInfo, GenerateRequest, Result};
 use vllm_proto as pb;
 use vllm_proto::control_client::ControlClient;
-use vllm_proto::inference_client::InferenceClient;
 
-use crate::response::status_to_error;
+use crate::rpc::engine_rpc_client::EngineRpcClient;
+use crate::rpc::engine_rpc_server::SERVICE_NAME;
 
 /// Delay before re-subscribing to server health after the watch stream ends.
 const HEALTH_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Failure to connect a [`RemoteEngineClient`].
-#[derive(Debug, Error)]
-pub enum ConnectError {
-    #[error("failed to query the server: {0}")]
-    Status(#[from] tonic::Status),
-    #[error("server speaks vllm-proto {server}, but this client needs {client}")]
-    ProtoVersion {
-        server: String,
-        client: &'static str,
-    },
-}
-
 /// An [`EngineClient`] served by a remote `vllm-rs` gRPC server.
 pub struct RemoteEngineClient {
-    inference: InferenceClient<Channel>,
+    rpc: EngineRpcClient<Channel>,
     control: ControlClient<Channel>,
     info: EngineInfo,
     server_info: pb::ServerInfo,
@@ -56,17 +55,10 @@ pub struct RemoteEngineClient {
 
 impl RemoteEngineClient {
     /// Query the server behind `channel` and start watching its health.
-    pub async fn connect(channel: Channel) -> std::result::Result<Self, ConnectError> {
+    pub async fn connect(channel: Channel) -> std::result::Result<Self, Status> {
         let mut control = ControlClient::new(channel.clone());
         let server_info = control.get_server_info(pb::GetServerInfoRequest {}).await?.into_inner();
-        // The caller resolves engine sampling parameters from its own model
-        // config and revision, so both sides are deployed from one revision.
-        if server_info.proto_version != pb::VERSION {
-            return Err(ConnectError::ProtoVersion {
-                server: server_info.proto_version,
-                client: pb::VERSION,
-            });
-        }
+        // TODO: check that the server runs a compatible revision.
         let model_info = control.get_model_info(pb::GetModelInfoRequest {}).await?.into_inner();
         let info = EngineInfo {
             max_model_len: server_info.max_model_len,
@@ -84,7 +76,9 @@ impl RemoteEngineClient {
         )));
 
         Ok(Self {
-            inference: InferenceClient::new(channel),
+            // Outputs come from a server of the same deployment, and can be as
+            // large as the routed experts of a whole request.
+            rpc: EngineRpcClient::new(channel).max_decoding_message_size(usize::MAX),
             control,
             info,
             server_info,
@@ -104,10 +98,10 @@ impl RemoteEngineClient {
     }
 }
 
-/// Mirror the server's `vllm.Inference` health status, re-subscribing after
-/// the stream ends. Unreachable counts as unhealthy.
+/// Mirror the server's `vllm.internal.EngineRpc` health status,
+/// re-subscribing after the stream ends. Unreachable counts as unhealthy.
 async fn watch_health(mut client: HealthClient<Channel>, health: watch::Sender<bool>) {
-    let service = pb::inference_server::SERVICE_NAME.to_string();
+    let service = SERVICE_NAME.to_string();
     loop {
         match client
             .watch(HealthCheckRequest {
@@ -140,15 +134,14 @@ impl EngineClient for RemoteEngineClient {
     }
 
     async fn generate(&self, request: GenerateRequest) -> Result<BoxGenerateOutputStream> {
-        let proto = request::to_proto(request)?;
-        // The response stream owns the call: dropping it cancels the RPC, and
+        // The output stream owns the call: dropping it cancels the RPC, and
         // the server aborts the request.
-        let responses = (self.inference.clone())
-            .generate_tokens(proto)
+        let outputs = (self.rpc.clone())
+            .generate(request)
             .await
             .map_err(status_to_error)?
             .into_inner();
-        Ok(response::generate_outputs(responses).boxed())
+        Ok(outputs.map(|output| output.map_err(status_to_error)).boxed())
     }
 
     async fn abort(&self, external_ids: &[String]) -> Result<()> {
@@ -170,5 +163,17 @@ impl EngineClient for RemoteEngineClient {
 
     async fn shutdown(self: Box<Self>) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Map a gRPC status from the server onto the engine error categories.
+fn status_to_error(status: Status) -> vllm_llm::Error {
+    let message = status.message().to_string();
+    match status.code() {
+        Code::InvalidArgument | Code::NotFound | Code::FailedPrecondition | Code::OutOfRange => {
+            vllm_llm::Error::RemoteInvalidRequest { message }
+        }
+        Code::Unavailable | Code::ResourceExhausted => vllm_llm::Error::Unavailable { message },
+        _ => vllm_llm::Error::Remote { message },
     }
 }

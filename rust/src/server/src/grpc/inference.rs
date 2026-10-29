@@ -12,13 +12,12 @@ use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
-use vllm_llm::{BoxGenerateOutputStream, current_unix_timestamp_secs};
+use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{
     DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
 };
 
 use super::convert::{self, ResponseOpts};
-use super::tokens;
 use super::{InferenceServer, pb};
 use crate::state::AppState;
 
@@ -218,8 +217,6 @@ fn data_parallel_rank_from_metadata(
 impl pb::inference_server::Inference for InferenceServiceImpl {
     type GenerateStreamStream =
         Pin<Box<dyn Stream<Item = Result<pb::GenerateResponse, Status>> + Send>>;
-    type GenerateTokensStream =
-        Pin<Box<dyn Stream<Item = Result<pb::GenerateTokensResponse, Status>> + Send>>;
 
     /// Unary generate: collect all output and return a single response.
     async fn generate(
@@ -314,61 +311,6 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
                 .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
-
-    /// Token generate: submit an already lowered request to the engine client
-    /// and stream its raw outputs.
-    async fn generate_tokens(
-        &self,
-        request: Request<pb::GenerateTokensRequest>,
-    ) -> Result<Response<Self::GenerateTokensStream>, Status> {
-        let started_at = Instant::now();
-        let request = tokens::to_generate_request(request.into_inner())?;
-        let request_span = info_span!(
-            "grpc_inference",
-            request_id = %request.request_id,
-            rpc = "GenerateTokens",
-            data_parallel_rank = ?request.data_parallel_rank,
-        );
-        info!(parent: &request_span, "gRPC inference request received");
-
-        let stream = (self.state.chat.text().engine())
-            .generate(request)
-            .instrument(request_span.clone())
-            .await
-            .map_err(|error| {
-                log_text_error(&request_span, started_at, "submission", error.into())
-            })?;
-
-        let response_stream = generate_tokens_responses(stream, request_span.clone(), started_at)
-            .instrument(request_span);
-        Ok(Response::new(Box::pin(response_stream)))
-    }
-}
-
-/// Convert one engine output stream into `GenerateTokens` responses.
-///
-/// Like [`generate_stream_responses`], the response body owns the engine
-/// stream, so a client disconnect aborts the request.
-#[try_stream]
-async fn generate_tokens_responses(
-    stream: BoxGenerateOutputStream,
-    request_span: Span,
-    started_at: Instant,
-    mut y: TryYielder<pb::GenerateTokensResponse, Status>,
-) -> Result<(), Status> {
-    pin_mut!(stream);
-
-    while let Some(output) = stream.next().await {
-        let output = output
-            .map_err(|error| log_text_error(&request_span, started_at, "stream", error.into()))?;
-        y.yield_ok(tokens::to_generate_tokens_response(output)?).await;
-    }
-    info!(
-        parent: &request_span,
-        elapsed_ms = started_at.elapsed().as_millis() as u64,
-        "gRPC inference stream closed"
-    );
-    Ok(())
 }
 
 /// Convert one decoded text stream into gRPC streaming responses.
@@ -443,7 +385,7 @@ fn text_error_to_status(error: vllm_text::Error) -> Status {
     }
 }
 
-fn log_text_error(
+pub(super) fn log_text_error(
     request_span: &Span,
     started_at: Instant,
     phase: &'static str,

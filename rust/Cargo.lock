@@ -5736,24 +5736,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vllm-grpc-client"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "prost-types",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tonic",
- "tonic-health",
- "tracing",
- "vllm-engine-core-client",
- "vllm-llm",
- "vllm-proto",
-]
-
-[[package]]
 name = "vllm-llm"
 version = "0.1.0"
 dependencies = [
@@ -5769,6 +5751,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -5855,10 +5838,29 @@ dependencies = [
  "prost",
  "prost-types",
  "protox",
- "serde_json",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "vllm-remote-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "thiserror-ext",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tonic-health",
+ "tracing",
+ "vllm-llm",
+ "vllm-proto",
 ]
 
 [[package]]
@@ -5915,10 +5917,10 @@ dependencies = [
  "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
- "vllm-grpc-client",
  "vllm-llm",
  "vllm-metrics",
  "vllm-proto",
+ "vllm-remote-engine",
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",

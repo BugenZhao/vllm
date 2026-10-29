@@ -6,12 +6,12 @@ members = [
     "src/chat",
     "src/cmd",
     "src/engine-core-client",
-    "src/grpc-client",
     "src/llm",
     "src/managed-engine",
     "src/metrics",
     "src/mock-engine",
     "src/parser",
+    "src/remote-engine",
     "src/server",
     "src/text",
     "src/tokenizer",
@@ -145,12 +145,12 @@ vllm-bench = { path = "src/bench" }
 vllm-build-info = { path = "src/build-info" }
 vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
-vllm-grpc-client = { path = "src/grpc-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
 vllm-parser = { path = "src/parser" }
 vllm-proto = { path = "proto" }
+vllm-remote-engine = { path = "src/remote-engine" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
