@@ -142,7 +142,7 @@ pub(super) fn prepare_completion_request(
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
-            bad_words: None,
+            bad_words: request.bad_words,
             bad_words_token_ids: None,
             logprob_token_ids,
             structured_outputs,
