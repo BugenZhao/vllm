@@ -163,6 +163,8 @@ fn build_router_with_options(
         // TODO: implement elastic EP scaling.
         .route("/scale_elastic_ep", post(not_supported))
         .route("/is_scaling_elastic_ep", post(not_supported))
+        // TODO: implement generative scoring.
+        .route("/generative_scoring", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
