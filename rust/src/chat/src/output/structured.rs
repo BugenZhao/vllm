@@ -260,15 +260,8 @@ pub(crate) async fn structured_chat_event_stream(
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            AssistantEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            } => {
-                y.yield_ok(ChatEvent::Start {
-                    prompt_token_ids,
-                    prompt_logprobs,
-                })
-                .await;
+            AssistantEvent::Start { prompt_logprobs } => {
+                y.yield_ok(ChatEvent::Start { prompt_logprobs }).await;
             }
             AssistantEvent::TextDelta {
                 kind,
@@ -314,7 +307,7 @@ pub(crate) async fn structured_chat_event_stream(
                     message: state.message.clone(),
                     usage,
                     timestamps,
-                    spec_decode_metrics: spec_decode_metrics.map(Box::new),
+                    spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
@@ -637,7 +630,6 @@ mod tests {
     async fn structured_stream_forwards_reasoning_token_count() {
         let events = stream::iter(vec![
             Ok(AssistantEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(AssistantEvent::TextDelta {

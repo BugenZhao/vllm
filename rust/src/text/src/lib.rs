@@ -9,6 +9,7 @@
 
 use std::mem::take;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub use backend::{
@@ -23,8 +24,8 @@ pub use lower::{
 };
 pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
-    DecodedText, DecodedTextEvent, DecodedTokenLogprob, Finished, SampledDelta, TextDecodeOptions,
-    TextOutputStreamExt, TokenAnchor, TokenAttribution,
+    DecodedText, DecodedTextEvent, DecodedTextEventStream, DecodedTokenLogprob, Finished,
+    SampledDelta, TextDecodeOptions, TokenAnchor, TokenAttribution,
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
@@ -289,7 +290,7 @@ impl TextLlm {
 
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
-    pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
+    pub async fn generate(&self, request: TextRequest) -> Result<DecodedTextEventStream> {
         let mut streams = self.generate_n(request, NonZeroU32::MIN).await?;
         Ok(streams.pop().expect("one output stream per sample"))
     }
@@ -300,7 +301,7 @@ impl TextLlm {
         &self,
         request: TextRequest,
         n: NonZeroU32,
-    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+    ) -> Result<Vec<DecodedTextEventStream>> {
         // Like Python's `render_completion`, record successful renders
         // (tokenization).
         let render_start = Instant::now();
@@ -322,7 +323,7 @@ impl TextLlm {
             generate_request,
         }: PreparedTextRequest,
         n: NonZeroU32,
-    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+    ) -> Result<Vec<DecodedTextEventStream>> {
         // Like Python's `SamplingParams`, checked against the resolved
         // temperature, after model generation-config defaults. Python raises a
         // positive temperature below 0.01 to 0.01 first, so only zero is greedy.
@@ -330,6 +331,9 @@ impl TextLlm {
             return Err(Error::GreedyParallelSampling { n: n.get() });
         }
 
+        // The frontend fixes the prompt token IDs before submission, and every
+        // sample shares them.
+        let prompt_token_ids: Arc<[u32]> = generate_request.prompt_token_ids.as_slice().into();
         let raw_streams = self.submit(generate_request, n).await?;
         let tokenizer = self.processor.tokenizer();
         Ok(raw_streams
@@ -338,6 +342,7 @@ impl TextLlm {
                 output::decoded_text_event_stream(
                     text_request.request_id.clone(),
                     tokenizer.clone(),
+                    Arc::clone(&prompt_token_ids),
                     raw_stream,
                     text_request.decode_options.clone(),
                     text_request.intermediate,

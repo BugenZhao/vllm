@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::pin::Pin;
-use std::sync::Arc;
 
 use futures::Stream;
 use trait_set::trait_set;
@@ -34,7 +33,6 @@ pub(crate) use structural_tag::apply_output_grammar;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssistantEvent {
     Start {
-        prompt_token_ids: Arc<[u32]>,
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
     TextDelta {
@@ -56,7 +54,7 @@ pub(crate) enum AssistantEvent {
     Done {
         usage: ChatTokenUsage,
         timestamps: RequestTimestamps,
-        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+        spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<Box<serde_json::Value>>,

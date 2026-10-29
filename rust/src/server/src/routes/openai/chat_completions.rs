@@ -108,9 +108,11 @@ pub async fn chat_completions(
         let chunk_streams = chat_streams
             .into_iter()
             .map(|mut chat_stream| {
+                let prompt_token_ids = Arc::clone(chat_stream.prompt_token_ids());
                 let prompt_text = chat_stream.take_prompt_text();
                 chat_completion_chunk_stream(
                     chat_stream,
+                    prompt_token_ids,
                     prompt_text,
                     prepared.request_id.clone(),
                     prepared.response_model.clone(),
@@ -367,6 +369,7 @@ async fn collect_chat_completion(
 #[try_stream]
 async fn chat_completion_chunk_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
+    prompt_token_ids: Arc<[u32]>,
     mut prompt_text: Option<String>,
     request_id: String,
     response_model: String,
@@ -438,9 +441,7 @@ async fn chat_completion_chunk_stream(
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(ChatEvent::Start {
-                prompt_token_ids, ..
-            }) => {
+            Ok(ChatEvent::Start { .. }) => {
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 let mut chunk = start_chunk(&envelope);
                 chunk.prompt = Some(ChatCompletionStreamPrompt {
@@ -1226,7 +1227,6 @@ mod tests {
     async fn chunk_stream_coalesces_text_delta_with_logprobs() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1277,6 +1277,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1335,7 +1336,6 @@ mod tests {
     async fn chunk_stream_coalesces_reasoning_delta_with_logprobs() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1376,6 +1376,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1407,7 +1408,6 @@ mod tests {
     async fn chunk_stream_puts_kv_transfer_params_on_finish_chunk_only() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1431,6 +1431,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1469,7 +1470,6 @@ mod tests {
     async fn chunk_stream_omits_reasoning_delta_when_disabled() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1499,6 +1499,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1530,7 +1531,6 @@ mod tests {
     async fn chunk_stream_omits_logprobs_for_suppressed_reasoning() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1586,6 +1586,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1629,7 +1630,6 @@ mod tests {
     async fn chunk_stream_omits_logprobs_for_hidden_reasoning_delimiters() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockStart {
@@ -1725,6 +1725,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1775,7 +1776,6 @@ mod tests {
     async fn chunk_stream_preserves_tool_call_index_and_omits_id_from_arguments_delta() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::ToolCallStart {
@@ -1810,6 +1810,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1850,7 +1851,6 @@ mod tests {
     async fn chunk_stream_returns_prompt_token_ids_on_first_chunk_only() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![7, 8, 9].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1878,6 +1878,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![7, 8, 9].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -1922,7 +1923,6 @@ mod tests {
     async fn chunk_stream_reports_reasoning_tokens_with_continuous_usage() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![7, 8, 9].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -1964,6 +1964,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![7, 8, 9].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -2011,7 +2012,6 @@ mod tests {
     async fn chunk_stream_reports_reasoning_tokens_when_reasoning_hidden() {
         let stream = stream::iter(vec![
             Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             }),
             Ok(ChatEvent::BlockDelta {
@@ -2042,6 +2042,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            vec![].into(),
             None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
@@ -2085,7 +2086,6 @@ mod tests {
         {
             let stream = stream::iter(vec![
                 Ok(ChatEvent::Start {
-                    prompt_token_ids: vec![].into(),
                     prompt_logprobs: None,
                 }),
                 Ok(ChatEvent::BlockDelta {
@@ -2109,6 +2109,7 @@ mod tests {
 
             let chunks = chat_completion_chunk_stream(
                 stream,
+                vec![].into(),
                 None,
                 "chatcmpl-1".to_string(),
                 "model".to_string(),

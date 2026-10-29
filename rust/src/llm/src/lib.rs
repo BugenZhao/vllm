@@ -30,7 +30,7 @@ pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage,
+    GeneratePromptInfo, PromptCacheUsage, TokenUsage,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
