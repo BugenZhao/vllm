@@ -475,24 +475,14 @@ impl ChatLlm {
         let PreparedChatRequest {
             text_request,
             output_processor,
-            mut prompt_text,
+            prompt_text,
         } = self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
-        let structured_stream =
-            output_processor.process(decoded_stream)?.map_ok(move |mut event| {
-                if let ChatEvent::Start {
-                    prompt_text: start_prompt_text,
-                    ..
-                } = &mut event
-                {
-                    *start_prompt_text = prompt_text.take();
-                }
-                event
-            });
+        let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream))
+        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

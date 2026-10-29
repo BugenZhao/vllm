@@ -286,8 +286,6 @@ pub(crate) async fn structured_chat_event_stream(
             } => {
                 y.yield_ok(ChatEvent::Start {
                     prompt_token_ids,
-                    // Filled by `ChatLlm::chat`, which owns the rendered prompt.
-                    prompt_text: None,
                     prompt_logprobs,
                 })
                 .await;

@@ -20,7 +20,7 @@ use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent, ChatToken
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
     pub prompt_token_ids: Arc<[u32]>,
-    /// See [`ChatEvent::Start`]'s `prompt_text`.
+    /// See [`ChatEventStream::prompt_text`].
     pub prompt_text: Option<String>,
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
@@ -40,6 +40,7 @@ pub struct CollectedAssistantMessage {
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
     request_id: String,
+    prompt_text: Option<String>,
     inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
 }
 
@@ -47,13 +48,28 @@ impl ChatEventStream {
     pub(crate) fn new(request_id: String, inner: impl crate::output::ChatEventStream) -> Self {
         Self {
             request_id,
+            prompt_text: None,
             inner: Box::pin(inner),
         }
+    }
+
+    /// Attach the rendered prompt text reported by [`Self::prompt_text`].
+    pub(crate) fn with_prompt_text(mut self, prompt_text: Option<String>) -> Self {
+        self.prompt_text = prompt_text;
+        self
     }
 
     /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// Return the prompt text rendered from the chat template, when requested
+    /// with [`ChatRequest::return_prompt_text`](crate::ChatRequest::return_prompt_text)
+    /// and the renderer produced text rather than token IDs. With multimodal
+    /// content, placeholders are not expanded yet.
+    pub fn prompt_text(&self) -> Option<&str> {
+        self.prompt_text.as_deref()
     }
 
     /// Collect the stream to completion and return the final assembled
@@ -64,7 +80,7 @@ impl ChatEventStream {
         let mut message = AssistantMessage::default();
         let mut prompt_logprobs = None;
         let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
-        let mut prompt_text = None;
+        let prompt_text = self.prompt_text.take();
         let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
         let mut token_ids: Vec<u32> = Vec::new();
         while let Some(event) = self.next().await.transpose()? {
@@ -72,11 +88,9 @@ impl ChatEventStream {
                 ChatEvent::Start {
                     prompt_logprobs: start_prompt_logprobs,
                     prompt_token_ids: start_prompt_token_ids,
-                    prompt_text: start_prompt_text,
                 } => {
                     prompt_logprobs = start_prompt_logprobs;
                     prompt_token_ids = start_prompt_token_ids;
-                    prompt_text = start_prompt_text;
                 }
                 ChatEvent::BlockEnd { block, .. } => message.push_block(block),
                 ChatEvent::LogprobsDelta {
@@ -164,7 +178,6 @@ mod tests {
             "chat-missing-done".to_string(),
             stream::iter([Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
-                prompt_text: None,
                 prompt_logprobs: None,
             })]),
         );
@@ -184,7 +197,6 @@ mod tests {
             stream::iter(vec![
                 Ok(ChatEvent::Start {
                     prompt_token_ids: vec![10, 11].into(),
-                    prompt_text: Some("user: hi\nassistant:".to_string()),
                     prompt_logprobs: Some(DecodedPromptLogprobs {
                         first_token_id: 0,
                         first_token: "o".to_string(),
@@ -232,6 +244,7 @@ mod tests {
             ]),
         );
 
+        let stream = stream.with_prompt_text(Some("user: hi\nassistant:".to_string()));
         let collected = stream.collect_message().await.unwrap();
         assert_eq!(
             collected,

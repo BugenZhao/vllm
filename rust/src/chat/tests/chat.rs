@@ -384,7 +384,6 @@ async fn chat_streams_text_events() {
     match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
             prompt_token_ids,
-            prompt_text: None,
             prompt_logprobs: None,
         } => {
             assert_eq!(
@@ -1350,19 +1349,18 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     request.return_prompt_text = true;
 
     let mut stream = chat.chat(request.clone()).await.unwrap();
+    assert_eq!(
+        stream.prompt_text(),
+        Some("system: You are terse.\nuser: Say hi\nassistant:")
+    );
     match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
             prompt_token_ids,
-            prompt_text,
             prompt_logprobs,
         } => {
             assert_eq!(
                 prompt_token_ids.len(),
                 "system: You are terse.\nuser: Say hi\nassistant:".len()
-            );
-            assert_eq!(
-                prompt_text.as_deref(),
-                Some("system: You are terse.\nuser: Say hi\nassistant:")
             );
             assert!(!prompt_token_ids.is_empty());
             assert_eq!(
