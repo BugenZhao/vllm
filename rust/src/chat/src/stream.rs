@@ -72,6 +72,12 @@ impl ChatEventStream {
         self.prompt_text.as_deref()
     }
 
+    /// Take the rendered prompt text out of the stream, so a streaming
+    /// consumer can move it into its first chunk without a copy.
+    pub fn take_prompt_text(&mut self) -> Option<String> {
+        self.prompt_text.take()
+    }
+
     /// Collect the stream to completion and return the final assembled
     /// assistant message.
     pub async fn collect_message(mut self) -> Result<CollectedAssistantMessage> {

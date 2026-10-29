@@ -609,8 +609,9 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
-    /// Whether to report the rendered prompt text on
-    /// [`ChatEvent::Start`](crate::ChatEvent::Start).
+    /// Whether to report the rendered prompt text through
+    /// [`ChatEventStream::prompt_text`](crate::ChatEventStream::prompt_text)
+    /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
     #[serde(default)]
     pub return_prompt_text: bool,
 }

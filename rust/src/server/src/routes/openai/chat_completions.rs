@@ -91,7 +91,7 @@ pub async fn chat_completions(
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
 
-    let chat_stream =
+    let mut chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -100,7 +100,7 @@ pub async fn chat_completions(
         };
 
     if stream {
-        let prompt_text = chat_stream.prompt_text().map(str::to_owned);
+        let prompt_text = chat_stream.take_prompt_text();
         let chunk_stream = chat_completion_chunk_stream(
             chat_stream,
             prompt_text,
