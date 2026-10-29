@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::sync::Arc;
-
 use futures::executor::block_on;
 use futures::{TryStreamExt as _, stream};
 use openai_harmony::chat::{Message, Role};
@@ -44,7 +42,6 @@ fn tool_message(name: &str, arguments: &str, channel: &str) -> Message {
 
 fn decoded_start() -> DecodedTextEvent {
     DecodedTextEvent::Start {
-        prompt_token_ids: Arc::<[u32]>::from([]),
         prompt_logprobs: None,
     }
 }

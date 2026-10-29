@@ -32,7 +32,7 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
+    CollectedGenerateOutput, Error, FinishReason, GeneratePromptInfo, GenerateRequest, Llm,
     WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
@@ -280,12 +280,13 @@ async fn generate_streams_outputs() {
     let mut stream = llm.generate(sample_generate_request("req-delta", 3)).await.unwrap();
     let internal_id = stream.request_id().to_string();
 
+    assert_eq!(stream.prompt_token_ids()[..], [11, 22]);
+
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.request_id, internal_id);
     assert_eq!(
         first.prompt_info,
         Some(Box::new(GeneratePromptInfo {
-            prompt_token_ids: vec![11, 22].into(),
             prompt_logprobs: Some(prompt_logprobs()),
             prompt_token_id_logprobs: None,
         }))
@@ -569,7 +570,6 @@ async fn collect_output_rejects_partial_sampling_mask() {
     let output = vllm_llm::GenerateOutput {
         request_id: "req-partial-mask".to_string(),
         prompt_info: Some(Box::new(GeneratePromptInfo {
-            prompt_token_ids: Arc::from([11_u32, 22]),
             prompt_logprobs: None,
             prompt_token_id_logprobs: None,
         })),
@@ -588,7 +588,9 @@ async fn collect_output_rejects_partial_sampling_mask() {
         timestamps: Default::default(),
     };
 
-    let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
+    let error = CollectedGenerateOutput::collect(&[11, 22], futures::stream::iter([Ok(output)]))
+        .await
+        .unwrap_err();
     assert!(matches!(
         error,
         Error::SamplingMaskTokenCountMismatch {
@@ -667,16 +669,16 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
         let model_name = request_metrics_model_name(name);
         let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
         let mut streamed_counts = Vec::new();
-        let collected = llm
-            .generate(request)
-            .await
-            .unwrap()
-            .inspect(|output| {
+        let stream = llm.generate(request).await.unwrap();
+        let prompt_token_ids = Arc::clone(stream.prompt_token_ids());
+        let collected = CollectedGenerateOutput::collect(
+            &prompt_token_ids,
+            stream.inspect(|output| {
                 streamed_counts.push(output.as_ref().unwrap().prompt_cache_usage.cached_token_count)
-            })
-            .collect_output()
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         results.push((
             name,
             streamed_counts,

@@ -13,9 +13,7 @@ use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_llm::current_unix_timestamp_secs;
-use vllm_text::{
-    DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
-};
+use vllm_text::{DecodedTextEvent, DecodedTextEventStream, Prompt, SampledDelta, TextRequest};
 
 use super::convert::{self, ResponseOpts};
 use super::{InferenceServer, pb};
@@ -320,21 +318,19 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
 /// it and aborts the request in the engine, even before any output arrives.
 #[try_stream]
 async fn generate_stream_responses(
-    stream: impl TextOutputStream,
+    stream: DecodedTextEventStream,
     response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
+    let prompt_token_ids = Arc::clone(stream.prompt_token_ids());
     pin_mut!(stream);
 
     while let Some(event) = stream.next().await {
         let response = match event {
             Err(error) => Err(log_text_error(&request_span, started_at, "stream", error)),
-            Ok(DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            }) => {
+            Ok(DecodedTextEvent::Start { prompt_logprobs }) => {
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
                     prompt_logprobs.as_ref(),

@@ -8,6 +8,7 @@
 //! and the thin generate-facing backend interface live here.
 
 use std::mem::take;
+use std::sync::Arc;
 
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
@@ -19,8 +20,8 @@ pub use lower::{
 };
 pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
-    DecodedText, DecodedTextEvent, DecodedTokenLogprob, Finished, SampledDelta, TextDecodeOptions,
-    TextOutputStreamExt, TokenAnchor, TokenAttribution,
+    DecodedText, DecodedTextEvent, DecodedTextEventStream, DecodedTokenLogprob, Finished,
+    SampledDelta, TextDecodeOptions, TokenAnchor, TokenAttribution,
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
@@ -259,12 +260,13 @@ impl TextLlm {
 
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
-    pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
+    pub async fn generate(&self, request: TextRequest) -> Result<DecodedTextEventStream> {
         let (text_request, raw_stream) = self.generate_inner(request).await?;
         let tokenizer = self.processor.tokenizer();
         let decoded_stream = output::decoded_text_event_stream(
             text_request.request_id,
             tokenizer,
+            Arc::clone(raw_stream.prompt_token_ids()),
             raw_stream,
             text_request.decode_options,
             text_request.intermediate,

@@ -380,18 +380,15 @@ async fn chat_streams_text_events() {
     .await;
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
+    assert_eq!(
+        stream.prompt_token_ids().len(),
+        "system: You are terse.\nuser: Say hi\nassistant:".len()
+    );
 
     match next_semantic(&mut stream).await.unwrap().unwrap() {
         ChatEvent::Start {
-            prompt_token_ids,
             prompt_logprobs: None,
-        } => {
-            assert_eq!(
-                prompt_token_ids.len(),
-                "system: You are terse.\nuser: Say hi\nassistant:".len()
-            );
-            assert!(!prompt_token_ids.is_empty());
-        }
+        } => {}
         other => panic!("expected Start, got {other:?}"),
     }
     assert_eq!(
@@ -1353,16 +1350,12 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
         stream.prompt_text(),
         Some("system: You are terse.\nuser: Say hi\nassistant:")
     );
+    assert_eq!(
+        stream.prompt_token_ids().len(),
+        "system: You are terse.\nuser: Say hi\nassistant:".len()
+    );
     match next_semantic(&mut stream).await.unwrap().unwrap() {
-        ChatEvent::Start {
-            prompt_token_ids,
-            prompt_logprobs,
-        } => {
-            assert_eq!(
-                prompt_token_ids.len(),
-                "system: You are terse.\nuser: Say hi\nassistant:".len()
-            );
-            assert!(!prompt_token_ids.is_empty());
+        ChatEvent::Start { prompt_logprobs } => {
             assert_eq!(
                 prompt_logprobs,
                 Some(DecodedPromptLogprobs {

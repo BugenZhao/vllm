@@ -14,9 +14,11 @@ pub use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 mod decoded;
 mod logprobs;
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::{StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, pin_mut};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 
@@ -44,28 +46,44 @@ pub struct CollectedTextOutput {
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
-#[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
-#[easy_ext::ext(TextOutputStreamExt)]
-impl<T: TextOutputStream> T {
+/// Per-request stream of decoded text events.
+pub struct DecodedTextEventStream {
+    prompt_token_ids: Arc<[u32]>,
+    inner: Pin<Box<dyn Stream<Item = Result<DecodedTextEvent>> + Send>>,
+}
+
+impl DecodedTextEventStream {
+    /// Wrap the decoded text events of one request whose prompt is
+    /// `prompt_token_ids`.
+    pub fn new(prompt_token_ids: Arc<[u32]>, inner: impl TextOutputStream) -> Self {
+        Self {
+            prompt_token_ids,
+            inner: Box::pin(inner),
+        }
+    }
+
+    /// Return the prompt token IDs submitted to the engine for this request.
+    pub fn prompt_token_ids(&self) -> &Arc<[u32]> {
+        &self.prompt_token_ids
+    }
+
     /// Collect the stream to completion and return the final decoded text plus
     /// terminal metadata.
+    #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
     pub fn collect_output(self) -> impl Future<Output = Result<CollectedTextOutput>> + Send {
         async move {
+            let prompt_token_ids = Arc::clone(&self.prompt_token_ids);
             let stream = self;
             pin_mut!(stream);
             let mut prompt_logprobs = None;
-            let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
             let mut collected: Option<CollectedTextOutput> = None;
 
             while let Some(event) = stream.next().await.transpose()? {
                 match event {
                     DecodedTextEvent::Start {
                         prompt_logprobs: start_prompt_logprobs,
-                        prompt_token_ids: start_prompt_token_ids,
-                        ..
                     } => {
                         prompt_logprobs = start_prompt_logprobs;
-                        prompt_token_ids = start_prompt_token_ids;
                     }
                     DecodedTextEvent::TextDelta {
                         decoded,
@@ -129,6 +147,14 @@ impl<T: TextOutputStream> T {
     }
 }
 
+impl Stream for DecodedTextEventStream {
+    type Item = Result<DecodedTextEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::stream;
@@ -140,7 +166,6 @@ mod tests {
     async fn collect_output_retains_prompt_and_sample_logprobs() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
                     first_token_id: 0,
                     first_token: "o".to_string(),
@@ -195,7 +220,10 @@ mod tests {
             }),
         ]);
 
-        let collected = stream.collect_output().await.unwrap();
+        let collected = DecodedTextEventStream::new(vec![10, 11].into(), stream)
+            .collect_output()
+            .await
+            .unwrap();
         assert_eq!(collected.text, "bc");
         assert_eq!(
             collected.prompt_logprobs,
@@ -241,7 +269,6 @@ mod tests {
     async fn collect_output_accumulates_intermediate_deltas() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![10, 11].into(),
                 prompt_logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
@@ -320,7 +347,10 @@ mod tests {
             }),
         ]);
 
-        let collected = stream.collect_output().await.unwrap();
+        let collected = DecodedTextEventStream::new(vec![10, 11].into(), stream)
+            .collect_output()
+            .await
+            .unwrap();
         assert_eq!(collected.text, "hello");
         assert_eq!(collected.prompt_logprobs, None);
         assert_eq!(collected.token_ids, vec![1, 2, 3, 4, 5]);

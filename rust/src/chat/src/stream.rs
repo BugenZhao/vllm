@@ -40,14 +40,20 @@ pub struct CollectedAssistantMessage {
 /// Per-request stream of chat events.
 pub struct ChatEventStream {
     request_id: String,
+    prompt_token_ids: Arc<[u32]>,
     prompt_text: Option<String>,
     inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
 }
 
 impl ChatEventStream {
-    pub(crate) fn new(request_id: String, inner: impl crate::output::ChatEventStream) -> Self {
+    pub(crate) fn new(
+        request_id: String,
+        prompt_token_ids: Arc<[u32]>,
+        inner: impl crate::output::ChatEventStream,
+    ) -> Self {
         Self {
             request_id,
+            prompt_token_ids,
             prompt_text: None,
             inner: Box::pin(inner),
         }
@@ -62,6 +68,11 @@ impl ChatEventStream {
     /// Return the request ID associated with this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// Return the prompt token IDs submitted to the engine for this request.
+    pub fn prompt_token_ids(&self) -> &Arc<[u32]> {
+        &self.prompt_token_ids
     }
 
     /// Return the prompt text rendered from the chat template, when requested
@@ -85,7 +96,7 @@ impl ChatEventStream {
 
         let mut message = AssistantMessage::default();
         let mut prompt_logprobs = None;
-        let mut prompt_token_ids: Arc<[u32]> = Arc::from([]);
+        let prompt_token_ids = Arc::clone(&self.prompt_token_ids);
         let prompt_text = self.prompt_text.take();
         let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
         let mut token_ids: Vec<u32> = Vec::new();
@@ -93,10 +104,8 @@ impl ChatEventStream {
             match event {
                 ChatEvent::Start {
                     prompt_logprobs: start_prompt_logprobs,
-                    prompt_token_ids: start_prompt_token_ids,
                 } => {
                     prompt_logprobs = start_prompt_logprobs;
-                    prompt_token_ids = start_prompt_token_ids;
                 }
                 ChatEvent::BlockEnd { block, .. } => message.push_block(block),
                 ChatEvent::LogprobsDelta {
@@ -182,8 +191,8 @@ mod tests {
     async fn collect_message_requires_terminal_done_event() {
         let stream = ChatEventStream::new(
             "chat-missing-done".to_string(),
+            vec![].into(),
             stream::iter([Ok(ChatEvent::Start {
-                prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
             })]),
         );
@@ -200,9 +209,9 @@ mod tests {
     async fn collect_message_retains_prompt_and_sample_logprobs() {
         let stream = ChatEventStream::new(
             "chat-logprobs".to_string(),
+            vec![10, 11].into(),
             stream::iter(vec![
                 Ok(ChatEvent::Start {
-                    prompt_token_ids: vec![10, 11].into(),
                     prompt_logprobs: Some(DecodedPromptLogprobs {
                         first_token_id: 0,
                         first_token: "o".to_string(),

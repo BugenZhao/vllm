@@ -10,7 +10,7 @@
 //! blocks. It is closer to vLLM's internal chat-rendering flow than to a full
 //! OpenAI-compatible surface.
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 pub use backend::hf::HfChatBackend;
 pub use backend::{
@@ -478,11 +478,16 @@ impl ChatLlm {
             prompt_text,
         } = self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
-        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
+        let decoded_stream = self.text.generate(text_request).await?;
+        let prompt_token_ids = Arc::clone(decoded_stream.prompt_token_ids());
+        let decoded_stream = decoded_stream.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
+        Ok(
+            ChatEventStream::new(request_id, prompt_token_ids, structured_stream)
+                .with_prompt_text(prompt_text),
+        )
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
