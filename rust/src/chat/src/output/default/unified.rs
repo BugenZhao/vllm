@@ -239,15 +239,8 @@ pub(crate) async fn unified_event_stream(
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
-            DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            } => {
-                y.yield_ok(AssistantEvent::Start {
-                    prompt_token_ids,
-                    prompt_logprobs,
-                })
-                .await;
+            DecodedTextEvent::Start { prompt_logprobs } => {
+                y.yield_ok(AssistantEvent::Start { prompt_logprobs }).await;
             }
             DecodedTextEvent::TextDelta {
                 decoded,

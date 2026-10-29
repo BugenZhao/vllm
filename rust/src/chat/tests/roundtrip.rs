@@ -17,7 +17,6 @@ use std::fmt::Debug;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use futures::{Stream, StreamExt as _, stream};
@@ -1074,7 +1073,6 @@ fn decoded_completion_stream(
     assistant_stop_suffix: &str,
 ) -> Result<Pin<Box<dyn Stream<Item = vllm_chat::Result<DecodedTextEvent>> + Send>>> {
     let mut events = vec![DecodedTextEvent::Start {
-        prompt_token_ids: Arc::from(prompt_token_ids.clone().into_boxed_slice()),
         prompt_logprobs: None,
     }];
 

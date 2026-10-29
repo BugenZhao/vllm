@@ -95,8 +95,6 @@ pub struct CollectedGenerateOutput {
 /// one request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratePromptInfo {
-    /// Original prompt token IDs for this request.
-    pub prompt_token_ids: Arc<[u32]>,
     /// Prompt logprobs returned by engine-core for scored prompt positions,
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
@@ -221,15 +219,6 @@ pub struct GenerateOutput {
 }
 
 impl GenerateOutput {
-    /// Returns the prompt token IDs when this output carries
-    /// [`GeneratePromptInfo`].
-    ///
-    /// Only the first output for a request can return `Some`; all later outputs
-    /// return `None`.
-    pub fn prompt_token_ids(&self) -> Option<&Arc<[u32]>> {
-        self.prompt_info.as_ref().map(|info| &info.prompt_token_ids)
-    }
-
     /// Returns the prompt logprobs when this output carries
     /// [`GeneratePromptInfo`].
     ///
@@ -280,16 +269,14 @@ impl GenerateOutput {
 #[cfg(any(test, feature = "test-util"))]
 impl GenerateOutput {
     /// Build a [`GenerateOutput`] for tests.
-    pub fn for_test(
-        prompt_token_ids: Option<Arc<[u32]>>,
-        token_ids: Vec<u32>,
-        finish_reason: Option<FinishReason>,
-    ) -> Self {
+    ///
+    /// `first` marks the request's first output, which carries the
+    /// [`GeneratePromptInfo`].
+    pub fn for_test(first: bool, token_ids: Vec<u32>, finish_reason: Option<FinishReason>) -> Self {
         Self {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| {
+            prompt_info: first.then(|| {
                 Box::new(GeneratePromptInfo {
-                    prompt_token_ids: ids,
                     prompt_logprobs: None,
                     prompt_token_id_logprobs: None,
                 })
@@ -316,6 +303,8 @@ impl GenerateOutput {
 ///   with `finish_reason = Abort` before the stream ends.
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
+    /// Prompt token IDs submitted to the engine for this request.
+    prompt_token_ids: Arc<[u32]>,
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
@@ -341,9 +330,9 @@ impl GenerateOutputStream {
         request_guard: RequestGuard,
     ) -> Self {
         Self {
+            prompt_token_ids,
             remote_prefill_cached_tokens,
             pending_prompt_info: Some(Box::new(GeneratePromptInfo {
-                prompt_token_ids,
                 prompt_logprobs: None,
                 prompt_token_id_logprobs: None,
             })),
@@ -359,6 +348,17 @@ impl GenerateOutputStream {
     /// Return the internal engine request ID bound to this stream.
     pub fn request_id(&self) -> &str {
         self.raw_stream.request_id()
+    }
+
+    /// Return the prompt token IDs submitted to the engine for this request.
+    pub fn prompt_token_ids(&self) -> &Arc<[u32]> {
+        &self.prompt_token_ids
+    }
+
+    /// Collect the stream to completion and return the final token output.
+    pub async fn collect_output(self) -> Result<CollectedGenerateOutput> {
+        let prompt_token_ids = Arc::clone(&self.prompt_token_ids);
+        CollectedGenerateOutput::collect(&prompt_token_ids, self).await
     }
 
     /// Merge the outputs of one delivery into one output, like Python
@@ -564,16 +564,17 @@ impl Drop for GenerateOutputStream {
     }
 }
 
-#[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
-#[easy_ext::ext(GenerateOutputStreamExt)]
-impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
-    /// Collect the raw generate stream to completion and return the final token
-    /// output.
-    pub fn collect_output(self) -> impl Future<Output = Result<CollectedGenerateOutput>> + Send {
+impl CollectedGenerateOutput {
+    /// Collect a raw generate stream of one request, whose prompt is
+    /// `prompt_token_ids`, to completion and return the final token output.
+    #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
+    pub fn collect(
+        prompt_token_ids: &[u32],
+        stream: impl Stream<Item = Result<GenerateOutput>> + Send,
+    ) -> impl Future<Output = Result<Self>> + Send {
+        let mut prompt_token_ids = Some(prompt_token_ids.to_vec());
         async move {
-            let stream = self;
             pin_mut!(stream);
-            let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
             let mut prompt_token_id_logprobs = None;
             let mut prompt_cache_usage = PromptCacheUsage::default();
@@ -583,9 +584,6 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                 prompt_cache_usage.merge(output.prompt_cache_usage);
                 let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
-                    if prompt_token_ids.is_none() {
-                        prompt_token_ids = Some(info.prompt_token_ids.to_vec());
-                    }
                     if prompt_logprobs.is_none() {
                         prompt_logprobs = info.prompt_logprobs;
                     }

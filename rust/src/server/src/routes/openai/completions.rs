@@ -23,8 +23,8 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
-    DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    DecodedPromptLogprobs, DecodedTextEvent, DecodedTextEventStream, FinishReason, SampledDelta,
+    TextOutputStream, TextRequest,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -111,8 +111,10 @@ pub async fn completions(
     };
 
     if stream {
+        let prompt_token_ids = Arc::clone(text_stream.prompt_token_ids());
         let chunk_stream = completion_chunk_stream(
             text_stream,
+            prompt_token_ids,
             prepared.request_id,
             prepared.response_model,
             created,
@@ -143,7 +145,7 @@ pub async fn completions(
 }
 
 async fn collect_completion(
-    stream: impl TextOutputStream,
+    stream: DecodedTextEventStream,
     request_id: String,
     response_model: String,
     created: u64,
@@ -275,6 +277,7 @@ async fn collect_completion(
 #[try_stream]
 async fn completion_chunk_stream(
     stream: impl TextOutputStream,
+    prompt_token_ids: Arc<[u32]>,
     request_id: String,
     response_model: String,
     created: u64,
@@ -338,10 +341,7 @@ async fn completion_chunk_stream(
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            }) => {
+            Ok(DecodedTextEvent::Start { prompt_logprobs }) => {
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
@@ -684,7 +684,8 @@ mod tests {
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedText,
-        DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
+        DecodedTextEvent, DecodedTextEventStream, DecodedTokenLogprob, FinishReason, Finished,
+        SampledDelta,
     };
 
     use super::{
@@ -755,7 +756,6 @@ mod tests {
         let make_stream = |spec_decode_metrics| {
             stream::iter(vec![
                 Ok(DecodedTextEvent::Start {
-                    prompt_token_ids: vec![1].into(),
                     prompt_logprobs: None,
                 }),
                 Ok(decoded_delta(
@@ -786,7 +786,7 @@ mod tests {
 
         for enabled in [false, true] {
             let response = collect_completion(
-                make_stream(None),
+                DecodedTextEventStream::new(vec![1].into(), make_stream(None)),
                 "cmpl-1".into(),
                 "model".into(),
                 1,
@@ -811,12 +811,15 @@ mod tests {
         }
 
         let response = collect_completion(
-            make_stream(Some(RequestSpecDecodeMetrics {
-                num_spec_tokens: 3,
-                histogram: vec![0, 1, 1, 0],
-                num_draft_tokens: 6,
-                ..Default::default()
-            })),
+            DecodedTextEventStream::new(
+                vec![1].into(),
+                make_stream(Some(RequestSpecDecodeMetrics {
+                    num_spec_tokens: 3,
+                    histogram: vec![0, 1, 1, 0],
+                    num_draft_tokens: 6,
+                    ..Default::default()
+                })),
+            ),
             "cmpl-1".into(),
             "model".into(),
             1,
@@ -840,7 +843,6 @@ mod tests {
     async fn completion_chunk_stream_maps_streaming_logprobs() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2, 3, 4, 5].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -920,6 +922,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![1, 2, 3, 4, 5].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1053,7 +1056,6 @@ mod tests {
         for (deltas, expected_offsets) in cases {
             let last = deltas.len() - 1;
             let events = std::iter::once(Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![9].into(),
                 prompt_logprobs: None,
             }))
             .chain(deltas.iter().enumerate().map(|(i, (token, text))| {
@@ -1076,6 +1078,7 @@ mod tests {
 
             let chunks = completion_chunk_stream(
                 stream::iter(events),
+                vec![9].into(),
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
@@ -1102,7 +1105,6 @@ mod tests {
     async fn completion_stream_puts_kv_transfer_params_on_finish_chunk_only() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta("a", vec![7], None, None)),
@@ -1130,6 +1132,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![1, 2].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1167,7 +1170,6 @@ mod tests {
     async fn completion_stream_serializes_requested_token_ids_on_every_choice() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -1192,6 +1194,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![1, 2].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1233,7 +1236,6 @@ mod tests {
     async fn collect_completion_hides_internal_prompt_only_token() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -1257,7 +1259,7 @@ mod tests {
         ]);
 
         let response = super::collect_completion(
-            stream,
+            DecodedTextEventStream::new(vec![1, 2].into(), stream),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1288,7 +1290,6 @@ mod tests {
     async fn collect_completion_maps_prompt_logprobs_for_single_token_prompt() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -1312,7 +1313,7 @@ mod tests {
         ]);
 
         let response = super::collect_completion(
-            stream,
+            DecodedTextEventStream::new(vec![9707].into(), stream),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1346,7 +1347,6 @@ mod tests {
     async fn completion_chunk_stream_hides_internal_prompt_only_token() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -1373,6 +1373,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![1, 2].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1427,7 +1428,6 @@ mod tests {
     async fn completion_chunk_stream_maps_prompt_logprobs_for_single_token_prompt() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![9707].into(),
                 prompt_logprobs: None,
             }),
             Ok(decoded_delta(
@@ -1452,6 +1452,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![9707].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1493,7 +1494,6 @@ mod tests {
     async fn completion_chunk_stream_maps_prompt_only_logprobs() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids: vec![1, 2].into(),
                 prompt_logprobs: Some(DecodedPromptLogprobs {
                     first_token_id: 1,
                     first_token: "he".to_string(),
@@ -1529,6 +1529,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
+            vec![1, 2].into(),
             "cmpl-1".to_string(),
             "model".to_string(),
             1,

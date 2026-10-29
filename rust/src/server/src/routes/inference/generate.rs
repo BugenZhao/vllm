@@ -25,9 +25,7 @@ use vllm_engine_core_client::protocol::dtype::Endianness;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
-use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
-};
+use vllm_llm::{CollectedGenerateOutput, FinishReason, GenerateOutput, TokenUsage};
 
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
@@ -112,8 +110,10 @@ pub async fn generate(
     };
 
     if stream {
+        let prompt_token_ids = Arc::clone(raw_stream.prompt_token_ids());
         let chunk_stream = generate_chunk_stream(
             raw_stream,
+            prompt_token_ids,
             prepared.request_id,
             api_server_options,
             prepared.options,
@@ -155,6 +155,7 @@ pub async fn generate(
 #[try_stream]
 async fn generate_chunk_stream(
     stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
+    prompt_token_ids: Arc<[u32]>,
     request_id: String,
     ApiServerOptions {
         enable_log_requests,
@@ -173,9 +174,11 @@ async fn generate_chunk_stream(
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
-    let mut prompt_tokens = None;
-    let mut prompt_token_ids = None;
-    let mut usage = TokenUsage::default();
+    let mut usage = TokenUsage {
+        prompt_token_count: prompt_token_ids.len(),
+        ..Default::default()
+    };
+    let mut prompt_token_ids = return_token_ids.then(|| prompt_token_ids.to_vec());
     let mut spec_decode_metrics = None;
 
     while let Some(next) = stream.next().await {
@@ -184,15 +187,6 @@ async fn generate_chunk_stream(
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
-                if prompt_tokens.is_none()
-                    && let Some(info) = output.prompt_info.as_ref()
-                {
-                    prompt_tokens = Some(info.prompt_token_ids.len());
-                    if return_token_ids {
-                        prompt_token_ids = Some(info.prompt_token_ids.to_vec());
-                    }
-                }
-                usage.prompt_token_count = prompt_tokens.unwrap_or_default();
                 usage.prompt_cache_usage.merge(output.prompt_cache_usage);
 
                 let token_ids = output.token_ids;
@@ -671,11 +665,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_chunk_stream_captures_late_prompt_info() {
+    async fn generate_chunk_stream_reports_prompt_usage_and_placeholders_on_first_tokens() {
         let stream = stream::iter(vec![
             Ok(GenerateOutput {
                 request_id: String::new(),
-                prompt_info: None,
+                prompt_info: Some(Box::new(GeneratePromptInfo {
+                    prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
+                })),
                 token_ids: Vec::new(),
                 logprobs: None,
                 finish_reason: None,
@@ -690,11 +687,7 @@ mod tests {
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
-                prompt_info: Some(Box::new(GeneratePromptInfo {
-                    prompt_token_ids: Arc::from([11_u32, 22_u32]),
-                    prompt_logprobs: None,
-                    prompt_token_id_logprobs: None,
-                })),
+                prompt_info: None,
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
@@ -721,6 +714,7 @@ mod tests {
         )]);
         let chunks: Vec<_> = generate_chunk_stream(
             stream,
+            Arc::from([11, 22]),
             "raw-stream".to_string(),
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
@@ -773,16 +767,16 @@ mod tests {
         );
     }
 
+    /// One output of a request; `first` marks the one carrying prompt info.
     fn stream_output(
-        prompt_token_ids: Option<&[u32]>,
+        first: bool,
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
     ) -> GenerateOutput {
         GenerateOutput {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| {
+            prompt_info: first.then(|| {
                 Box::new(GeneratePromptInfo {
-                    prompt_token_ids: Arc::from(ids),
                     prompt_logprobs: None,
                     prompt_token_id_logprobs: None,
                 })
@@ -802,12 +796,14 @@ mod tests {
     }
 
     async fn collect_chunks(
+        prompt_token_ids: &[u32],
         outputs: Vec<GenerateOutput>,
         return_token_ids: bool,
         mm_placeholders: Option<MultiModalPlaceholders>,
     ) -> Vec<GenerateStreamResponse> {
         generate_chunk_stream(
             stream::iter(outputs.into_iter().map(Ok)),
+            Arc::from(prompt_token_ids),
             "raw-stream".to_string(),
             ApiServerOptions::default(),
             ResponseOptions {
@@ -823,12 +819,12 @@ mod tests {
 
     #[tokio::test]
     async fn generate_chunk_stream_returns_sampling_mask() {
-        let mut output = stream_output(Some(&[11]), vec![33], Some(FinishReason::Length));
+        let mut output = stream_output(true, vec![33], Some(FinishReason::Length));
         output.sampling_mask = Some(SamplingMask {
             rows: vec![vec![33, 44]],
         });
 
-        let chunks = collect_chunks(vec![output], false, None).await;
+        let chunks = collect_chunks(&[11], vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
     }
@@ -836,9 +832,10 @@ mod tests {
     #[tokio::test]
     async fn generate_chunk_stream_omits_prompt_metadata_by_default() {
         let chunks = collect_chunks(
+            &[11, 22],
             vec![
-                stream_output(Some(&[11, 22]), vec![33], None),
-                stream_output(Some(&[11, 22]), vec![44], Some(FinishReason::stop_eos())),
+                stream_output(true, vec![33], None),
+                stream_output(false, vec![44], Some(FinishReason::stop_eos())),
             ],
             false,
             Some(MultiModalPlaceholders::from([(
@@ -860,10 +857,11 @@ mod tests {
     async fn generate_chunk_stream_sends_prompt_metadata_on_first_emitted_chunk() {
         // An empty first output is skipped and must not consume the metadata.
         let chunks = collect_chunks(
+            &[11, 22],
             vec![
-                stream_output(Some(&[11, 22]), Vec::new(), None),
-                stream_output(Some(&[11, 22]), vec![33], None),
-                stream_output(Some(&[11, 22]), vec![44], Some(FinishReason::stop_eos())),
+                stream_output(true, Vec::new(), None),
+                stream_output(false, vec![33], None),
+                stream_output(false, vec![44], Some(FinishReason::stop_eos())),
             ],
             true,
             None,
@@ -885,12 +883,13 @@ mod tests {
             num_draft_tokens: 6,
             ..Default::default()
         };
-        let mut output = stream_output(None, Vec::new(), Some(FinishReason::stop_eos()));
+        let mut output = stream_output(false, Vec::new(), Some(FinishReason::stop_eos()));
         output.spec_decode_metrics = Some(Box::new(metrics.clone()));
 
         for include_usage in [false, true] {
             let chunks: Vec<_> = generate_chunk_stream(
                 stream::iter(vec![Ok(output.clone())]),
+                Arc::from([]),
                 "raw-stream".to_string(),
                 ApiServerOptions::default(),
                 ResponseOptions {
@@ -1029,11 +1028,12 @@ mod tests {
     #[tokio::test]
     async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
         let rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
-        let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
+        let mut terminal = stream_output(false, vec![44], Some(FinishReason::Length));
         terminal.routed_experts = Some(Box::new(rows.clone()));
 
         let chunks = collect_chunks(
-            vec![stream_output(Some(&[11]), vec![33], None), terminal],
+            &[11],
+            vec![stream_output(true, vec![33], None), terminal],
             false,
             None,
         )
@@ -1259,10 +1259,11 @@ mod tests {
     #[tokio::test]
     async fn generate_chunk_stream_reports_stop_reason() {
         let chunks = collect_chunks(
+            &[11, 22],
             vec![
-                stream_output(Some(&[11, 22]), vec![33], None),
+                stream_output(true, vec![33], None),
                 stream_output(
-                    Some(&[11, 22]),
+                    false,
                     vec![44],
                     Some(FinishReason::Stop(Some(StopReason::Text(
                         "wor".to_string(),

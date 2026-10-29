@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::ops::Deref;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
@@ -187,10 +186,9 @@ impl AssistantMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
     /// The request was accepted, streaming has started, and prompt metadata is
-    /// ready.
+    /// ready. The prompt token IDs are on the stream,
+    /// [`crate::ChatEventStream::prompt_token_ids`].
     Start {
-        /// The actual prompt token IDs for this request.
-        prompt_token_ids: Arc<[u32]>,
         /// Once-only prompt logprobs metadata, when requested.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
