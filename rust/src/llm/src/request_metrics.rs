@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
 };
@@ -20,7 +21,7 @@ const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
 /// Engine lifecycle timestamps used by frontend per-request response metrics.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct RequestTimestamps {
     pub queued_ts: f64,
     pub scheduled_ts: f64,

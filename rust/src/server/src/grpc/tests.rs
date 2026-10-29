@@ -61,7 +61,10 @@ use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
-use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
+use super::{
+    ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, LlmGrpcService,
+    LlmServiceImpl, pb,
+};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -2803,4 +2806,406 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         .await
         .expect("timed out waiting for gRPC server shutdown")
         .expect("gRPC server task failed");
+}
+
+// ========================================================================================
+// RemoteLlm round trip
+// ========================================================================================
+
+/// A text facade over a scripted engine, either through an `EngineCoreLlm` or
+/// through a `RemoteLlm` and a gRPC server, plus what the engine received.
+struct LlmHarness {
+    text: vllm_text::TextLlm,
+    recorded: tokio::sync::oneshot::Receiver<EngineCoreRequest>,
+    engine_task: MockEngineTask,
+    server_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LlmHarness {
+    /// `TextLlm` over an `EngineCoreLlm`.
+    async fn local(outputs: Vec<EngineCoreOutput>) -> Self {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let (recorded_tx, recorded) = tokio::sync::oneshot::channel();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+            handshake_address.clone(),
+            b"engine-local",
+            default_ready_response(),
+            recording_engine_script(outputs, recorded_tx),
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        Self {
+            text: vllm_text::TextLlm::new(
+                EngineCoreLlm::new(client),
+                Arc::new(FakeTextBackend::default()),
+            ),
+            recorded,
+            engine_task,
+            server_task: None,
+        }
+    }
+
+    /// `TextLlm` over a `RemoteLlm` connected to a gRPC server that serves an
+    /// `EngineCoreLlm`.
+    async fn remote(outputs: Vec<EngineCoreOutput>) -> Self {
+        let local = Self::local(outputs).await;
+        let engine_health = local.text.llm().subscribe_health();
+        let chat = ChatLlm::new(local.text, Arc::new(FakeTextBackend::default()));
+        let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (health_reporter, health_service) = health_reporter();
+        health_reporter.set_serving::<LlmGrpcService>().await;
+
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server_task = tokio::spawn(async move {
+            let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+            let server = TonicServer::builder()
+                .add_service(health_service)
+                .add_service(ControlServer::new(ControlServiceImpl::new(state.clone())))
+                .add_service(LlmGrpcService::new(LlmServiceImpl::new(state)))
+                .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
+            let health_monitor =
+                super::monitor_health(health_reporter, engine_health, shutdown.clone());
+            let (server_result, ()) = tokio::join!(server, health_monitor);
+            server_result.expect("grpc server");
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("grpc endpoint")
+            .connect()
+            .await
+            .expect("connect grpc channel");
+        let llm = vllm_remote_llm::RemoteLlm::connect(channel).await.expect("connect remote llm");
+        Self {
+            text: vllm_text::TextLlm::new(llm, Arc::new(FakeTextBackend::default())),
+            recorded: local.recorded,
+            engine_task: local.engine_task,
+            server_task: Some(server_task),
+        }
+    }
+
+    /// Wait for the engine script and return the request the engine received.
+    async fn finish(self) -> EngineCoreRequest {
+        self.engine_task.await.expect("mock engine task");
+        if let Some(server_task) = self.server_task {
+            server_task.abort();
+        }
+        self.recorded.await.expect("engine received a request")
+    }
+
+    async fn decoded(
+        self,
+        request: vllm_text::TextRequest,
+    ) -> EngineRun<vllm_text::DecodedTextEvent> {
+        use futures::TryStreamExt as _;
+
+        let outputs = (self.text.generate(request).await.expect("submit text request"))
+            .try_collect()
+            .await
+            .expect("collect text events");
+        EngineRun {
+            engine_request: self.finish().await,
+            outputs,
+        }
+        .normalized()
+    }
+
+    async fn raw(self, request: vllm_text::TextRequest) -> EngineRun<vllm_llm::GenerateOutput> {
+        use futures::TryStreamExt as _;
+
+        let outputs = (self.text.generate_raw(request).await.expect("submit text request"))
+            .try_collect()
+            .await
+            .expect("collect raw outputs");
+        EngineRun {
+            engine_request: self.finish().await,
+            outputs,
+        }
+        .normalized()
+    }
+}
+
+/// What one scripted engine run observed: the request the engine received and
+/// what the text facade's caller saw.
+#[derive(Debug, PartialEq)]
+struct EngineRun<T> {
+    engine_request: EngineCoreRequest,
+    outputs: Vec<T>,
+}
+
+impl<T: Normalize> EngineRun<T> {
+    /// Clear values that legitimately differ between runs: generated request
+    /// IDs, arrival times, and engine timestamps.
+    fn normalized(mut self) -> Self {
+        self.engine_request.request_id.clear();
+        self.engine_request.arrival_time = 0.0;
+        self.outputs.iter_mut().for_each(Normalize::normalize);
+        self
+    }
+}
+
+trait Normalize {
+    fn normalize(&mut self);
+}
+
+impl Normalize for vllm_text::DecodedTextEvent {
+    fn normalize(&mut self) {
+        if let vllm_text::DecodedTextEvent::TextDelta {
+            finished: Some(finished),
+            ..
+        } = self
+        {
+            finished.timestamps = Default::default();
+        }
+    }
+}
+
+impl Normalize for vllm_llm::GenerateOutput {
+    fn normalize(&mut self) {
+        self.request_id.clear();
+        self.timestamps = Default::default();
+    }
+}
+
+impl EngineRun<vllm_text::DecodedTextEvent> {
+    fn text(&self) -> String {
+        (self.outputs.iter())
+            .filter_map(|event| match event {
+                vllm_text::DecodedTextEvent::TextDelta { decoded, .. } => {
+                    Some(decoded.text.as_str())
+                }
+                vllm_text::DecodedTextEvent::Start { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// A mock engine script that records the submitted request and replies with
+/// `outputs`, addressed to that request.
+fn recording_engine_script(
+    outputs: Vec<EngineCoreOutput>,
+    recorded: tokio::sync::oneshot::Sender<EngineCoreRequest>,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            let request_id = request.request_id.clone();
+            let _ = recorded.send(request);
+            // One engine step per output, so each becomes its own update.
+            for output in outputs {
+                let output = EngineCoreOutput {
+                    request_id: request_id.clone(),
+                    ..output
+                };
+                let batch = RequestBatchOutputs {
+                    outputs: vec![output],
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+            }
+        })
+    }
+}
+
+/// A request that sets most engine sampling fields, so the engine request
+/// comparison covers their wire conversion.
+fn round_trip_request() -> vllm_text::TextRequest {
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+
+    vllm_text::TextRequest {
+        request_id: "round-trip".to_string(),
+        prompt: Prompt::TokenIds(b"hello".iter().map(|&b| u32::from(b)).collect()),
+        sampling_params: vllm_text::SamplingParams {
+            // Resolved from the model defaults on the caller's side.
+            temperature: None,
+            presence_penalty: Some(0.0),
+            frequency_penalty: Some(0.5),
+            repetition_penalty: Some(1.1),
+            top_p: Some(0.9),
+            top_k: Some(5),
+            min_p: Some(0.05),
+            seed: Some(7),
+            max_tokens: Some(16),
+            min_tokens: Some(1),
+            thinking_token_budget: Some(8),
+            stop_token_ids: Some(vec![3]),
+            logit_bias: Some([(u32::from(b'x'), -2.0)].into()),
+            allowed_token_ids: Some((0..128).collect()),
+            bad_words: Some(vec!["qq".to_string()]),
+            repetition_detection: Some(RepetitionDetectionParams {
+                max_pattern_size: 4,
+                min_pattern_size: 2,
+                min_count: 3,
+            }),
+            structured_outputs: Some(StructuredOutputsParams::json(serde_json::json!({
+                "type": "object",
+                "properties": {"n": {"type": "number", "minimum": 1.5}},
+            }))),
+            skip_reading_prefix_cache: Some(true),
+            stream_interval: std::num::NonZeroU32::new(2),
+            vllm_xargs: Some(
+                [(
+                    "kv_transfer_params".to_string(),
+                    serde_json::json!({"do_remote_decode": true, "port": 5600}),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        },
+        decode_options: vllm_text::TextDecodeOptions {
+            stop_strings: Some(vec!["!".to_string()]),
+            ..Default::default()
+        },
+        priority: 3,
+        cache_salt: Some("tenant-a".to_string()),
+        session_id: Some("session-1".to_string()),
+        kv_hints: Some(KvHintsEnvelope {
+            protocol_version: "0.1".to_string(),
+            message_id: "msg-1".to_string(),
+            actions: vec![KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "example.action".to_string(),
+                action_version: "1.0".to_string(),
+                payload: [("blocks".to_string(), serde_json::json!([1, 2]))].into(),
+            }],
+        }),
+        reasoning_parser_kwargs:
+            vllm_engine_core_client::protocol::request::ReasoningParserKwargs {
+                chat_template_kwargs: [("enable_thinking".to_string(), serde_json::json!(false))]
+                    .into(),
+            },
+        reasoning_ended: Some(true),
+        ..vllm_text::TextRequest::for_test()
+    }
+}
+
+fn byte_outputs(chunks: &[&[u8]], finish_reason: EngineCoreFinishReason) -> Vec<EngineCoreOutput> {
+    let last = chunks.len() - 1;
+    (chunks.iter().enumerate())
+        .map(|(index, chunk)| {
+            request_output(
+                "",
+                chunk.iter().map(|&b| u32::from(b)).collect(),
+                (index == last).then_some(finish_reason),
+            )
+        })
+        .collect()
+}
+
+/// The caller's text layer stops on a stop string while the remote engine is
+/// still generating; dropping the stream ends the remote request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_with_stop_string() {
+    let outputs = byte_outputs(&[b"hel", b"lo!", b"xy"], EngineCoreFinishReason::Length);
+    let local = LlmHarness::local(outputs.clone()).await.decoded(round_trip_request()).await;
+    let remote = LlmHarness::remote(outputs).await.decoded(round_trip_request()).await;
+    assert_eq!(local.text(), "hello");
+    assert_eq!(remote, local);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_with_logprobs() {
+    use vllm_engine_core_client::protocol::logprobs::{
+        Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
+    };
+
+    fn position(token_id: u8, rank: u32) -> PositionLogprobs {
+        PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: u32::from(token_id),
+                    logprob: -0.25,
+                    rank,
+                },
+                TokenLogprob {
+                    token_id: u32::from(b'z'),
+                    logprob: -1.5,
+                    rank: 1,
+                },
+            ],
+        }
+    }
+
+    let request = vllm_text::TextRequest {
+        sampling_params: vllm_text::SamplingParams {
+            logprobs: Some(1),
+            prompt_logprobs: Some(1),
+            ..round_trip_request().sampling_params
+        },
+        ..round_trip_request()
+    };
+    let mut outputs = byte_outputs(&[b"o", b"k"], EngineCoreFinishReason::Length);
+    outputs[0].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'o', 2)],
+    }));
+    outputs[0].new_prompt_logprobs_tensors = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: b"ello".iter().map(|&b| position(b, 3)).collect(),
+    }));
+    outputs[1].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'k', 1)],
+    }));
+    let local = LlmHarness::local(outputs.clone()).await.decoded(request.clone()).await;
+    let remote = LlmHarness::remote(outputs).await.decoded(request).await;
+    assert_eq!(local.text(), "ok");
+    assert_eq!(remote, local);
+}
+
+/// Terminal metadata that only the raw token stream exposes survives the wire:
+/// the stop token, KV transfer parameters, cached tokens, sampling mask, and
+/// speculative-decoding metrics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_raw_outputs() {
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+    use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
+    use vllm_engine_core_client::protocol::stats::PrefillStats;
+
+    let request = vllm_text::TextRequest {
+        decode_options: Default::default(),
+        ..round_trip_request()
+    };
+    let mut outputs = byte_outputs(&[b"o", b"k", &[3]], EngineCoreFinishReason::Stop);
+    outputs[0].prefill_stats = Some(Box::new(PrefillStats {
+        num_prompt_tokens: 5,
+        num_computed_tokens: 1,
+        num_cached_tokens: 4,
+        ..Default::default()
+    }));
+    outputs[1].new_sampling_mask = Some(MaybeWireSamplingMask::Direct(SamplingMask {
+        rows: vec![vec![1, 2]],
+    }));
+    let last = outputs.last_mut().unwrap();
+    last.stop_reason = Some(StopReason::TokenId(3));
+    last.kv_transfer_params = Some(Box::new(serde_json::json!({
+        "remote_request_id": "round-trip",
+        "remote_port": 5600,
+    })));
+    last.spec_decode_metrics = Some(Box::new(RequestSpecDecodeMetrics {
+        num_spec_tokens: 2,
+        histogram: vec![1, 0, 1],
+        num_draft_tokens: 4,
+        ..Default::default()
+    }));
+    let local = LlmHarness::local(outputs.clone()).await.raw(request.clone()).await;
+    let remote = LlmHarness::remote(outputs).await.raw(request).await;
+    let terminal = local.outputs.last().unwrap();
+    assert!(terminal.kv_transfer_params.is_some() && terminal.spec_decode_metrics.is_some());
+    assert_eq!(remote, local);
 }

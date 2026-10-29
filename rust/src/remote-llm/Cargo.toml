@@ -1,0 +1,26 @@
+[package]
+name = "vllm-remote-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+thiserror-ext.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tracing.workspace = true
+vllm-llm.workspace = true
+vllm-proto.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[lints]
+workspace = true
