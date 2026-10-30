@@ -8,6 +8,7 @@
 //! and the thin generate-facing backend interface live here.
 
 use std::mem::take;
+use std::num::NonZeroU32;
 
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
@@ -260,17 +261,42 @@ impl TextLlm {
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
-        let (text_request, raw_stream) = self.generate_inner(request).await?;
-        let tokenizer = self.processor.tokenizer();
-        let decoded_stream = output::decoded_text_event_stream(
-            text_request.request_id,
-            tokenizer,
-            raw_stream,
-            text_request.decode_options,
-            text_request.intermediate,
-        );
+        let mut streams = self.generate_n(request, NonZeroU32::MIN).await?;
+        Ok(streams.pop().expect("one output stream per sample"))
+    }
 
-        Ok(decoded_stream)
+    /// Tokenize and lower one request once, submit it as `n` parallel samples,
+    /// and stream each sample's incrementally decoded text, in index order.
+    pub async fn generate_n(
+        &self,
+        request: TextRequest,
+        n: NonZeroU32,
+    ) -> Result<Vec<impl TextOutputStream + use<>>> {
+        let PreparedTextRequest {
+            text_request,
+            generate_request,
+        } = self.processor.prepare(request)?;
+        // Like Python's `SamplingParams`, checked against the resolved
+        // temperature, after model generation-config defaults. Python raises a
+        // positive temperature below 0.01 to 0.01 first, so only zero is greedy.
+        if n > NonZeroU32::MIN && generate_request.sampling_params.temperature == 0.0 {
+            return Err(Error::GreedyParallelSampling { n: n.get() });
+        }
+
+        let raw_streams = self.llm.generate_n(generate_request, n).await?;
+        let tokenizer = self.processor.tokenizer();
+        Ok(raw_streams
+            .into_iter()
+            .map(|raw_stream| {
+                output::decoded_text_event_stream(
+                    text_request.request_id.clone(),
+                    tokenizer.clone(),
+                    raw_stream,
+                    text_request.decode_options.clone(),
+                    text_request.intermediate,
+                )
+            })
+            .collect())
     }
 
     async fn generate_inner(
