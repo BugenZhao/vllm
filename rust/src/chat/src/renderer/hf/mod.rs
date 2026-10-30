@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use serde_json::Value as JsonValue;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
 use vllm_text::Prompt;
@@ -350,7 +350,11 @@ enum TemplateContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TemplateContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(flatten)]
+        extra_fields: JsonMap<String, JsonValue>,
+    },
     Image,
     Video,
     Audio,
@@ -518,13 +522,17 @@ fn to_template_openai_content(
     multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<Vec<TemplateContentPart>> {
     match content {
-        ChatContent::Text(text) => Ok(vec![TemplateContentPart::Text { text: text.clone() }]),
+        ChatContent::Text(text) => Ok(vec![TemplateContentPart::Text {
+            text: text.clone(),
+            extra_fields: JsonMap::new(),
+        }]),
         ChatContent::Parts(parts) => parts
             .iter()
             .map(|part| match part {
-                ChatContentPart::Text { text } => {
-                    Ok(TemplateContentPart::Text { text: text.clone() })
-                }
+                ChatContentPart::Text { text, extra_fields } => Ok(TemplateContentPart::Text {
+                    text: text.clone(),
+                    extra_fields: extra_fields.clone(),
+                }),
                 // All multimodal contents are normalized to `{ "type": <modality> }`.
                 ChatContentPart::ImageUrl { .. } => {
                     multimodal
@@ -559,7 +567,7 @@ fn to_template_string_content(
             let mut out = String::new();
             for part in parts {
                 match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
+                    ChatContentPart::Text { text, .. } => out.push_str(text),
                     ChatContentPart::ImageUrl { .. } => {
                         let image_token = multimodal
                             .and_then(|multimodal| multimodal.image_token.as_ref())
@@ -604,7 +612,7 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Resul
         TemplateContent::String(text) => Some(text),
         // Pick the last text part in the message.
         TemplateContent::OpenAi(parts) => parts.iter_mut().rev().find_map(|part| match part {
-            TemplateContentPart::Text { text } => Some(text),
+            TemplateContentPart::Text { text, .. } => Some(text),
             TemplateContentPart::Image
             | TemplateContentPart::Video
             | TemplateContentPart::Audio => None,
@@ -843,6 +851,36 @@ mod tests {
             rendered.prompt,
             Prompt::Text("a<audio><audio>b".to_string())
         );
+    }
+
+    /// Like Python, keys beyond `type` and `text` on a text part reach
+    /// OpenAI-format templates, as a translation template's language codes do;
+    /// string-format templates see only the text.
+    #[test]
+    fn text_part_extra_fields_reach_openai_format_templates() {
+        let request = sample_request(vec![ChatMessage::user(vec![ChatContentPart::Text {
+            text: "Hello".to_string(),
+            extra_fields: serde_json::json!({"source_lang_code": "en", "target_lang_code": "es"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }])]);
+
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{{ item.source_lang_code }}->{{ item.target_lang_code }}: {{ item.text }}{% endfor %}",
+            &request,
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+        assert_eq!(rendered.prompt, Prompt::Text("en->es: Hello".to_string()));
+
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &request,
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+        assert_eq!(rendered.prompt, Prompt::Text("Hello".to_string()));
     }
 
     #[test]

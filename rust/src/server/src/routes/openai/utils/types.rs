@@ -6,7 +6,7 @@ use std::slice;
 use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use vllm_chat::ChatTokenUsage;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -176,7 +176,13 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
 #[serde(tag = "type")]
 pub enum ContentPart {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        /// Keys beyond `type` and `text`, such as a translation template's
+        /// language codes, passed through to chat templates like Python.
+        #[serde(flatten)]
+        extra_fields: Map<String, Value>,
+    },
     #[serde(rename = "image_url")]
     ImageUrl {
         image_url: ImageUrl,
