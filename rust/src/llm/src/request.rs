@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -14,7 +14,7 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use crate::error::{Error, Result};
 use crate::request_metrics::current_unix_timestamp_secs;
 
-/// Tokenized decoder-only generate request accepted by [`crate::EngineCoreLlm`].
+/// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
 /// This is the first-stage Rust subset of the inputs that eventually flow into
 /// Python `AsyncLLM.generate()`. The boundary is intentionally above
@@ -23,7 +23,8 @@ use crate::request_metrics::current_unix_timestamp_secs;
 ///
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/protocol.py#L67-L84>
-#[derive(Debug, Clone, PartialEq)]
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateRequest {
     /// Unique ID of the request.
     pub request_id: String,

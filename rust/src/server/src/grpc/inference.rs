@@ -386,7 +386,7 @@ fn text_error_to_status(error: vllm_text::Error) -> Status {
     }
 }
 
-fn log_text_error(
+pub(super) fn log_text_error(
     request_span: &Span,
     started_at: Instant,
     phase: &'static str,
