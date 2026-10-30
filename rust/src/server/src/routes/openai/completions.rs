@@ -34,6 +34,7 @@ use super::utils::logprobs::{
     prompt_logprobs_to_maps, text_end_offset, text_len,
 };
 use super::utils::metrics::PerRequestMetrics;
+use super::utils::orca::attach_endpoint_load_metrics;
 use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
@@ -138,7 +139,9 @@ pub async fn completions(
             Err(error) => return error.into_response(),
         };
 
-        Json(response).into_response()
+        let mut response = Json(response).into_response();
+        attach_endpoint_load_metrics(&mut response, &headers, state.engine_core_client());
+        response
     }
 }
 
