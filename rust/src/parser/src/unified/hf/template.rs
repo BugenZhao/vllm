@@ -13,7 +13,7 @@ use regex_automata::meta::Regex;
 use serde_json::Value;
 
 use super::content::{ContentParser, TextArgs, compile_regex};
-use super::pattern::{Captures, Resolution, StreamingPattern};
+use super::pattern::{Captures, Resolution, StreamingPattern, exact_literals};
 use super::spec::{AnchorSpec, FieldSpec, TemplateSpec};
 use super::transform::{FieldTransform, Transform};
 use super::{Result, invalid, unsupported};
@@ -23,6 +23,9 @@ use super::{Result, invalid, unsupported};
 pub struct ResponseTemplate {
     /// Matches the start of the current assistant turn in the prompt.
     start_anchor: Regex,
+    /// The start anchor's alternatives when it matches only literals: what a
+    /// message starts after.
+    message_starts: Vec<String>,
     pub(super) regions: Vec<Region>,
     /// The field without an opener: the implicit-open / leftover sink.
     pub(super) implicit: Option<usize>,
@@ -155,15 +158,19 @@ impl ResponseTemplate {
         }
         let implicit = implicit_fields.first().map(|(index, _)| *index);
 
-        let start_anchor = match spec.start_anchor()? {
+        let (start_anchor, message_starts) = match spec.start_anchor()? {
             AnchorSpec::Literals(mut literals) => {
                 // Sort longest-first so alternation prefers the longer alternative when both could match.
                 literals.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
                 let alternation: Vec<_> =
                     literals.iter().map(|literal| regex_syntax::escape(literal)).collect();
-                compile_regex("response_template", &alternation.join("|"))?
+                let regex = compile_regex("response_template", &alternation.join("|"))?;
+                (regex, literals)
             }
-            AnchorSpec::Pattern(pattern) => compile_regex("response_template", pattern)?,
+            AnchorSpec::Pattern(pattern) => (
+                compile_regex("response_template", pattern)?,
+                exact_literals(pattern).unwrap_or_default(),
+            ),
         };
 
         let opens = regions.iter().enumerate().filter_map(|(region, spec)| {
@@ -184,6 +191,7 @@ impl ResponseTemplate {
 
         Ok(Self {
             start_anchor,
+            message_starts,
             regions,
             implicit,
             idle_watch,
@@ -214,6 +222,29 @@ impl ResponseTemplate {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    /// The rest of a literal closer of `region` that `text` stops partway into,
+    /// when the closer ends with a message start and only part of that start is
+    /// missing, such as `<|start|>assistant` of `<|end|><|start|>assistant`
+    /// after output cut at `<|end|>`: the region has ended, and only the next
+    /// message has not begun.
+    pub(super) fn closer_rest(&self, region: usize, text: &str) -> Option<&str> {
+        let Some(Boundary::Literals(closers)) = &self.regions[region].close else {
+            return None;
+        };
+        closers.iter().find_map(|closer| {
+            self.message_starts
+                .iter()
+                .filter(|start| closer.len() > start.len() && closer.ends_with(start.as_str()))
+                .find_map(|start| {
+                    ((closer.len() - start.len())..closer.len())
+                        .rev()
+                        .filter(|&cut| closer.is_char_boundary(cut))
+                        .find(|&cut| text.ends_with(&closer[..cut]))
+                        .map(|cut| &closer[cut..])
+                })
+        })
     }
 
     /// Return the start and end offsets of the last start-anchor match in

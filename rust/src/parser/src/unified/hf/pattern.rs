@@ -247,6 +247,29 @@ fn relax_assertions(hir: &Hir) -> Hir {
     }
 }
 
+/// The literals a pattern in Python `regex` syntax matches, if it matches only
+/// a finite set of non-empty literals.
+pub(super) fn exact_literals(pattern: &str) -> Option<Vec<String>> {
+    let hir = regex_syntax::ParserBuilder::new()
+        .dot_matches_new_line(true)
+        .build()
+        .parse(pattern)
+        .ok()?;
+    let seq = Extractor::new().kind(ExtractKind::Prefix).extract(&hir);
+    if !seq.is_exact() {
+        return None;
+    }
+    seq.literals()?
+        .iter()
+        .map(|literal| {
+            std::str::from_utf8(literal.as_bytes())
+                .ok()
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 /// Extract the finite set of non-empty literal prefixes starting every match.
 fn literal_prefixes(hir: &Hir) -> Option<Vec<String>> {
     let seq = Extractor::new().kind(ExtractKind::Prefix).extract(hir);
