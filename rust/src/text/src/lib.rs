@@ -54,6 +54,8 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Whether requests may set `trace_decode_token_ids`.
+    enable_trace_replay: bool,
     /// Backend that compiles every structured-output constraint.
     structured_outputs_backend: StructuredOutputBackend,
 }
@@ -65,6 +67,7 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            enable_trace_replay: false,
             structured_outputs_backend: StructuredOutputBackend::default(),
         }
     }
@@ -74,6 +77,12 @@ impl TextRequestProcessor {
         if let Some(max_logprobs) = max_logprobs {
             self.max_logprobs = max_logprobs;
         }
+        self
+    }
+
+    /// Allow requests to set `trace_decode_token_ids` (`--enable-trace-replay`).
+    fn with_trace_replay(mut self, enable_trace_replay: bool) -> Self {
+        self.enable_trace_replay = enable_trace_replay;
         self
     }
 
@@ -167,6 +176,7 @@ impl TextRequestProcessor {
             max_logprobs: self.max_logprobs,
             model_vocab_size: self.backend.model_vocab_size(),
             tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
+            enable_trace_replay: self.enable_trace_replay,
         };
 
         lower_text_request(
@@ -198,10 +208,18 @@ impl TextLlm {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.engine_core_client().max_model_len();
+        // A trace is replayed only by an engine started with
+        // `--enable-trace-replay`; any other engine samples instead.
+        let enable_trace_replay = llm
+            .engine_core_client()
+            .ready_responses()
+            .iter()
+            .all(|ready| ready.enable_trace_replay);
 
         Self {
             llm,
-            processor: TextRequestProcessor::new(backend, max_model_len),
+            processor: TextRequestProcessor::new(backend, max_model_len)
+                .with_trace_replay(enable_trace_replay),
         }
     }
 

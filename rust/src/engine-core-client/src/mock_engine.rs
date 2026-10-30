@@ -71,6 +71,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         kv_events_config: None,
         weight_transfer_backend: None,
         enable_sleep_mode: false,
+        enable_trace_replay: false,
         supports_draft_weight_updates: false,
         effective_attention_block_size: None,
         vllm_config: None,

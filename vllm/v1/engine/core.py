@@ -1968,6 +1968,7 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
+            enable_trace_replay=self.vllm_config.model_config.enable_trace_replay,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
                 if self.vllm_config.weight_transfer_config is not None

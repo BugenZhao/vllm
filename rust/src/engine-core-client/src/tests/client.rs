@@ -2978,6 +2978,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            trace_decode_token_ids: None,
             stream_interval: None,
         },
     );
@@ -3235,6 +3236,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         Some("nccl")
     );
     assert!(ready_response.enable_sleep_mode);
+    assert!(ready_response.enable_trace_replay);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
     assert_eq!(

@@ -19,6 +19,15 @@ pub enum SamplingParamsError {
          ({prompt_len}), inclusive, got {value}"
     )]
     RoutedExpertsPromptStartOutOfRange { value: u32, prompt_len: u32 },
+    #[error("trace_decode_token_ids must be a non-empty list.")]
+    EmptyTraceDecodeTokenIds,
+    #[error("trace_decode_token_ids is not supported with {feature}.")]
+    TraceReplayIncompatible { feature: &'static str },
+    #[error(
+        "trace_decode_token_ids is set but trace replay is not enabled. Start the engine \
+         with --enable-trace-replay to use it."
+    )]
+    TraceReplayNotEnabled,
 }
 
 fn validate_frequency_penalty(value: f32) -> Result<(), SamplingParamsError> {

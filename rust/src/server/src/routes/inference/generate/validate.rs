@@ -44,13 +44,6 @@ pub(crate) fn validate_request_compat(
         );
     }
 
-    if request.sampling_params.trace_decode_token_ids.is_some() {
-        bail_invalid_request!(
-            param = "trace_decode_token_ids",
-            "trace_decode_token_ids is not supported."
-        );
-    }
-
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -189,22 +182,6 @@ mod tests {
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
                 accepted,
                 "{sampling_params}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_trace_decode_token_ids() {
-        for (trace_decode_token_ids, accepted) in [(json!(null), true), (json!([7, 8]), false)] {
-            let request: GenerateRequest = serde_json::from_value(json!({
-                "token_ids": [11, 22],
-                "sampling_params": {"trace_decode_token_ids": trace_decode_token_ids},
-            }))
-            .expect("parse request");
-            assert_eq!(
-                validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok(),
-                accepted,
-                "{trace_decode_token_ids}"
             );
         }
     }

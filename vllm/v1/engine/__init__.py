@@ -122,6 +122,7 @@ class EngineCoreReadyResponse:
     kv_events_config: KVEventsConfig | None = None
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
+    enable_trace_replay: bool = False
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None

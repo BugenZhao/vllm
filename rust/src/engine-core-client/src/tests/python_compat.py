@@ -522,6 +522,7 @@ class EngineCoreReadyResponse:
     kv_events_config: KVEventsConfig | None = None
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
+    enable_trace_replay: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
@@ -547,6 +548,7 @@ ready_response = EngineCoreReadyResponse(
     max_loras=8,
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
+    enable_trace_replay=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
     kv_events_config=KVEventsConfig(

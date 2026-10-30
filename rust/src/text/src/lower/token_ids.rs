@@ -103,6 +103,18 @@ pub(crate) fn validate_prompt_token_ids(
     )
 }
 
+/// Validate that a replay trace stays within the model vocabulary.
+pub(crate) fn validate_trace_decode_token_ids(
+    token_ids: &[u32],
+    limits: &SamplingLimits,
+) -> Result<(), TokenIdsError> {
+    validate_param(
+        "trace_decode_token_ids",
+        token_ids.iter().copied(),
+        limits.model_vocab_size,
+    )
+}
+
 /// Validate that token IDs in text sampling parameters are within their
 /// parameter-specific vocabulary ranges.
 pub(crate) fn validate_vocab_range(

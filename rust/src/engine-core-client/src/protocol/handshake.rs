@@ -101,6 +101,10 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine was started with sleep mode enabled.
     #[serde(default)]
     pub enable_sleep_mode: bool,
+    /// Whether the engine was started with trace replay enabled
+    /// (`--enable-trace-replay`).
+    #[serde(default)]
+    pub enable_trace_replay: bool,
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
