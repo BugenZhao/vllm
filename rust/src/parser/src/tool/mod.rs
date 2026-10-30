@@ -205,6 +205,17 @@ pub trait ToolParser: Send {
         false
     }
 
+    /// Return whether tool calls carry markup that sets them apart from a
+    /// content answer.
+    ///
+    /// Formats whose calls are bare JSON return false: a JSON answer is
+    /// indistinguishable from a call, so with tool calling off
+    /// (`tool_choice=none`) their output stays content instead of being parsed
+    /// and dropped.
+    fn marks_calls(&self) -> bool {
+        true
+    }
+
     /// Return the tool strict level applied when the operator leaves
     /// `--tool-strict-level` unset.
     fn default_tool_strict_level(&self) -> ToolStrictLevel {

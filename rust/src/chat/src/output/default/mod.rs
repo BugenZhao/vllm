@@ -127,6 +127,19 @@ impl DefaultChatOutputProcessor {
                     model_id,
                     tool_call_parser,
                 )?)
+            } else if !request.tools().is_empty()
+                && let Some(parser_name) = tool_name
+            {
+                // With tool parsing off (`tool_choice=none`), a configured parser
+                // whose calls carry markup still parses them so that
+                // `max_tool_calls` drops them instead of leaking the markup into
+                // content, like Python.
+                Some(ToolParserFactory::global().create(
+                    parser_name,
+                    request.tools(),
+                    tokenizer.clone(),
+                )?)
+                .filter(|parser| parser.marks_calls())
             } else {
                 None
             };
@@ -373,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_choice_none_drops_tool_calls_parsed_by_unified_parsers() {
+    async fn tool_choice_none_drops_parsed_tool_calls() {
         let tools = vec![ChatTool {
             name: "search".to_string(),
             description: None,
@@ -381,27 +394,32 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        let run = async |tool_choice| {
+        let gemma4 = ParserSelection::Explicit("gemma4".to_string());
+        let gemma4_text = "Sure.<|tool_call>call:search{query:<|\"|>vllm<|\"|>}<tool_call|>";
+        let qwen3_coder = ParserSelection::Explicit("qwen3_coder".to_string());
+        let qwen3_coder_text = "Sure.<tool_call>\n<function=search>\n<parameter=query>\nvllm\n\
+                                </parameter>\n</function>\n</tool_call>";
+        let run = async |tool_parser: &ParserSelection,
+                         reasoning_parser: &ParserSelection,
+                         text: &str,
+                         tool_choice| {
             let mut request = ChatRequest {
                 tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
                     .unwrap(),
                 ..ChatRequest::for_test()
             };
-            let gemma4 = ParserSelection::Explicit("gemma4".to_string());
             let mut processor = DefaultChatOutputProcessor::new(
                 &mut request,
                 "other-model",
                 tokenizer(),
-                &gemma4,
-                &gemma4,
+                tool_parser,
+                reasoning_parser,
                 None,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
             let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
-                decoded: DecodedText::unattributed(
-                    "Sure.<|tool_call>call:search{query:<|\"|>vllm<|\"|>}<tool_call|>",
-                ),
+                decoded: DecodedText::unattributed(text),
                 sampled: SampledDelta::default(),
                 finished: Some(Box::new(Finished {
                     usage: vllm_llm::TokenUsage::default(),
@@ -423,15 +441,32 @@ mod tests {
             (message.text(), names)
         };
 
+        let llama3_json = ParserSelection::Explicit("llama3_json".to_string());
+        let llama3_json_text = r#"{"name":"search","parameters":{"query":"vllm"}}"#;
+        let none = ParserSelection::None;
+        let search = || vec!["search".to_string()];
+        for (tool_parser, reasoning_parser, text, auto_content, none_content) in [
+            // Python's parser engine parses a marked call and drops it: neither
+            // a tool call nor its markup reaches the response, for a unified
+            // parser and a split tool parser alike.
+            (&gemma4, &gemma4, gemma4_text, "Sure.", "Sure."),
+            (&qwen3_coder, &none, qwen3_coder_text, "Sure.", "Sure."),
+            // A bare JSON call reads the same as a JSON answer, which stays.
+            (&llama3_json, &none, llama3_json_text, "", llama3_json_text),
+        ] {
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, ChatToolChoice::Auto).await,
+                (auto_content.to_string(), search())
+            );
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, ChatToolChoice::None).await,
+                (none_content.to_string(), vec![])
+            );
+        }
+        // Without a configured tool parser, the markup stays content.
         assert_eq!(
-            run(ChatToolChoice::Auto).await,
-            ("Sure.".to_string(), vec!["search".to_string()])
-        );
-        // Python's parser engine parses the call and drops it: neither a tool
-        // call nor its markup reaches the response.
-        assert_eq!(
-            run(ChatToolChoice::None).await,
-            ("Sure.".to_string(), vec![])
+            run(&none, &none, qwen3_coder_text, ChatToolChoice::None).await,
+            (qwen3_coder_text.to_string(), vec![])
         );
     }
 
@@ -458,15 +493,10 @@ mod tests {
             defer_loading: None,
         }];
         let schema = serde_json::json!({"type": "object"});
-        let build = |structured_outputs| {
+        let build = |tool_choice, structured_outputs| {
             let mut request = ChatRequest {
-                tool_context: ResolvedToolContext::new(
-                    &[],
-                    tools.clone(),
-                    Some(ChatToolChoice::Auto),
-                    true,
-                )
-                .unwrap(),
+                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
+                    .unwrap(),
                 ..ChatRequest::for_test()
             };
             request.sampling_params.structured_outputs = structured_outputs;
@@ -485,12 +515,23 @@ mod tests {
 
         // Non-strict `auto` alone needs no grammar; with an answer constraint
         // the grammar holds the answer or a call.
-        assert!(build(None).is_none());
-        let built = build(Some(StructuredOutputsParams::json(schema.clone()))).unwrap();
+        assert!(build(ChatToolChoice::Auto, None).is_none());
+        let json = || Some(StructuredOutputsParams::json(schema.clone()));
+        let built = build(ChatToolChoice::Auto, json()).unwrap();
         let Format::Or(branches) = built.format else {
             panic!("expected the calls or the answer, got {:?}", built.format);
         };
-        assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
+        assert_eq!(
+            branches.elements.last(),
+            Some(&Format::json_schema(schema.clone()))
+        );
+        // `none` builds no calls: the grammar is the answer alone.
+        assert_eq!(
+            build(ChatToolChoice::None, json()),
+            Some(BuiltOutputGrammar::final_output_only(Format::json_schema(
+                schema
+            )))
+        );
     }
 
     #[test]

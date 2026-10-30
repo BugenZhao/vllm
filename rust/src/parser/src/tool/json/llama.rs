@@ -139,6 +139,11 @@ impl ToolParser for Llama3JsonToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    fn marks_calls(&self) -> bool {
+        // Calls are bare JSON objects, the same text as a JSON answer.
+        false
+    }
+
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         Some(xgrammar_structural_tag::Model::Llama.builder())
     }
