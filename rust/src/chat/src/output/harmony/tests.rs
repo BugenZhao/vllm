@@ -3,9 +3,13 @@
 
 use std::sync::Arc;
 
+use expect_test::expect;
 use futures::executor::block_on;
 use futures::{TryStreamExt as _, stream};
 use openai_harmony::chat::{Message, Role};
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+use vllm_parser::output_grammar::GrammarCoverage;
+use vllm_parser::output_grammar::test_utils::outline;
 use vllm_text::output::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedText, DecodedTextEvent, Finished, SampledDelta,
 };
@@ -116,7 +120,7 @@ fn request_with_tools() -> ChatRequest {
 fn interrupted_final_message_is_preserved() {
     let tokens = completion_tokens(&[text_message("final", "hello")]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens[..tokens.len() - 1].to_vec(), None, Some(finished())),
@@ -153,7 +157,7 @@ fn eos_flush_preserves_trailing_replacement_text() {
     tokens.push(u32::MAX);
 
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens, None, Some(finished())),
@@ -170,7 +174,7 @@ fn eos_flush_preserves_trailing_replacement_text() {
 fn interrupted_analysis_message_is_preserved() {
     let tokens = completion_tokens(&[text_message("analysis", "think")]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens[..tokens.len() - 1].to_vec(), None, Some(finished())),
@@ -210,7 +214,7 @@ fn commentary_preamble_is_visible_but_commentary_tool_payload_is_not() {
         tool_message("get_weather", r#"{"city":"Paris"}"#, "commentary"),
     ]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
+        HarmonyChatOutputProcessor::new(&request_with_tools(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens, None, Some(finished())),
@@ -234,7 +238,7 @@ fn multiple_messages_get_newline_separators() {
         text_message("final", "second answer"),
     ]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens, None, Some(finished())),
@@ -260,7 +264,7 @@ fn tool_calls_stream_arguments_and_finish_with_local_id_shape() {
     )]);
     let midpoint = tokens.len() / 2;
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
+        HarmonyChatOutputProcessor::new(&request_with_tools(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens[..midpoint].to_vec(), None, None),
@@ -325,7 +329,7 @@ fn reasoning_tokens_count_analysis_and_tool_call_content() {
         tool_message("get_weather", arguments, "commentary"),
     ]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
+        HarmonyChatOutputProcessor::new(&request_with_tools(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens, None, Some(finished())),
@@ -350,7 +354,7 @@ fn reasoning_tokens_exclude_final_and_preamble_content() {
         text_message("final", "Hello"),
     ]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(tokens, None, Some(finished())),
@@ -372,7 +376,7 @@ fn stream_one_token_per_update(messages: &[Message]) -> Vec<ChatEvent> {
         ));
     }
     block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         decoded,
     ))
 }
@@ -415,7 +419,7 @@ fn reasoning_tokens_of_a_split_character_join_its_delta() {
 fn semantic_events_precede_same_update_logprobs() {
     let tokens = completion_tokens(&[text_message("final", "hello")]);
     let events = block_on(collect_events(
-        HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
+        HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap(),
         vec![
             decoded_start(),
             decoded_tokens(
@@ -463,5 +467,52 @@ fn rejects_generic_parser_overrides() {
 #[test]
 fn allows_auto_auto_only() {
     validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::Auto).unwrap();
-    let _ = HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap();
+    let _ = HarmonyChatOutputProcessor::new(&ChatRequest::for_test(), None).unwrap();
+}
+
+#[test]
+fn output_grammar_follows_request_tools_and_answer() {
+    let build = |request: &ChatRequest, tool_strict_level| {
+        HarmonyChatOutputProcessor::new(request, tool_strict_level)
+            .unwrap()
+            .build_output_grammar()
+            .unwrap()
+    };
+
+    // Non-strict `auto` tools stay unconstrained unless the server floor asks.
+    assert_eq!(build(&request_with_tools(), None), None);
+    let grammar = build(&request_with_tools(), Some(ToolStrictLevel::Function)).unwrap();
+    assert_eq!(grammar.coverage, GrammarCoverage::FromTokenZero);
+
+    // A response format goes into the final message, next to the calls `auto` allows.
+    let mut request = request_with_tools();
+    request.sampling_params.structured_outputs = Some(StructuredOutputsParams::json(
+        serde_json::json!({ "type": "object" }),
+    ));
+    let grammar = build(&request, None).unwrap();
+    assert_eq!(grammar.coverage, GrammarCoverage::FromTokenZero);
+    expect![[r#"
+        or
+          sequence
+            star
+              sequence
+                tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+                `<|start|>assistant`
+            sequence
+              `<|channel|>final<|message|>`
+              json(object) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+          sequence
+            star
+              or
+                sequence
+                  tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+                  `<|start|>assistant`
+                sequence
+                  tag `<|channel|>commentary<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+                  `<|start|>assistant`
+            sequence
+              `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>`
+              json(any) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+    "#]]
+    .assert_eq(&outline(&grammar.format));
 }

@@ -1,0 +1,85 @@
+# auto (from_token_zero)
+or
+  sequence
+    star
+      sequence
+        tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+    sequence
+      `<|channel|>final<|message|>`
+      text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+  sequence
+    star
+      or
+        sequence
+          tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+          `<|start|>assistant`
+        sequence
+          tag `<|channel|>commentary<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+          `<|start|>assistant`
+    or
+      sequence
+        `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>`
+        json({ location: string }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+      sequence
+        `<|channel|>commentary to=functions.add <|constrain|>json<|message|>`
+        json({ y: number, x: number, items: string[] }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+
+# required (from_token_zero)
+sequence
+  star
+    or
+      sequence
+        tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+      sequence
+        tag `<|channel|>commentary<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+  or
+    sequence
+      `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>`
+      json({ location: string }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+    sequence
+      `<|channel|>commentary to=functions.add <|constrain|>json<|message|>`
+      json({ y: number, x: number, items: string[] }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+
+# named (from_token_zero)
+sequence
+  star
+    or
+      sequence
+        tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+      sequence
+        tag `<|channel|>commentary<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+  sequence
+    `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>`
+    json({ location: string }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+
+# auto_schema_calls (from_token_zero)
+or
+  sequence
+    star
+      sequence
+        tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+        `<|start|>assistant`
+    sequence
+      `<|channel|>final<|message|>`
+      json({ answer: string }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+  sequence
+    star
+      or
+        sequence
+          tag `<|channel|>analysis<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+          `<|start|>assistant`
+        sequence
+          tag `<|channel|>commentary<|message|>` text excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`] `<|end|>`
+          `<|start|>assistant`
+    or
+      sequence
+        `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>`
+        json({ location: string }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]
+      sequence
+        `<|channel|>commentary to=functions.add <|constrain|>json<|message|>`
+        json({ y: number, x: number, items: string[] }) excluding [`<|start|>`, `<|end|>`, `<|channel|>`, `<|constrain|>`, `<|message|>`]

@@ -1,0 +1,722 @@
+{
+  "model_id": "openai/gpt-oss-20b",
+  "vocab_size": 201088,
+  "all_stop_token_ids": [199999, 200002, 200012],
+  "grammars": [
+    {
+      "grammar": {
+        "format": {
+          "type": "or",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "star",
+                  "content": {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>analysis<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "const_string",
+                      "value": "<|channel|>final<|message|>"
+                    },
+                    {
+                      "type": "any_text",
+                      "excludes": [
+                        "<|start|>",
+                        "<|end|>",
+                        "<|channel|>",
+                        "<|constrain|>",
+                        "<|message|>"
+                      ],
+                      "max_tokens": null,
+                      "max_chars": null
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "star",
+                  "content": {
+                    "type": "or",
+                    "elements": [
+                      {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "tag",
+                            "begin": "<|channel|>analysis<|message|>",
+                            "content": {
+                              "type": "any_text",
+                              "excludes": [
+                                "<|start|>",
+                                "<|end|>",
+                                "<|channel|>",
+                                "<|constrain|>",
+                                "<|message|>"
+                              ],
+                              "max_tokens": null,
+                              "max_chars": null
+                            },
+                            "end": "<|end|>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "<|start|>assistant"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "tag",
+                            "begin": "<|channel|>commentary<|message|>",
+                            "content": {
+                              "type": "any_text",
+                              "excludes": [
+                                "<|start|>",
+                                "<|end|>",
+                                "<|channel|>",
+                                "<|constrain|>",
+                                "<|message|>"
+                              ],
+                              "max_tokens": null,
+                              "max_chars": null
+                            },
+                            "end": "<|end|>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "<|start|>assistant"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "or",
+                  "elements": [
+                    {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "const_string",
+                          "value": "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+                        },
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "location": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "location"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "const_string",
+                          "value": "<|channel|>commentary to=functions.add <|constrain|>json<|message|>"
+                        },
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "y": {
+                                "type": "number"
+                              },
+                              "x": {
+                                "type": "number"
+                              },
+                              "items": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "required": [
+                              "y",
+                              "x",
+                              "items"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "auto": {
+          "completion": "<|channel|>commentary<|message|>I will call the tools.<|end|><|start|>assistant<|channel|>analysis<|message|>Need call the weather and add tools.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Shanghai\"}",
+          "generation_token_ids": [200005, 12606, 815, 200008, 40, 738, 2421, 290, 8437, 13, 200007, 200006, 173781, 200005, 35644, 200008, 23483, 2421, 290, 11122, 326, 1147, 8437, 13, 200007, 200006, 173781, 200005, 12606, 815, 316, 28, 44580, 775, 170154, 220, 200003, 4108, 200008, 10848, 7693, 7534, 145300, 18583, 200012]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "star",
+              "content": {
+                "type": "or",
+                "elements": [
+                  {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>analysis<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>commentary<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "type": "or",
+              "elements": [
+                {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "const_string",
+                      "value": "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+                    },
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "location": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "location"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": [
+                        "<|start|>",
+                        "<|end|>",
+                        "<|channel|>",
+                        "<|constrain|>",
+                        "<|message|>"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "const_string",
+                      "value": "<|channel|>commentary to=functions.add <|constrain|>json<|message|>"
+                    },
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "y": {
+                            "type": "number"
+                          },
+                          "x": {
+                            "type": "number"
+                          },
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "y",
+                          "x",
+                          "items"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": [
+                        "<|start|>",
+                        "<|end|>",
+                        "<|channel|>",
+                        "<|constrain|>",
+                        "<|message|>"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "required": {
+          "completion": "<|channel|>analysis<|message|>Need call the weather and add tools.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Shanghai\"}",
+          "generation_token_ids": [200005, 35644, 200008, 23483, 2421, 290, 11122, 326, 1147, 8437, 13, 200007, 200006, 173781, 200005, 12606, 815, 316, 28, 44580, 775, 170154, 220, 200003, 4108, 200008, 10848, 7693, 7534, 145300, 18583, 200012]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "star",
+              "content": {
+                "type": "or",
+                "elements": [
+                  {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>analysis<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>commentary<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+                },
+                {
+                  "type": "json_schema",
+                  "json_schema": {
+                    "type": "object",
+                    "properties": {
+                      "location": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "location"
+                    ]
+                  },
+                  "style": "json",
+                  "any_order": false,
+                  "max_whitespace_cnt": null,
+                  "excludes": [
+                    "<|start|>",
+                    "<|end|>",
+                    "<|channel|>",
+                    "<|constrain|>",
+                    "<|message|>"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "named": {
+          "completion": "<|channel|>analysis<|message|>Need call the weather and add tools.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Shanghai\"}",
+          "generation_token_ids": [200005, 35644, 200008, 23483, 2421, 290, 11122, 326, 1147, 8437, 13, 200007, 200006, 173781, 200005, 12606, 815, 316, 28, 44580, 775, 170154, 220, 200003, 4108, 200008, 10848, 7693, 7534, 145300, 18583, 200012]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "or",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "star",
+                  "content": {
+                    "type": "sequence",
+                    "elements": [
+                      {
+                        "type": "tag",
+                        "begin": "<|channel|>analysis<|message|>",
+                        "content": {
+                          "type": "any_text",
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ],
+                          "max_tokens": null,
+                          "max_chars": null
+                        },
+                        "end": "<|end|>"
+                      },
+                      {
+                        "type": "const_string",
+                        "value": "<|start|>assistant"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "const_string",
+                      "value": "<|channel|>final<|message|>"
+                    },
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "answer": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "answer"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": [
+                        "<|start|>",
+                        "<|end|>",
+                        "<|channel|>",
+                        "<|constrain|>",
+                        "<|message|>"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "star",
+                  "content": {
+                    "type": "or",
+                    "elements": [
+                      {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "tag",
+                            "begin": "<|channel|>analysis<|message|>",
+                            "content": {
+                              "type": "any_text",
+                              "excludes": [
+                                "<|start|>",
+                                "<|end|>",
+                                "<|channel|>",
+                                "<|constrain|>",
+                                "<|message|>"
+                              ],
+                              "max_tokens": null,
+                              "max_chars": null
+                            },
+                            "end": "<|end|>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "<|start|>assistant"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "sequence",
+                        "elements": [
+                          {
+                            "type": "tag",
+                            "begin": "<|channel|>commentary<|message|>",
+                            "content": {
+                              "type": "any_text",
+                              "excludes": [
+                                "<|start|>",
+                                "<|end|>",
+                                "<|channel|>",
+                                "<|constrain|>",
+                                "<|message|>"
+                              ],
+                              "max_tokens": null,
+                              "max_chars": null
+                            },
+                            "end": "<|end|>"
+                          },
+                          {
+                            "type": "const_string",
+                            "value": "<|start|>assistant"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "or",
+                  "elements": [
+                    {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "const_string",
+                          "value": "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+                        },
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "location": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "location"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "const_string",
+                          "value": "<|channel|>commentary to=functions.add <|constrain|>json<|message|>"
+                        },
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "y": {
+                                "type": "number"
+                              },
+                              "x": {
+                                "type": "number"
+                              },
+                              "items": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "required": [
+                              "y",
+                              "x",
+                              "items"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": [
+                            "<|start|>",
+                            "<|end|>",
+                            "<|channel|>",
+                            "<|constrain|>",
+                            "<|message|>"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "auto_schema_calls": {
+          "completion": "<|channel|>analysis<|message|>Need call the weather and add tools.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Shanghai\"}",
+          "generation_token_ids": [200005, 35644, 200008, 23483, 2421, 290, 11122, 326, 1147, 8437, 13, 200007, 200006, 173781, 200005, 12606, 815, 316, 28, 44580, 775, 170154, 220, 200003, 4108, 200008, 10848, 7693, 7534, 145300, 18583, 200012]
+        }
+      }
+    }
+  ]
+}

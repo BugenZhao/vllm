@@ -168,7 +168,10 @@ impl ChatBackend for HfChatBackend {
     ) -> Result<DynChatOutputProcessor> {
         if self.model_type == "gpt_oss" {
             validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
-            return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
+            return Ok(Box::new(HarmonyChatOutputProcessor::new(
+                request,
+                options.tool_strict_level,
+            )?));
         }
 
         Ok(Box::new(
