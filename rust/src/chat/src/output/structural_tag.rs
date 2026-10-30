@@ -22,6 +22,7 @@ use crate::{Error, Result};
 /// prompt is tokenized.
 ///
 /// [`ChatOutputProcessor::build_output_grammar`]: super::ChatOutputProcessor::build_output_grammar
+#[derive(Debug)]
 pub(crate) struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
