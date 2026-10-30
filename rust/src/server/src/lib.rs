@@ -56,9 +56,9 @@ use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
-use crate::routes::build_router;
+pub use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
-use crate::state::AppState;
+pub use crate::state::AppState;
 
 /// How often the server PINGs an idle gRPC connection to reap a dead peer;
 /// tonic enables no keepalive by default. 2h matches the gRPC-core default.
