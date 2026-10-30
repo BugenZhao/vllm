@@ -11,7 +11,8 @@ pub(crate) mod token_ids;
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs, validate_prompt_logprob_start};
 use sampling::{SamplingParamsError, validate_resolved_sampling_params};
 use token_ids::{
-    TokenIdsError, max_num_bad_words, validate_prompt_token_ids, validate_vocab_range,
+    TokenIdsError, max_num_bad_words, validate_prompt_token_ids, validate_trace_decode_token_ids,
+    validate_vocab_range,
 };
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -107,6 +108,7 @@ pub fn lower_sampling_params(
     prompt_len: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Result<EngineCoreSamplingParams> {
+    validate_trace_replay(&sampling_params, &sampling_limits)?;
     let SamplingParams {
         temperature,
         watermarking,
@@ -126,7 +128,7 @@ pub fn lower_sampling_params(
         repetition_penalty,
         repetition_detection,
         stop_token_ids,
-        ignore_eos,
+        mut ignore_eos,
         logit_bias,
         allowed_token_ids,
         bad_words,
@@ -135,6 +137,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         routed_experts_prompt_start,
+        mut trace_decode_token_ids,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -177,17 +180,25 @@ pub fn lower_sampling_params(
     let repetition_penalty = repetition_penalty.or(default_repetition_penalty).unwrap_or(1.0);
     let presence_penalty = presence_penalty.or(default_presence_penalty).unwrap_or(0.0);
     let frequency_penalty = frequency_penalty.or(default_frequency_penalty).unwrap_or(0.0);
-    let max_tokens = resolve_max_tokens(
+    let requested_max_tokens = max_tokens;
+    let mut max_tokens = resolve_max_tokens(
         max_tokens,
         default_max_tokens,
         sampling_limits.max_model_len,
         prompt_len,
     )?;
-    let min_tokens = min_tokens.unwrap_or(0);
-    if min_tokens > max_tokens {
+    let mut min_tokens = min_tokens.unwrap_or(0);
+    // Replay drops `min_tokens` below, so like Python's `_verify_args` it is
+    // only bounded by an explicit `max_tokens`, not the context-clamped one.
+    let min_tokens_bound = if trace_decode_token_ids.is_some() {
+        requested_max_tokens.unwrap_or(u32::MAX)
+    } else {
+        max_tokens
+    };
+    if min_tokens > min_tokens_bound {
         return Err(Error::MinTokensExceedsMaxTokens {
             min_tokens,
-            max_tokens,
+            max_tokens: min_tokens_bound,
         });
     }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
@@ -203,6 +214,22 @@ pub fn lower_sampling_params(
         merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
     }
 
+    // Like Python's `InputProcessor._normalize_trace_replay_params`: replay the
+    // trace to its end within the context window, applied after the
+    // generation-config EOS so that no stop token ends replay early. Replayed
+    // tokens are not sampled, so like Python they are never watermarked.
+    let mut watermarking = watermarking.unwrap_or(true);
+    if let Some(trace) = trace_decode_token_ids.as_mut() {
+        let max_trace_len = sampling_limits.max_model_len.saturating_sub(prompt_len).max(1);
+        trace.truncate(max_trace_len as usize);
+        max_tokens = max_tokens.min(trace.len() as u32);
+        min_tokens = 0;
+        ignore_eos = true;
+        watermarking = false;
+        stop_token_ids.clear();
+        all_stop_token_ids.clear();
+    }
+
     let mut bad_words_token_ids = bad_words_token_ids.unwrap_or_default();
     if let Some(tokenized) = tokenize_bad_words(bad_words.as_deref(), tokenizer)? {
         bad_words_token_ids.extend(tokenized);
@@ -210,7 +237,7 @@ pub fn lower_sampling_params(
 
     let params = EngineCoreSamplingParams {
         temperature,
-        watermarking: watermarking.unwrap_or(true),
+        watermarking,
         top_p,
         top_k,
         seed,
@@ -250,11 +277,56 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start,
+        trace_decode_token_ids,
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
     Ok(params)
+}
+
+/// Validate `trace_decode_token_ids` like Python's
+/// `SamplingParams._validate_trace_replay`, followed by the
+/// `--enable-trace-replay` gate of `InputProcessor`.
+///
+/// Python lists the features below as incompatible with replay, whose worker
+/// overwrites each sampled token with the trace token.
+fn validate_trace_replay(params: &SamplingParams, limits: &SamplingLimits) -> Result<()> {
+    let Some(trace) = params.trace_decode_token_ids.as_deref() else {
+        return Ok(());
+    };
+    if trace.is_empty() {
+        return Err(SamplingParamsError::EmptyTraceDecodeTokenIds.into());
+    }
+
+    let has_bad_words = params.bad_words.as_ref().is_some_and(|words| !words.is_empty())
+        || params.bad_words_token_ids.as_ref().is_some_and(|ids| !ids.is_empty());
+    let incompatible = [
+        ("prompt_logprobs", params.prompt_logprobs.is_some()),
+        (
+            "prompt_logprob_token_ids",
+            params.prompt_logprob_token_ids.is_some(),
+        ),
+        ("structured outputs", params.structured_outputs.is_some()),
+        (
+            "repetition_detection",
+            params.repetition_detection.as_ref().is_some_and(|params| !params.is_disabled()),
+        ),
+        (
+            "thinking_token_budget",
+            normalize_thinking_token_budget(params.thinking_token_budget)?.is_some(),
+        ),
+        ("bad_words", has_bad_words),
+    ];
+    if let Some((feature, _)) = incompatible.into_iter().find(|(_, set)| *set) {
+        return Err(SamplingParamsError::TraceReplayIncompatible { feature }.into());
+    }
+    validate_trace_decode_token_ids(trace, limits)?;
+
+    if !limits.enable_trace_replay {
+        return Err(SamplingParamsError::TraceReplayNotEnabled.into());
+    }
+    Ok(())
 }
 
 /// Normalize the user-facing `thinking_token_budget` into the engine value.
@@ -455,6 +527,7 @@ mod tests {
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
             model_vocab_size: 1000,
             tokenizer_vocab_size: 2000,
+            enable_trace_replay: false,
         }
     }
 
@@ -481,6 +554,175 @@ mod tests {
             3,
             &stub_tokenizer(),
         )
+    }
+
+    #[test]
+    fn lower_text_request_normalizes_trace_replay_like_python() {
+        let mut request = sample_request();
+        request.sampling_params = SamplingParams {
+            max_tokens: Some(16),
+            // Above the 4 tokens left in the context window, but below the
+            // explicit `max_tokens`, so Python accepts it and replay drops it.
+            min_tokens: Some(10),
+            stop_token_ids: Some(vec![42]),
+            trace_decode_token_ids: Some(vec![5, 6, 7, 8, 9]),
+            ..Default::default()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            SamplingLimits {
+                max_model_len: 7,
+                enable_trace_replay: true,
+                ..sample_sampling_limits()
+            },
+            StructuredOutputBackend::Xgrammar,
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        // The trace is cut to the 4 tokens left in the context window, decoding
+        // stops exactly at its end, no EOS or stop token can end it early, and
+        // nothing is watermarked.
+        let params = prepared.generate_request.sampling_params;
+        assert_eq!(params.trace_decode_token_ids, Some(vec![5, 6, 7, 8]));
+        assert_eq!(params.max_tokens, 4);
+        assert_eq!(params.min_tokens, 0);
+        assert_eq!(params.eos_token_id, None);
+        assert!(params.stop_token_ids.is_empty());
+        assert!(params.all_stop_token_ids.is_empty());
+        assert!(!params.watermarking);
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_trace_replay() {
+        let enabled = SamplingLimits {
+            enable_trace_replay: true,
+            ..sample_sampling_limits()
+        };
+        let lower = |params: SamplingParams, limits: SamplingLimits| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    trace_decode_token_ids: params.trace_decode_token_ids.or(Some(vec![7, 8])),
+                    ..params
+                },
+                limits,
+            )
+            .map(|params| params.trace_decode_token_ids)
+            .map_err(|error| error.to_report_string())
+        };
+
+        assert_eq!(
+            lower(SamplingParams::default(), enabled),
+            Ok(Some(vec![7, 8]))
+        );
+        // `-1` is "no budget" and a zero pattern size disables repetition
+        // detection, so neither is a conflicting feature.
+        for params in [
+            SamplingParams {
+                thinking_token_budget: Some(-1),
+                ..Default::default()
+            },
+            SamplingParams {
+                repetition_detection: Some(RepetitionDetectionParams {
+                    max_pattern_size: 0,
+                    min_pattern_size: 0,
+                    min_count: 0,
+                }),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(lower(params, enabled), Ok(Some(vec![7, 8])));
+        }
+
+        let errors = [
+            (SamplingParams::default(), sample_sampling_limits()),
+            (
+                SamplingParams {
+                    trace_decode_token_ids: Some(vec![]),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    trace_decode_token_ids: Some(vec![7, 1000]),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    prompt_logprobs: Some(1),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    prompt_logprob_token_ids: Some(vec![vec![1]]),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    repetition_detection: Some(RepetitionDetectionParams {
+                        max_pattern_size: 4,
+                        min_pattern_size: 1,
+                        min_count: 2,
+                    }),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    min_tokens: Some(4),
+                    max_tokens: Some(3),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    structured_outputs: Some(StructuredOutputsParams::regex("a+")),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    thinking_token_budget: Some(16),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+            (
+                SamplingParams {
+                    bad_words: Some(vec!["a".to_string()]),
+                    ..Default::default()
+                },
+                enabled,
+            ),
+        ]
+        .map(|(params, limits)| lower(params, limits).unwrap_err());
+        expect_test::expect![[r#"
+            [
+                "trace_decode_token_ids is set but trace replay is not enabled. Start the engine with --enable-trace-replay to use it.",
+                "trace_decode_token_ids must be a non-empty list.",
+                "token_id(s) [1000] in trace_decode_token_ids are out of vocabulary. Vocabulary size: 1000",
+                "trace_decode_token_ids is not supported with prompt_logprobs.",
+                "trace_decode_token_ids is not supported with prompt_logprob_token_ids.",
+                "trace_decode_token_ids is not supported with repetition_detection.",
+                "`min_tokens` must be less than or equal to `max_tokens`, got min_tokens=4, max_tokens=3",
+                "trace_decode_token_ids is not supported with structured outputs.",
+                "trace_decode_token_ids is not supported with thinking_token_budget.",
+                "trace_decode_token_ids is not supported with bad_words.",
+            ]
+        "#]].assert_debug_eq(&errors);
     }
 
     #[test]
@@ -832,6 +1074,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]
@@ -887,6 +1130,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]
@@ -1026,6 +1270,7 @@ mod tests {
                 max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
                 model_vocab_size: backend.model_vocab_size(),
                 tokenizer_vocab_size: backend.tokenizer_vocab_size(),
+                enable_trace_replay: false,
             },
             StructuredOutputBackend::Xgrammar,
             &stub_tokenizer(),
@@ -1070,6 +1315,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]
@@ -1145,6 +1391,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]
@@ -1215,6 +1462,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]
@@ -1681,6 +1929,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                trace_decode_token_ids: None,
                 stream_interval: None,
             }
         "#]]

@@ -151,6 +151,9 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
+    /// Decode token IDs to replay instead of sampling, while the engine still
+    /// computes real logprobs. Requires `--enable-trace-replay`.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -195,6 +198,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
+            trace_decode_token_ids: None,
             vllm_xargs: None,
             stream_interval: None,
         }

@@ -47,7 +47,7 @@ use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{
-    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
+    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode,
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
@@ -6157,6 +6157,159 @@ async fn raw_generate_rejects_parallel_sampling() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_rejects_trace_replay_unless_every_engine_enables_it() {
+    // Only one of the two data-parallel engines replays traces; the other
+    // would silently sample, so the frontend must reject before submitting.
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let ready_0 = EngineCoreReadyResponse {
+        enable_trace_replay: true,
+        ..default_ready_response()
+    };
+    let ready_1 = EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        ..default_ready_response()
+    };
+    let engine_tasks =
+        [(b"engine-0", ready_0), (b"engine-1", ready_1)].map(|(engine_id, ready)| {
+            MockEngineTask::new(spawn_mock_engine_task_with_ready(
+                handshake_address.clone(),
+                engine_id.to_vec(),
+                ready,
+                |_dealer, _push| boxed_test_future(async {}),
+            ))
+        });
+
+    let mut config = EngineCoreClientConfig::new_single(handshake_address)
+        .with_model_name("test-model")
+        .with_local_input_output_addresses(Some(ipc.input_endpoint()), Some(ipc.output_endpoint()));
+    let TransportMode::HandshakeOwner { engine_count, .. } = &mut config.transport_mode else {
+        unreachable!("new_single owns the handshake");
+    };
+    *engine_count = 2;
+    let client = EngineCoreClient::connect(config).await.expect("connect client");
+    let backend = Arc::new(FakeChatBackend::new());
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            ChatLlm::new(TextLlm::new(test_llm(client), backend.clone()), backend),
+        )),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "sampling_params": {"trace_decode_token_ids": [33, 44]}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json["error"]["message"],
+        "trace_decode_token_ids is set but trace replay is not enabled. Start the engine with \
+         --enable-trace-replay to use it."
+    );
+    for engine_task in engine_tasks {
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_forwards_trace_replay_when_enabled() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-raw-generate-trace-replay".to_vec();
+    let ready = EngineCoreReadyResponse {
+        enable_trace_replay: true,
+        ..default_ready_response()
+    };
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.clone(),
+        ready,
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(params.trace_decode_token_ids, Some(vec![33, 44]));
+                assert_eq!(params.max_tokens, 2);
+                assert_eq!(params.eos_token_id, None);
+
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let backend = Arc::new(FakeChatBackend::new());
+    let text = TextLlm::new(test_llm(client), backend.clone());
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            ChatLlm::new(text, backend),
+        )),
+        true,
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "stream": false,
+                        "sampling_params": {"trace_decode_token_ids": [33, 44]}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

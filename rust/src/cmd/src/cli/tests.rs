@@ -761,6 +761,33 @@ fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
 }
 
 #[test]
+fn serve_args_forward_enable_trace_replay_to_managed_engine() {
+    // The engine reports trace replay in its ready response, so the flag must
+    // reach it rather than being consumed by the Rust CLI.
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-trace-replay",
+        "--max-num-seqs",
+        "8",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--enable-trace-replay",
+            "--max-num-seqs",
+            "8",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
 fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
