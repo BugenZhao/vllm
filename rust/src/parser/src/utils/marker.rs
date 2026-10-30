@@ -28,7 +28,7 @@ use std::ops::Range;
 
 use auto_impl::auto_impl;
 use educe::Educe;
-use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
+use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution, Tokenizer};
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::stream::{
@@ -292,6 +292,18 @@ impl Marker {
     /// A marker beginning with the special token `token`.
     pub fn special(token: &SpecialToken) -> Self {
         Self::text(String::new()).then_special(token)
+    }
+
+    /// A marker spelled `text`, guarded by the dedicated token of `tokenizer`
+    /// with that spelling, or matched by spelling when it has none.
+    pub fn token_or_text(tokenizer: &dyn Tokenizer, text: &str) -> Self {
+        match tokenizer.token_to_id(text) {
+            Some(id) => Self::special(&SpecialToken {
+                text: text.to_string(),
+                id,
+            }),
+            None => Self::text(text),
+        }
     }
 
     /// Append ordinary text, matched by spelling.
