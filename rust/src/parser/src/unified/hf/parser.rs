@@ -728,6 +728,14 @@ impl UnifiedParser for HfUnifiedParser {
 
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
         let mut output = UnifiedParserOutput::default();
+        // Output that stops inside a closer ending with the next message's start,
+        // such as at `max_tokens`, has ended its region: complete the closer.
+        if let HfMode::Implicit(occurrence) | HfMode::Explicit(occurrence) = &self.mode
+            && occurrence.opened
+            && let Some(rest) = self.template.closer_rest(occurrence.region, &self.buffer.text)
+        {
+            self.buffer.append(DecodedText::unattributed(rest.to_string()));
+        }
         self.drive(&mut output, Phase::Eof)?;
         // Trailing zero-width tokens carry no text for the step loop to consume.
         let rest = self.buffer.take();
