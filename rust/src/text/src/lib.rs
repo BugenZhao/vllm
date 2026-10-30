@@ -157,7 +157,7 @@ impl TextRequestProcessor {
     pub fn prepare(&self, mut request: TextRequest) -> Result<PreparedTextRequest> {
         // Without a tokenizer the output stays token IDs only, which also
         // rejects stop strings in `validate`.
-        if !self.backend.has_tokenizer() {
+        if !self.has_tokenizer() {
             request.decode_options.detokenize = false;
         }
         request.validate()?;
