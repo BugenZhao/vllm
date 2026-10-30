@@ -69,6 +69,7 @@ struct TestToken {
 pub struct TestTokenizer {
     token_to_id: BTreeMap<String, u32>,
     id_to_token: BTreeMap<u32, TestToken>,
+    byte_tokens: BTreeMap<u32, Vec<u8>>,
     added_vocab: Vec<(String, u32)>,
     unknown_decode: UnknownDecode,
     vocab_size: Option<usize>,
@@ -87,6 +88,7 @@ impl TestTokenizer {
         Self {
             token_to_id: BTreeMap::new(),
             id_to_token: BTreeMap::new(),
+            byte_tokens: BTreeMap::new(),
             added_vocab: Vec::new(),
             unknown_decode: UnknownDecode::Error,
             vocab_size: None,
@@ -111,6 +113,28 @@ impl TestTokenizer {
     /// Add a regular configured token and return the updated tokenizer.
     pub fn with_regular_token(self, token: impl Into<String>, id: u32) -> Self {
         self.with_token(token, id, TestTokenKind::Regular)
+    }
+
+    /// Add a regular token for a byte sequence that need not be valid UTF-8 on
+    /// its own, such as a byte-level BPE token that starts with the rest of a
+    /// character split across tokens, and return the updated tokenizer.
+    ///
+    /// `decode` joins its bytes with neighboring byte ids before converting
+    /// them to text. `encode` never produces it.
+    pub fn with_byte_token(mut self, bytes: impl Into<Vec<u8>>, id: u32) -> Self {
+        let bytes = bytes.into();
+        assert!(
+            bytes.len() > 1,
+            "byte test token {bytes:?} overlaps byte fallback ids"
+        );
+        assert!(
+            id >= FIRST_CONFIGURED_TOKEN_ID && !self.id_to_token.contains_key(&id),
+            "byte test token id {id} is already taken"
+        );
+        if self.byte_tokens.insert(id, bytes).is_some() {
+            panic!("byte test token id {id} was registered more than once");
+        }
+        self
     }
 
     /// Add a special BOS token inserted by `encode(..., true)`.
@@ -148,6 +172,10 @@ impl TestTokenizer {
         assert!(
             id >= FIRST_CONFIGURED_TOKEN_ID,
             "configured test token id {id} overlaps byte fallback range 0..=255"
+        );
+        assert!(
+            !self.byte_tokens.contains_key(&id),
+            "configured test token id {id} is already a byte token"
         );
         assert!(
             token.len() > 1,
@@ -192,8 +220,9 @@ impl TestTokenizer {
     }
 
     fn inferred_vocab_size(&self) -> usize {
-        let max_configured =
-            self.id_to_token.last_key_value().map(|(&id, _)| id as usize + 1).unwrap_or(0);
+        let max_configured = (self.id_to_token.keys().chain(self.byte_tokens.keys()))
+            .max()
+            .map_or(0, |&id| id as usize + 1);
         256.max(max_configured)
     }
 }
@@ -237,6 +266,8 @@ impl Tokenizer for TestTokenizer {
                 }
             } else if let Ok(byte) = u8::try_from(id) {
                 pending_bytes.push(byte);
+            } else if let Some(bytes) = self.byte_tokens.get(&id) {
+                pending_bytes.extend_from_slice(bytes);
             } else {
                 Self::flush_bytes(&mut pending_bytes, &mut output);
                 match self.unknown_decode {
@@ -265,6 +296,11 @@ impl Tokenizer for TestTokenizer {
         self.id_to_token
             .get(&id)
             .map(|token| token.text.clone())
+            .or_else(|| {
+                self.byte_tokens
+                    .get(&id)
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            })
             .or_else(|| Self::byte_to_token(id))
     }
 
