@@ -449,6 +449,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    tokenizer_config: Option<vllm_text::backend::hf::RawTokenizerConfig>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -473,6 +474,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            tokenizer_config: None,
         }
     }
 
@@ -480,6 +482,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            tokenizer_config: None,
         }
     }
 
@@ -489,6 +492,14 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            tokenizer_config: None,
+        }
+    }
+
+    fn with_tokenizer_config(tokenizer_config: &str) -> Self {
+        Self {
+            tokenizer_config: Some(serde_json::from_str(tokenizer_config).expect("parse config")),
+            ..Self::new()
         }
     }
 }
@@ -518,6 +529,10 @@ impl ChatBackend for FakeChatBackend {
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
         self.multimodal_model_info.as_ref()
+    }
+
+    fn tokenizer_config(&self) -> Option<&vllm_text::backend::hf::RawTokenizerConfig> {
+        self.tokenizer_config.as_ref()
     }
 
     fn new_chat_output_processor(
@@ -1000,7 +1015,9 @@ async fn tokenizer_info_route_follows_api_server_options() {
         let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
             b"engine-tokenizer-info",
             default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
+            Arc::new(FakeChatBackend::with_tokenizer_config(
+                r#"{"tokenizer_class":"GPT2Tokenizer","model_max_length":8192}"#,
+            )),
         )
         .await;
         let app = build_router(Arc::new(
@@ -1012,23 +1029,79 @@ async fn tokenizer_info_route_follows_api_server_options() {
             ),
         ));
 
-        if enabled {
-            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("GET")
+                    .uri("/tokenizer_info")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        let expected = if enabled {
+            StatusCode::OK
         } else {
-            let response = app
-                .clone()
-                .call(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/tokenizer_info")
-                        .body(Body::empty())
-                        .expect("build request"),
-                )
-                .await
-                .expect("call app");
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
+            StatusCode::NOT_FOUND
+        };
+        assert_eq!(response.status(), expected);
     }
+}
+
+/// `/tokenizer_info` reports `tokenizer_config.json` with each `AddedToken`
+/// object replaced by its content, as Python's `TokenizerInfo` does after
+/// Transformers loads the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_reports_tokenizer_config_like_python() {
+    // A SmolLM2-shaped config, plus the `model_max_length` sentinel
+    // `int(1e30)` that Transformers writes for many checkpoints; other values,
+    // nested ones included, pass through as written.
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tokenizer-info-body",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_tokenizer_config(
+            r#"{
+                "add_prefix_space": false,
+                "added_tokens_decoder": {
+                    "0": {"content": "<|endoftext|>", "lstrip": false, "normalized": false, "rstrip": false, "single_word": false, "special": true},
+                    "1": {"content": "<|im_start|>", "lstrip": false, "normalized": false, "rstrip": false, "single_word": false, "special": true}
+                },
+                "additional_special_tokens": ["<|im_start|>", {"__type": "AddedToken", "content": "<|im_end|>"}],
+                "bos_token": {"__type": "AddedToken", "content": "<|im_start|>", "lstrip": false},
+                "chat_template": "{{ messages[0].content }}",
+                "eos_token": "<|im_end|>",
+                "extra": {"limit": 1000000000000000019884624838656, "sizes": [1, 2]},
+                "model_max_length": 1000000000000000019884624838656,
+                "tokenizer_class": "GPT2Tokenizer"
+            }"#,
+        )),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_tokenizer_info_endpoint: true,
+            ..Default::default()
+        }),
+    ));
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/tokenizer_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let info = std::str::from_utf8(&body).expect("utf-8 body");
+
+    expect_test::expect![[r#"{"add_prefix_space":false,"added_tokens_decoder":{"0":"<|endoftext|>","1":"<|im_start|>"},"additional_special_tokens":["<|im_start|>","<|im_end|>"],"bos_token":"<|im_start|>","chat_template":"{{ messages[0].content }}","eos_token":"<|im_end|>","extra":{"limit": 1000000000000000019884624838656, "sizes": [1, 2]},"model_max_length":1000000000000000019884624838656,"tokenizer_class":"GPT2Tokenizer"}"#]].assert_eq(info);
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready

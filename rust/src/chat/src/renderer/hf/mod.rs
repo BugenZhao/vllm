@@ -69,6 +69,42 @@ pub struct MultimodalRenderInfo {
     pub audio_token: Option<String>,
 }
 
+/// Resolve the chat template that replaces every `tokenizer_config.json`
+/// template: the configured override (`--chat-template`), else a non-empty
+/// dedicated chat template file. `None` keeps the tokenizer config's templates.
+pub fn replacement_chat_template(
+    files: &ResolvedModelFiles,
+    configured_template: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(configured_template) = configured_template {
+        let template = resolve_chat_template(configured_template)
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+        info!("using configured chat template override");
+        return Ok(Some(template));
+    }
+    let Some(chat_template_path) = files.chat_template_path.as_deref() else {
+        return Ok(None);
+    };
+    // If independent chat template file(s) exist and contain non-empty content,
+    // they take priority over template entries in the tokenizer config
+    let file_template = load_chat_template(chat_template_path)
+        .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+
+    if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+        info!(
+            path = %chat_template_path.display(),
+            "loaded dedicated chat template file, overriding tokenizer_config chat_template"
+        );
+        Ok(file_template)
+    } else {
+        warn!(
+            path = %chat_template_path.display(),
+            "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
+        );
+        Ok(None)
+    }
+}
+
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
 /// state.
 pub struct HfChatRenderer {
@@ -142,9 +178,12 @@ impl HfChatRenderer {
         self
     }
 
-    /// Create a renderer from the given model files and loading options.
+    /// Create a renderer from the given model files, the template that
+    /// replaces the tokenizer config's (see [`replacement_chat_template`]), and
+    /// loading options.
     pub fn load(
         files: &ResolvedModelFiles,
+        replacement_template: Option<String>,
         options: LoadModelBackendsOptions,
         multimodal: Option<MultimodalRenderInfo>,
     ) -> Result<Self> {
@@ -153,45 +192,23 @@ impl HfChatRenderer {
             chat_template,
             ..
         } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
-        let mut template = chat_template
-            .as_ref()
-            .and_then(HfChatTemplate::default_template)
-            .map(str::to_owned);
-        // A configured template or a dedicated template file replaces every
-        // tokenizer_config template, `tool_use` included.
-        let mut tool_use_template = chat_template
-            .as_ref()
-            .and_then(HfChatTemplate::tool_use_template)
-            .map(str::to_owned);
         let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
 
-        if let Some(configured_template) = options.chat_template.as_deref() {
-            template = Some(
-                resolve_chat_template(configured_template)
-                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
-            );
-            tool_use_template = None;
-            info!("using configured chat template override");
-        } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
-            // If independent chat template file(s) exist and contain non-empty content,
-            // they take priority over template entries in the tokenizer config
-            let file_template = load_chat_template(chat_template_path)
-                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
-
-            if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
-                info!(
-                    path = %chat_template_path.display(),
-                    "loaded dedicated chat template file, overriding tokenizer_config chat_template"
-                );
-                template = file_template;
-                tool_use_template = None;
-            } else {
-                warn!(
-                    path = %chat_template_path.display(),
-                    "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
-                );
-            }
-        }
+        let (template, tool_use_template) = match replacement_template {
+            // A configured template or a dedicated template file replaces every
+            // tokenizer_config template, `tool_use` included.
+            Some(template) => (Some(template), None),
+            None => (
+                chat_template
+                    .as_ref()
+                    .and_then(HfChatTemplate::default_template)
+                    .map(str::to_owned),
+                chat_template
+                    .as_ref()
+                    .and_then(HfChatTemplate::tool_use_template)
+                    .map(str::to_owned),
+            ),
+        };
 
         Ok(Self::new(
             template,

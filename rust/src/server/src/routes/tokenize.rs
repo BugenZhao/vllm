@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! `POST /tokenize` and `POST /detokenize` (root paths, matching Python).
+//! `POST /tokenize`, `POST /detokenize` and `GET /tokenizer_info` (root paths,
+//! matching Python).
 //!
 //! Encode/decode runs entirely in-process via [`DynTokenizer`]; the inference
 //! engine is not involved.
@@ -14,7 +15,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use serde_json::Value;
+use serde_json::value::{RawValue, to_raw_value};
 use thiserror_ext::AsReport as _;
+use vllm_text::backend::hf::RawTokenizerConfig;
 
 use crate::error::{ApiError, chat_submit_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -135,6 +139,77 @@ pub async fn detokenize(
         Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
         Err(e) => server_error!("detokenize failed: {}", e.to_report_string()).into_response(),
     }
+}
+
+/// `GET /tokenizer_info`: the model's `tokenizer_config.json`, like Python's
+/// `TokenizerInfoResponse`. Registered only with
+/// `--enable-tokenizer-info-endpoint`.
+pub async fn tokenizer_info(State(state): State<Arc<AppState>>) -> Response {
+    match state.chat.tokenizer_config() {
+        Some(config) => Json(tokenizer_info_response(config)).into_response(),
+        None => server_error!("the loaded model has no tokenizer configuration").into_response(),
+    }
+}
+
+/// Report `tokenizer_config.json` as Python does after Transformers loads it:
+/// every `added_tokens_decoder` entry and every other object tagged
+/// `"__type": "AddedToken"` becomes an `AddedToken`, which Python reports as
+/// its `content`. Other values are passed through as written.
+fn tokenizer_info_response(config: &RawTokenizerConfig) -> RawTokenizerConfig {
+    config
+        .iter()
+        .map(|(key, raw)| {
+            // Only values holding `AddedToken` objects go through `Value`;
+            // the rest stay as written, since an integer beyond 64 bits would
+            // lose precision there.
+            let flattened = if key == "added_tokens_decoder" {
+                match serde_json::from_str(raw.get()) {
+                    Ok(Value::Object(tokens)) => Some(Value::Object(
+                        tokens
+                            .iter()
+                            .map(|(id, token)| (id.clone(), added_token_content(token)))
+                            .collect(),
+                    )),
+                    _ => None,
+                }
+            } else if raw.get().contains(r#""AddedToken""#) {
+                serde_json::from_str(raw.get()).ok().map(|value| flatten_added_tokens(&value))
+            } else {
+                None
+            };
+            let raw = flattened.map_or_else(|| raw.clone(), |value| to_raw_json(&value));
+            (key.clone(), raw)
+        })
+        .collect()
+}
+
+/// A JSON value as a raw value.
+fn to_raw_json(value: &Value) -> Box<RawValue> {
+    to_raw_value(value).expect("a JSON value serializes")
+}
+
+/// Replace each object tagged `"__type": "AddedToken"` with its content.
+fn flatten_added_tokens(value: &Value) -> Value {
+    match value {
+        Value::Object(object)
+            if object.get("__type").and_then(Value::as_str) == Some("AddedToken") =>
+        {
+            added_token_content(value)
+        }
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), flatten_added_tokens(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(flatten_added_tokens).collect()),
+        _ => value.clone(),
+    }
+}
+
+/// The `content` of a serialized `AddedToken`, or the value itself if it has none.
+fn added_token_content(token: &Value) -> Value {
+    token.get("content").unwrap_or(token).clone()
 }
 
 #[cfg(test)]

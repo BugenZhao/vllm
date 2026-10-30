@@ -5918,6 +5918,7 @@ dependencies = [
  "expect-test",
  "futures",
  "hf-hub",
+ "indexmap 2.13.0",
  "itertools 0.14.0",
  "reqwest 0.12.28",
  "serde",

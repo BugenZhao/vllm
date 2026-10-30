@@ -427,6 +427,12 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Return the model's tokenizer configuration, if the backend loads one;
+    /// see [`ChatBackend::tokenizer_config`].
+    pub fn tokenizer_config(&self) -> Option<&vllm_text::backend::hf::RawTokenizerConfig> {
+        self.processor.backend.tokenizer_config()
+    }
+
     /// Prepare media for an already-tokenized request.
     /// Raw content is preprocessed; inline features are checked against model
     /// capabilities, modality limits, and the final prompt positions.
