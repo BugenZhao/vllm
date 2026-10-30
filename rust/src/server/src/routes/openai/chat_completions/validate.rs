@@ -4,18 +4,16 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
+use crate::routes::openai::utils::{
+    validate_generation_prompt_truncation, validate_requested_model,
+};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
     served_model_names: &[String],
 ) -> Result<(), ApiError> {
-    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
-        && !served_model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    validate_requested_model(request.model.as_deref(), served_model_names)?;
 
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
