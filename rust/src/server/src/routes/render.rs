@@ -108,6 +108,22 @@ fn lower_render_request(
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
     let mut text_request = prepared.text_request;
+    // Carry the generation-config defaults, like Python: the downstream engine
+    // or generate route may not resolve them against the same config.
+    let effective = &prepared.generate_request.sampling_params;
+    let sampling_params = &mut text_request.sampling_params;
+    sampling_params.temperature = Some(effective.temperature);
+    sampling_params.top_p = Some(effective.top_p);
+    sampling_params.top_k = Some(effective.top_k);
+    sampling_params.min_p = Some(effective.min_p);
+    sampling_params.repetition_penalty = Some(effective.repetition_penalty);
+    sampling_params.presence_penalty = Some(effective.presence_penalty);
+    sampling_params.frequency_penalty = Some(effective.frequency_penalty);
+    // Without a configured `max_model_len` the budget is relative to `u32::MAX`
+    // and means nothing downstream.
+    if state.max_model_len.is_some() {
+        sampling_params.max_tokens = Some(effective.max_tokens);
+    }
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");
