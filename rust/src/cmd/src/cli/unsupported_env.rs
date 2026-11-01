@@ -35,6 +35,39 @@ fn is_truthy(value: &str) -> bool {
     matches!(value.trim().to_lowercase().as_str(), "1" | "true")
 }
 
+/// LoRA resolver variables that Python would act on. Its resolvers are Python
+/// plugins Rust cannot load: they run only under
+/// `VLLM_ALLOW_RUNTIME_LORA_UPDATING`, and each loads only through the
+/// `VLLM_PLUGINS` allowlist, which also covers the engine's unrelated plugins.
+fn active_lora_resolver_envs(lookup: &impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    if !lookup("VLLM_ALLOW_RUNTIME_LORA_UPDATING").is_some_and(|value| is_truthy(&value)) {
+        return Vec::new();
+    }
+    let allowed_plugins = lookup("VLLM_PLUGINS");
+    let is_named = |plugin: &str| {
+        allowed_plugins
+            .as_deref()
+            .is_some_and(|plugins| plugins.split(',').any(|name| name == plugin))
+    };
+    // Python allows every plugin when `VLLM_PLUGINS` is unset, but always asks
+    // for the Hugging Face Hub resolver by name because it downloads adapters.
+    let resolvers = [
+        (
+            "VLLM_LORA_RESOLVER_CACHE_DIR",
+            allowed_plugins.is_none() || is_named("lora_filesystem_resolver"),
+        ),
+        (
+            "VLLM_LORA_RESOLVER_HF_REPO_LIST",
+            is_named("lora_hf_hub_resolver"),
+        ),
+    ];
+    resolvers
+        .into_iter()
+        .filter(|(name, enabled)| *enabled && lookup(name).is_some_and(|value| !value.is_empty()))
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Check that no unsupported environment variable is set to a non-default
 /// value, using `lookup` to read the environment.
 pub fn check(lookup: impl Fn(&str) -> Option<String>) -> Result<(), String> {
@@ -42,6 +75,7 @@ pub fn check(lookup: impl Fn(&str) -> Option<String>) -> Result<(), String> {
         .iter()
         .filter(|(name, is_non_default)| lookup(name).is_some_and(|value| is_non_default(&value)))
         .map(|(name, _)| *name)
+        .chain(active_lora_resolver_envs(&lookup))
         .sorted_unstable()
         .collect_vec();
 
@@ -90,6 +124,35 @@ mod tests {
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
             assert!(error.contains(&format!("- {name}\n")), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn lora_resolver_envs_fail_only_where_python_consults_them() {
+        const RUNTIME: (&str, &str) = ("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "True");
+        const DIR: (&str, &str) = ("VLLM_LORA_RESOLVER_CACHE_DIR", "/loras");
+        const REPOS: (&str, &str) = ("VLLM_LORA_RESOLVER_HF_REPO_LIST", "org/adapters");
+        let plugins = |value| ("VLLM_PLUGINS", value);
+
+        for vars in [
+            vec![RUNTIME, DIR],
+            vec![RUNTIME, DIR, plugins("other,lora_filesystem_resolver")],
+            vec![RUNTIME, REPOS, plugins("lora_hf_hub_resolver")],
+        ] {
+            check_with(&vars).expect_err(&format!("{vars:?}"));
+        }
+
+        for vars in [
+            vec![DIR],
+            vec![REPOS, plugins("lora_hf_hub_resolver")],
+            vec![RUNTIME, ("VLLM_LORA_RESOLVER_CACHE_DIR", "")],
+            vec![RUNTIME, DIR, plugins("")],
+            vec![RUNTIME, DIR, plugins("some_engine_plugin")],
+            vec![RUNTIME, REPOS],
+            vec![RUNTIME, REPOS, plugins("lora_filesystem_resolver")],
+            vec![RUNTIME, plugins("some_engine_plugin")],
+        ] {
+            check_with(&vars).unwrap_or_else(|error| panic!("{vars:?}: {error}"));
         }
     }
 
