@@ -953,6 +953,27 @@ async fn scale_out_generate_route_can_be_enabled() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn render_router_reports_unimplemented_python_routes() {
+    let app = test_render_app();
+    for (method, route) in [
+        ("POST", "/v1/chat/completions/derender"),
+        ("POST", "/v1/completions/derender"),
+        ("POST", "/v1/messages/render"),
+        ("POST", "/v1/responses/render"),
+        ("POST", "/v1/decisions"),
+        ("POST", "/v1/systemone"),
+        ("POST", "/tokenize"),
+        ("POST", "/detokenize"),
+        ("GET", "/load"),
+        ("GET", "/metrics"),
+        ("GET", "/version"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        assert_route_not_supported(&app, method, route, route).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {

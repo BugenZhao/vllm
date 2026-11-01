@@ -9,9 +9,11 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use vllm_chat::{
-    ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
-    ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
+    ChatRequestProcessor, ChatTemplateContentFormatOption, GenerationConfigMode,
+    LoadModelBackendsOptions, ParserSelection, RendererSelection, ToolStrictLevel,
+    load_model_backends,
 };
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
@@ -32,14 +34,17 @@ pub struct RenderConfig {
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
     pub hf_overrides: HfOverrides,
+    /// The source of the sampling defaults a rendered request carries.
+    pub generation_config: GenerationConfigMode,
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
-    pub host: String,
-    pub port: u16,
+    pub listener_mode: HttpListenerMode,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// The backend whose constraints a rendered request has to compile under.
+    pub structured_outputs_backend: StructuredOutputBackend,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
@@ -57,6 +62,15 @@ impl RenderConfig {
     /// or binding a listener.
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if matches!(
+            self.tool_strict_level,
+            Some(ToolStrictLevel::Function | ToolStrictLevel::Parameter)
+        ) && self.structured_outputs_backend != StructuredOutputBackend::Xgrammar
+        {
+            bail!(
+                "--tool-strict-level other than `auto` requires the xgrammar structured outputs backend"
+            );
+        }
         if self.max_logprobs.is_some_and(|value| value < -1) {
             bail!("max_logprobs must be non-negative or -1");
         }
@@ -85,7 +99,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             hf_overrides: config.hf_overrides.clone(),
-            generation_config: Default::default(),
+            generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
@@ -104,7 +118,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .with_accept_any(config.skip_model_name_validation);
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
-        .with_max_logprobs(config.max_logprobs);
+        .with_max_logprobs(config.max_logprobs)
+        .with_structured_outputs_backend(config.structured_outputs_backend);
     let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
         .with_parser_selections(
             config.tool_call_parser.clone(),
@@ -142,13 +157,9 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
-    let listener_mode = HttpListenerMode::BindTcp {
-        host: config.host.clone(),
-        port: config.port,
-    };
-    let listener = Listener::bind(&listener_mode)
+    let listener = Listener::bind(&config.listener_mode)
         .await
-        .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
+        .with_context(|| format!("failed to bind {:?}", config.listener_mode))?;
     let address = listener.local_addr_display()?;
     let scheme = if tls_config.is_some() {
         "https"
@@ -175,34 +186,45 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
 mod tests {
     use super::*;
 
+    fn config_for_test() -> RenderConfig {
+        RenderConfig {
+            tool_strict_level: None,
+            structured_outputs_backend: Default::default(),
+            model: "test-model".to_string(),
+            revision: None,
+            tokenizer: None,
+            hf_config: None,
+            hf_overrides: Default::default(),
+            generation_config: Default::default(),
+            served_model_name: Vec::new(),
+            skip_model_name_validation: false,
+            listener_mode: HttpListenerMode::BindTcp {
+                host: "127.0.0.1".to_string(),
+                port: 8000,
+            },
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            renderer: RendererSelection::Auto,
+            chat_template: None,
+            default_chat_template_kwargs: HashMap::new(),
+            reasoning_effort_map: HashMap::new(),
+            trust_request_chat_template: false,
+            exclude_tools_when_tool_choice_none: false,
+            chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+            max_model_len: Some(128),
+            max_logprobs: None,
+            tls: None,
+        }
+    }
+
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: None,
-                model: "test-model".to_string(),
-                revision: None,
-                tokenizer: None,
-                hf_config: None,
-                hf_overrides: Default::default(),
-                served_model_name: Vec::new(),
-                skip_model_name_validation: false,
-                host: "127.0.0.1".to_string(),
-                port: 8000,
-                tool_call_parser: ParserSelection::Auto,
                 reasoning_parser: ParserSelection::Explicit("typo".to_string()),
-                renderer: RendererSelection::Auto,
-                chat_template: None,
-                default_chat_template_kwargs: HashMap::new(),
-                reasoning_effort_map: HashMap::new(),
-                trust_request_chat_template: false,
-                exclude_tools_when_tool_choice_none: false,
-                chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: Some(128),
-                max_logprobs: None,
-                tls: None,
+                ..config_for_test()
             },
             shutdown,
         )
@@ -214,5 +236,18 @@ mod tests {
             report.contains("reasoning parser `typo` is not registered"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_tool_strict_level_without_xgrammar() {
+        let error = RenderConfig {
+            tool_strict_level: Some(ToolStrictLevel::Function),
+            structured_outputs_backend: StructuredOutputBackend::Guidance,
+            ..config_for_test()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(error.to_string().contains("--tool-strict-level"), "{error}");
     }
 }

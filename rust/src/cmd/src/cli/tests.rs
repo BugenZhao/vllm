@@ -82,8 +82,13 @@ fn render_args_build_config_without_tls() {
         })
     );
     assert_eq!(config.hf_config, None);
-    assert_eq!(config.host, "127.0.0.1");
-    assert_eq!(config.port, 8080);
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+        }
+    );
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
@@ -3468,4 +3473,149 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
     );
     let engine = args.to_managed_engine_config(1234, &topology(&args), None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+}
+
+fn render_frontend_args(
+    args_json: &serde_json::Value,
+) -> Result<super::RenderFrontendArgs, String> {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render-frontend",
+        "--listen-fd",
+        "7",
+        "--args-json",
+        &args_json.to_string(),
+    ])
+    .map_err(|error| error.to_string())?;
+    let Command::RenderFrontend(args) = cli.command else {
+        panic!("expected render-frontend args");
+    };
+    Ok(args)
+}
+
+#[test]
+fn render_frontend_args_json_passes_python_args_into_config() {
+    let config = render_frontend_args(&serde_json::json!({
+        "model_tag": "Qwen/Qwen2.5-0.5B-Instruct",
+        "max_model_len": 2048,
+        "max_logprobs": 20,
+        "generation_config": "vllm",
+        "served_model_name": ["qwen"],
+        "tool_call_parser": "hermes",
+        "structured_outputs_config": {"backend": "guidance"},
+        "http_timeout_keep_alive": 5,
+    }))
+    .unwrap()
+    .into_config()
+    .unwrap();
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::InheritedFd { fd: 7 }
+    );
+    assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.max_model_len, Some(2048));
+    assert_eq!(config.max_logprobs, Some(20));
+    assert_eq!(config.generation_config, GenerationConfigMode::Vllm);
+    assert_eq!(
+        config.structured_outputs_backend,
+        StructuredOutputBackend::Guidance
+    );
+    assert_eq!(config.served_model_name, ["qwen"]);
+    assert_eq!(
+        config.tool_call_parser,
+        ParserSelection::Explicit("hermes".to_string())
+    );
+    // Like `vllm serve`, the bootstrap leaves parser inference to explicit `auto`.
+    assert_eq!(config.reasoning_parser, ParserSelection::None);
+}
+
+#[test]
+fn render_frontend_rejects_args_the_render_server_would_drop() {
+    let cases = [
+        (
+            "http_timeout_keep_alive",
+            serde_json::json!(30),
+            "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        ),
+        (
+            "enable_log_requests",
+            serde_json::json!(true),
+            "--enable-log-requests",
+        ),
+        (
+            "enable_request_id_headers",
+            serde_json::json!(true),
+            "--enable-request-id-headers",
+        ),
+        (
+            "enable_tokenizer_info_endpoint",
+            serde_json::json!(true),
+            "--enable-tokenizer-info-endpoint",
+        ),
+        ("api_key", serde_json::json!(["secret"]), "--api-key"),
+        (
+            "allowed_origins",
+            serde_json::json!(["https://a.example"]),
+            "--allowed-origins",
+        ),
+        (
+            "allowed_methods",
+            serde_json::json!(["GET"]),
+            "--allowed-methods",
+        ),
+        (
+            "allowed_headers",
+            serde_json::json!(["x-a"]),
+            "--allowed-headers",
+        ),
+        (
+            "allow_credentials",
+            serde_json::json!(true),
+            "--allow-credentials",
+        ),
+        ("root_path", serde_json::json!("/llm"), "--root-path"),
+    ];
+    for (key, value, flag) in cases {
+        let error = render_frontend_args(&serde_json::json!({
+            "model_tag": "model",
+            key: value,
+        }))
+        .unwrap()
+        .into_config()
+        .unwrap_err();
+        assert!(error.contains(flag), "{key}: {error}");
+    }
+}
+
+#[test]
+fn render_frontend_ignores_args_with_no_meaning_without_an_engine() {
+    let config = render_frontend_args(&serde_json::json!({
+        "model_tag": "model",
+        "engine_ready_timeout_secs": 30,
+        "stream_interval": 4,
+        "shutdown_timeout": 10,
+        "enable_scale_out": true,
+        "disable_log_stats": true,
+        "gpu_memory_utilization": 0.5,
+        "root_path": "",
+        "language_model_only": true,
+        "limit_mm_per_prompt": {"image": 0},
+        "lora_modules": [{"name": "a", "path": "/tmp/a"}],
+    }))
+    .unwrap()
+    .into_config();
+
+    assert!(config.is_ok());
+}
+
+#[test]
+fn render_frontend_rejects_unsupported_args_at_parse_time() {
+    let error = render_frontend_args(&serde_json::json!({
+        "model_tag": "model",
+        "override_generation_config": {"temperature": 0.1},
+    }))
+    .unwrap_err();
+
+    assert!(error.contains("override_generation_config"), "{error}");
 }

@@ -22,6 +22,7 @@ use crate::render::RenderState;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
+use crate::routes::not_supported;
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -37,6 +38,19 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions/render", post(render_chat))
         .route("/v1/completions/render", post(render_completion))
+        // TODO: implement the remaining routes of Python's render server.
+        .route("/v1/chat/completions/derender", post(not_supported))
+        .route("/v1/completions/derender", post(not_supported))
+        .route("/v1/messages/render", post(not_supported))
+        .route("/v1/responses/render", post(not_supported))
+        .route("/v1/decisions", post(not_supported))
+        .route("/v1/systemone", post(not_supported))
+        .route("/tokenize", post(not_supported))
+        .route("/detokenize", post(not_supported))
+        .route("/load", get(not_supported))
+        .route("/metrics", get(not_supported))
+        .route("/version", get(not_supported))
+        .route("/kv_event_sources", get(not_supported))
         .with_state(state)
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }

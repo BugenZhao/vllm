@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import asyncio
+import json
+import os
 import signal
 import socket
 from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
+from vllm.entrypoints.common.startup import redact_sensitive_args
 from vllm.logger import configure_logging_from_args, init_logger
+from vllm.v1.utils import rust_frontend_args_dict
 
 from ..app import build_app
 from ..launcher import serve_http, setup_server
@@ -103,6 +107,38 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
         await shutdown_task
     finally:
         sock.close()
+
+
+def exec_rust_render(args: argparse.Namespace) -> None:
+    """Replace this process with the Rust render server.
+
+    With no engine to supervise, nothing is left for Python to do after handing
+    over the bound socket and the parsed arguments.
+    """
+    binary_path = envs.VLLM_RUST_FRONTEND_PATH
+    if binary_path is None:
+        raise RuntimeError(
+            "VLLM_USE_RUST_FRONTEND=1 requires VLLM_RUST_FRONTEND_PATH "
+            "to resolve to the vllm-rs binary."
+        )
+    _, sock = setup_server(args, reuse_port=False)
+    listen_fd = sock.fileno()
+    os.set_inheritable(listen_fd, True)
+
+    # The Rust render server has no engine to learn these from.
+    model_config = AsyncEngineArgs.from_cli_args(args).create_model_config()
+    args_dict = rust_frontend_args_dict(args)
+    args_dict["max_model_len"] = model_config.max_model_len
+    args_dict["max_logprobs"] = model_config.max_logprobs
+
+    cmd = [binary_path, "render-frontend", "--listen-fd", str(listen_fd)]
+    logger.info(
+        "Launching Rust render server: %s --args-json %s",
+        " ".join(cmd),
+        json.dumps(redact_sensitive_args(args_dict), sort_keys=True),
+    )
+    cmd += ["--args-json", json.dumps(args_dict, sort_keys=True)]
+    os.execv(binary_path, cmd)
 
 
 if __name__ == "__main__":
