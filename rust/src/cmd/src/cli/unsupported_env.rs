@@ -23,8 +23,12 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
         !is_truthy(value)
     }),
-    // Log level of the request JSON body under `--enable-log-requests`,
-    // upper-cased by Python.
+];
+
+/// Unsupported environment variables that only take effect under
+/// `--enable-log-requests`.
+const UNSUPPORTED_LOG_REQUESTS_ENVS: &[(&str, IsNonDefault)] = &[
+    // Log level of the request JSON body, upper-cased by Python.
     ("VLLM_REQUEST_BODY_LOG_LEVEL", |value| {
         value.to_uppercase() != "DEBUG"
     }),
@@ -70,9 +74,18 @@ fn active_lora_resolver_envs(lookup: &impl Fn(&str) -> Option<String>) -> Vec<&'
 
 /// Check that no unsupported environment variable is set to a non-default
 /// value, using `lookup` to read the environment.
-pub fn check(lookup: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+pub fn check(
+    lookup: impl Fn(&str) -> Option<String>,
+    enable_log_requests: bool,
+) -> Result<(), String> {
+    let log_requests_envs = if enable_log_requests {
+        UNSUPPORTED_LOG_REQUESTS_ENVS
+    } else {
+        &[]
+    };
     let set = UNSUPPORTED_ENVS
         .iter()
+        .chain(log_requests_envs)
         .filter(|(name, is_non_default)| lookup(name).is_some_and(|value| is_non_default(&value)))
         .map(|(name, _)| *name)
         .chain(active_lora_resolver_envs(&lookup))
@@ -103,7 +116,7 @@ mod tests {
 
     fn check_with(vars: &[(&str, &str)]) -> Result<(), String> {
         let vars: HashMap<_, _> = vars.iter().copied().collect();
-        check(|name| vars.get(name).map(|value| value.to_string()))
+        check(|name| vars.get(name).map(|value| value.to_string()), true)
     }
 
     #[test]
@@ -125,6 +138,15 @@ mod tests {
             let error = check_with(&[(name, value)]).unwrap_err();
             assert!(error.contains(&format!("- {name}\n")), "{name}: {error}");
         }
+    }
+
+    #[test]
+    fn request_body_log_level_only_fails_under_enable_log_requests() {
+        let lookup =
+            |name: &str| (name == "VLLM_REQUEST_BODY_LOG_LEVEL").then(|| "INFO".to_string());
+        check(lookup, false).unwrap();
+        let error = check(lookup, true).unwrap_err();
+        assert!(error.contains("- VLLM_REQUEST_BODY_LOG_LEVEL\n"), "{error}");
     }
 
     #[test]
