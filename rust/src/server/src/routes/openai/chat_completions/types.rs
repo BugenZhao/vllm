@@ -187,6 +187,9 @@ pub struct ChatCompletionRequest {
     /// List of bad words to avoid during generation
     pub bad_words: Option<Vec<String>>,
 
+    /// Skip the first N prompt tokens from returned routed-expert data
+    pub routed_experts_prompt_start: Option<u32>,
+
     // -------- Extra vLLM Parameters --------
     /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
     /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
@@ -329,6 +332,7 @@ impl Default for ChatCompletionRequest {
             logprob_token_ids: None,
             allowed_token_ids: None,
             bad_words: None,
+            routed_experts_prompt_start: None,
             echo: false,
             add_generation_prompt: None,
             continue_final_message: false,

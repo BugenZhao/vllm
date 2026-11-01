@@ -99,6 +99,13 @@ pub(super) fn validate_request_compat(
     if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
+    // Python's default is 0, which SDKs may send explicitly.
+    if request.routed_experts_prompt_start.is_some_and(|start| start != 0) {
+        bail_invalid_request!(
+            param = "routed_experts_prompt_start",
+            "routed_experts_prompt_start is not supported."
+        );
+    }
     if !request.spaces_between_special_tokens {
         bail_invalid_request!(
             param = "spaces_between_special_tokens",
@@ -209,6 +216,26 @@ mod tests {
 
         let request = CompletionRequest {
             length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_only_non_default_routed_experts_prompt_start() {
+        for start in [None, Some(0)] {
+            let request = CompletionRequest {
+                routed_experts_prompt_start: start,
+                ..base_request()
+            };
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"]))
+                .expect("the default routed_experts_prompt_start should be accepted");
+        }
+
+        let request = CompletionRequest {
+            routed_experts_prompt_start: Some(2),
             ..base_request()
         };
         assert!(
