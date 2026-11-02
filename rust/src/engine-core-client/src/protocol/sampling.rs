@@ -162,6 +162,9 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// Decode token IDs to replay instead of sampling. The frontend truncates
+    /// the trace to the context window and sets the stop conditions it needs.
+    pub trace_decode_token_ids: Option<Vec<u32>>,
     /// Number of newly generated tokens to batch into each streamed output.
     /// The first and final outputs are always emitted immediately. Engine-core
     /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
@@ -201,6 +204,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            trace_decode_token_ids: None,
             stream_interval: None,
         }
     }

@@ -85,6 +85,9 @@ pub struct SamplingLimits {
     /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
     /// token-ID prompts.
     pub tokenizer_vocab_size: usize,
+    /// Whether requests may set `trace_decode_token_ids`
+    /// (`--enable-trace-replay`).
+    pub enable_trace_replay: bool,
 }
 
 impl SamplingLimits {
