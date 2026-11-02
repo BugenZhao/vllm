@@ -341,6 +341,8 @@ struct TemplateMessage<'a> {
     tool_calls: Option<Vec<TemplateToolCall>>,
     // Tool-role messages refer back to the assistant call they are answering.
     tool_call_id: Option<String>,
+    // Optional participant name, passed through for any role.
+    name: Option<&'a str>,
 }
 
 /// Chat content in the two shapes HF templates commonly expect.
@@ -408,8 +410,9 @@ fn to_template_message<'a>(
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
 ) -> Result<TemplateMessage<'a>> {
+    let name = message.name();
     Ok(match message {
-        ChatMessage::System { content } => TemplateMessage {
+        ChatMessage::System { content, .. } => TemplateMessage {
             role: "system",
             content: to_template_content(content, content_format, multimodal)?,
             tools: None,
@@ -417,8 +420,9 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            name,
         },
-        ChatMessage::Developer { content, tools } => TemplateMessage {
+        ChatMessage::Developer { content, tools, .. } => TemplateMessage {
             role: "developer",
             content: to_template_content(content, content_format, multimodal)?,
             tools: tools.as_deref().map(to_template_tools),
@@ -426,8 +430,9 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            name,
         },
-        ChatMessage::User { content } => TemplateMessage {
+        ChatMessage::User { content, .. } => TemplateMessage {
             role: "user",
             content: to_template_content(content, content_format, multimodal)?,
             tools: None,
@@ -435,8 +440,9 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            name,
         },
-        ChatMessage::Assistant { content } => {
+        ChatMessage::Assistant { content, .. } => {
             let text = content.text();
             let reasoning = content.reasoning();
             let tool_calls = to_template_tool_calls(content)?;
@@ -450,11 +456,13 @@ fn to_template_message<'a>(
                 reasoning_content: reasoning,
                 tool_calls,
                 tool_call_id: None,
+                name,
             }
         }
         ChatMessage::ToolResponse {
             content,
             tool_call_id,
+            ..
         } => TemplateMessage {
             role: "tool",
             content: to_template_content(content, content_format, multimodal)?,
@@ -463,8 +471,9 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.clone()),
+            name,
         },
-        ChatMessage::Custom { role, content } => TemplateMessage {
+        ChatMessage::Custom { role, content, .. } => TemplateMessage {
             role,
             content: to_template_content(content, content_format, multimodal)?,
             tools: None,
@@ -472,6 +481,7 @@ fn to_template_message<'a>(
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            name,
         },
     })
 }
@@ -1119,6 +1129,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "root=identity;system=policy;user=hello;");
+    }
+
+    #[test]
+    fn chat_template_passes_message_names_for_every_role() {
+        let request = sample_request(vec![
+            ChatMessage::custom("root", "identity").with_name(Some("operator".to_string())),
+            ChatMessage::system("policy").with_name(Some("rules".to_string())),
+            ChatMessage::developer("notes", None).with_name(Some("dev".to_string())),
+            ChatMessage::user("hello").with_name(Some("alice".to_string())),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant_text("hey").with_name(Some("helper".to_string())),
+            ChatMessage::tool_response("sunny", "call_1").with_name(Some("weather".to_string())),
+        ]);
+
+        let rendered = render(
+            Some(
+                "{% for m in messages %}{{ m.role }}:{{ m.name if m.name is defined else '-' }};{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "root:operator;system:rules;developer:dev;user:alice;user:-;assistant:helper;tool:weather;"
+        );
     }
 
     #[test]

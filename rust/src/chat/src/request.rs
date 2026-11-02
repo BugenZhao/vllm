@@ -194,31 +194,55 @@ impl From<Vec<ChatContentPart>> for ChatContent {
 
 /// One chat message.
 ///
+/// Every variant carries the optional participant `name`, which chat templates
+/// receive for any role.
+///
 /// Original Python API reference:
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/chat_utils.py#L309-L333>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum ChatMessage {
     /// System message content.
-    System { content: ChatContent },
+    System {
+        content: ChatContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// Developer message content plus optional message-local tools.
     Developer {
         content: ChatContent,
         tools: Option<Vec<ChatTool>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// User message content.
-    User { content: ChatContent },
+    User {
+        content: ChatContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// Assistant history content assembled from structured assistant blocks.
-    Assistant { content: Vec<AssistantContentBlock> },
+    Assistant {
+        content: Vec<AssistantContentBlock>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// Tool response content associated with one prior assistant tool call.
     ToolResponse {
         content: ChatContent,
         tool_call_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Message content under a role outside the standard set, passed to chat
     /// templates unchanged.
     #[serde(untagged)]
-    Custom { role: String, content: ChatContent },
+    Custom {
+        role: String,
+        content: ChatContent,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 impl ChatMessage {
@@ -245,6 +269,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<ChatContent>) -> Self {
         Self::System {
             content: content.into(),
+            name: None,
         }
     }
 
@@ -253,6 +278,7 @@ impl ChatMessage {
         Self::Developer {
             content: content.into(),
             tools,
+            name: None,
         }
     }
 
@@ -270,6 +296,7 @@ impl ChatMessage {
     pub fn user(content: impl Into<ChatContent>) -> Self {
         Self::User {
             content: content.into(),
+            name: None,
         }
     }
 
@@ -277,13 +304,17 @@ impl ChatMessage {
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self::Assistant {
             content: vec![AssistantContentBlock::Text { text: text.into() }],
+            name: None,
         }
     }
 
     /// Construct one chat message with assistant role and structured content
     /// blocks.
     pub fn assistant_blocks(content: Vec<AssistantContentBlock>) -> Self {
-        Self::Assistant { content }
+        Self::Assistant {
+            content,
+            name: None,
+        }
     }
 
     /// Construct one tool-role message.
@@ -291,6 +322,7 @@ impl ChatMessage {
         Self::ToolResponse {
             content: content.into(),
             tool_call_id: tool_call_id.into(),
+            name: None,
         }
     }
 
@@ -299,7 +331,31 @@ impl ChatMessage {
         Self::Custom {
             role: role.into(),
             content: content.into(),
+            name: None,
         }
+    }
+
+    /// Set the participant name of this message.
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        let (Self::System { name: slot, .. }
+        | Self::Developer { name: slot, .. }
+        | Self::User { name: slot, .. }
+        | Self::Assistant { name: slot, .. }
+        | Self::ToolResponse { name: slot, .. }
+        | Self::Custom { name: slot, .. }) = &mut self;
+        *slot = name;
+        self
+    }
+
+    /// Return the participant name of this message, if any.
+    pub fn name(&self) -> Option<&str> {
+        let (Self::System { name, .. }
+        | Self::Developer { name, .. }
+        | Self::User { name, .. }
+        | Self::Assistant { name, .. }
+        | Self::ToolResponse { name, .. }
+        | Self::Custom { name, .. }) = self;
+        name.as_deref()
     }
 
     /// Return the chat role of this message.
@@ -317,19 +373,19 @@ impl ChatMessage {
     /// Concatenate the visible text carried by this message.
     pub fn text_content(&self) -> Result<String> {
         match self {
-            Self::System { content }
+            Self::System { content, .. }
             | Self::Developer { content, .. }
-            | Self::User { content }
+            | Self::User { content, .. }
             | Self::ToolResponse { content, .. }
             | Self::Custom { content, .. } => content.try_flatten_to_text(),
-            Self::Assistant { content } => Ok(content.text()),
+            Self::Assistant { content, .. } => Ok(content.text()),
         }
     }
 
     /// Concatenate assistant reasoning text when present.
     pub fn reasoning_content(&self) -> Option<String> {
         match self {
-            Self::Assistant { content } => content.reasoning(),
+            Self::Assistant { content, .. } => content.reasoning(),
             Self::System { .. }
             | Self::Developer { .. }
             | Self::User { .. }
@@ -341,9 +397,9 @@ impl ChatMessage {
     /// Return whether this message contains any multimodal content.
     pub fn has_multimodal(&self) -> bool {
         match self {
-            Self::System { content }
+            Self::System { content, .. }
             | Self::Developer { content, .. }
-            | Self::User { content }
+            | Self::User { content, .. }
             | Self::ToolResponse { content, .. }
             | Self::Custom { content, .. } => content.has_multimodal(),
             Self::Assistant { .. } => false,
@@ -355,6 +411,7 @@ impl From<AssistantMessage> for ChatMessage {
     fn from(value: AssistantMessage) -> Self {
         Self::Assistant {
             content: value.content,
+            name: None,
         }
     }
 }

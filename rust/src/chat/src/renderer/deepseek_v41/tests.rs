@@ -72,6 +72,7 @@ fn inlines_image_placeholder_at_image_part_positions() {
                 ChatContentPart::image_url("https://example.com/carrots.jpeg"),
                 ChatContentPart::text("what is in the image?"),
             ]),
+            name: None,
         }],
         ..ChatRequest::for_test()
     };
