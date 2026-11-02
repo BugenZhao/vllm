@@ -9,14 +9,12 @@ use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
-use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
+use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
-use xgrammar_structural_tag::ToolChoice;
-use xgrammar_structural_tag::format::Format;
 
 use self::unified::unified_event_stream;
-use super::structural_tag::answer_format;
+use super::structural_tag::GrammarInputs;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
 use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
@@ -42,20 +40,6 @@ pub struct DefaultChatOutputProcessor {
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
     grammar_inputs: Option<GrammarInputs>,
-}
-
-/// Request-scoped inputs for [`UnifiedParser::build_output_grammar`], captured
-/// at construction because the chat request is consumed before the prompt is
-/// tokenized.
-struct GrammarInputs {
-    tools: Vec<ChatTool>,
-    tool_choice: ToolChoice,
-    tool_strict_level: ToolStrictLevel,
-    parallel_tool_calls: bool,
-    /// The request's structured-output constraint, normalized for composition
-    /// into the output grammar. The original stays on the request until an
-    /// output grammar replaces it.
-    answer: Option<Format>,
 }
 
 impl DefaultChatOutputProcessor {
@@ -144,13 +128,7 @@ impl DefaultChatOutputProcessor {
         Ok(Self {
             parser,
             max_tool_calls: request.max_tool_calls(),
-            grammar_inputs: Some(GrammarInputs {
-                tools: request.tools().to_vec(),
-                tool_choice: request.tool_choice().into(),
-                tool_strict_level,
-                parallel_tool_calls: request.parallel_tool_calls(),
-                answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
-            }),
+            grammar_inputs: Some(GrammarInputs::new(request, tool_strict_level)),
         })
     }
 
@@ -269,13 +247,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
             return Ok(None);
         };
         self.parser
-            .build_output_grammar(&OutputGrammarContext {
-                tools: &inputs.tools,
-                tool_choice: &inputs.tool_choice,
-                tool_strict_level: inputs.tool_strict_level,
-                parallel_tool_calls: inputs.parallel_tool_calls,
-                answer: inputs.answer.as_ref(),
-            })
+            .build_output_grammar(&inputs.context())
             .map_err(|error| Error::OutputGrammar {
                 error: Box::new(error),
             })

@@ -11,16 +11,18 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{HarmonyEncoding, StreamableParser};
+use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
 use crate::error::{Error, Result};
 use crate::event::{AssistantBlockKind, ChatTokenUsage};
+use crate::output::structural_tag::GrammarInputs;
 use crate::output::{
     AssistantEvent, ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream,
     generate_tool_call_id,
 };
-use crate::parser::ParserSelection;
+use crate::parser::{ParserSelection, ToolStrictLevel};
 use crate::renderer::harmony::encoding::harmony_encoding;
 use crate::request::ChatRequest;
 
@@ -34,6 +36,7 @@ pub struct HarmonyChatOutputProcessor {
     encoding: &'static HarmonyEncoding,
     tool_calls_enabled: bool,
     max_tool_calls: Option<usize>,
+    grammar_inputs: GrammarInputs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -82,11 +85,18 @@ struct HarmonyState {
 
 impl HarmonyChatOutputProcessor {
     /// Build one request-scoped Harmony processor after backend policy checks.
-    pub fn new(request: &ChatRequest) -> ChatResult<Self> {
+    ///
+    /// `tool_strict_level` is the server-side floor for tool-call grammars,
+    /// `auto` when unset.
+    pub fn new(
+        request: &ChatRequest,
+        tool_strict_level: Option<ToolStrictLevel>,
+    ) -> ChatResult<Self> {
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
             max_tool_calls: request.max_tool_calls(),
+            grammar_inputs: GrammarInputs::new(request, tool_strict_level.unwrap_or_default()),
         })
     }
 }
@@ -118,6 +128,16 @@ fn validate_harmony_override(kind: &'static str, selection: &ParserSelection) ->
 }
 
 impl ChatOutputProcessor for HarmonyChatOutputProcessor {
+    /// Build the grammar of the whole Harmony generation, from the first
+    /// generated token. See [`grammar`].
+    fn build_output_grammar(&self) -> Result<Option<BuiltOutputGrammar>> {
+        grammar::build_output_grammar(&self.grammar_inputs.context()).map_err(|error| {
+            Error::OutputGrammar {
+                error: Box::new(error),
+            }
+        })
+    }
+
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let assistant =
             harmony_assistant_event_stream(decoded, self.encoding, self.tool_calls_enabled);
@@ -486,5 +506,6 @@ fn tool_name<'a>(channel: Option<&str>, recipient: Option<&'a str>) -> Option<&'
     }
 }
 
+mod grammar;
 #[cfg(test)]
 mod tests;
