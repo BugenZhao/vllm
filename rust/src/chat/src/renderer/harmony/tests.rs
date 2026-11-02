@@ -128,6 +128,33 @@ fn renders_tool_roundtrip_fixture() {
 }
 
 #[test]
+fn tool_call_history_uses_legacy_header_tokens() {
+    let encode =
+        |text: &str| harmony_encoding().unwrap().tokenizer().encode_with_special_tokens(text);
+    let legacy =
+        encode("<|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>");
+    let channel_first = encode(
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json",
+    );
+
+    let modes = [
+        GenerationPromptMode::StartNewAssistant,
+        GenerationPromptMode::NoGenerationPrompt,
+    ];
+    for mode in modes {
+        let mut request = fixture_request("tool_roundtrip.json");
+        request.chat_options.generation_prompt_mode = mode;
+        let token_ids = render_token_ids(&request);
+        let contains = |needle: &[u32]| token_ids.windows(needle.len()).any(|w| w == needle);
+
+        // Python renders prior tool calls with the header GPT-OSS was trained
+        // on, tokenized like the whole header text, so the token IDs match too.
+        assert!(contains(&legacy), "{mode:?}");
+        assert!(!contains(&channel_first), "{mode:?}");
+    }
+}
+
+#[test]
 fn drops_stale_analysis_fixture() {
     assert_fixture(
         "drop_analysis.json",
