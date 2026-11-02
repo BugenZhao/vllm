@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -330,6 +332,16 @@ impl ModelConfig {
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
 pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
+    read_json_file(path)
+}
+
+/// `tokenizer_config.json` with every top-level value kept as written, so
+/// integers beyond 64 bits, such as Transformers' `model_max_length` sentinel
+/// `int(1e30)`, survive.
+pub type RawTokenizerConfig = IndexMap<String, Box<RawValue>>;
+
+/// Load `tokenizer_config.json` as it is, if present.
+pub fn load_raw_tokenizer_config(path: Option<&Path>) -> Result<RawTokenizerConfig> {
     read_json_file(path)
 }
 
