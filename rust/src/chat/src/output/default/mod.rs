@@ -27,7 +27,7 @@ use crate::parser::unified::{
     names,
 };
 use crate::parser::{ParserSelection, ToolStrictLevel};
-use crate::request::{ChatRequest, ChatTool};
+use crate::request::{ChatRequest, ChatTool, ResolvedToolContext};
 use crate::{Error, Result as ChatResult};
 
 /// Default request-scoped output processor used by Hugging Face style chat
@@ -119,8 +119,12 @@ impl DefaultChatOutputProcessor {
         )? {
             parser
         } else {
-            let tool_parser =
-                Self::resolve_tool_parser(request, tokenizer.clone(), model_id, tool_call_parser)?;
+            let tool_parser = Self::resolve_tool_parser(
+                &request.tool_context,
+                tokenizer.clone(),
+                model_id,
+                tool_call_parser,
+            )?;
             let reasoning_parser =
                 Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
@@ -165,16 +169,17 @@ impl DefaultChatOutputProcessor {
     /// their markup into content, like Python. A missing parser is an error
     /// only when tool parsing is on.
     fn resolve_tool_parser(
-        request: &ChatRequest,
+        tool_context: &ResolvedToolContext,
         tokenizer: DynTokenizer,
         model_id: &str,
         selection: &ParserSelection,
     ) -> ChatResult<Option<Box<dyn ToolParser>>> {
-        if request.tools().is_empty() {
+        let tools = &tool_context.effective_tools;
+        if tools.is_empty() {
             return Ok(None);
         }
         let Some(parser_name) = selection.resolve_tool_name(model_id) else {
-            if !request.tool_parsing_enabled() {
+            if !tool_context.parsing_enabled() {
                 return Ok(None);
             }
             return Err(match selection {
@@ -186,7 +191,7 @@ impl DefaultChatOutputProcessor {
             });
         };
 
-        let parser = ToolParserFactory::global().create(parser_name, request.tools(), tokenizer)?;
+        let parser = ToolParserFactory::global().create(parser_name, tools, tokenizer)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(Some(parser))
