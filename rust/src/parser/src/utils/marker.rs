@@ -294,9 +294,9 @@ impl Marker {
         Self::text(String::new()).then_special(token)
     }
 
-    /// The marker of the dedicated token `tokenizer` spells `text`, or `None`
+    /// The marker of the special token `tokenizer` spells `text`, or `None`
     /// when it has no such token.
-    pub fn new(tokenizer: &dyn Tokenizer, text: &str) -> Option<Self> {
+    pub fn special_in(tokenizer: &dyn Tokenizer, text: &str) -> Option<Self> {
         let id = tokenizer.token_to_id(text)?;
         Some(Self::special(&SpecialToken {
             text: text.to_string(),

@@ -27,7 +27,7 @@ impl DeepSeekV4ReasoningParser {
         let tool_call_start = DeepSeekV4ToolParser::tool_calls_start(tokenizer.as_ref());
         Ok(Self {
             inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
-                .with_implicit_end(Some(tool_call_start))
+                .with_implicit_ends([tool_call_start])
                 .build()?,
         })
     }

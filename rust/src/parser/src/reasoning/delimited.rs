@@ -3,13 +3,15 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 use winnow::Parser;
-use winnow::combinator::{alt, fail, peek};
+use winnow::combinator::alt;
 use winnow::error::ErrMode;
 use winnow::stream::StreamIsPartial;
 use xgrammar_structural_tag::format::Format;
 
 use super::{ReasoningDelta, ReasoningError, Result};
-use crate::utils::{Attributed, Marker, SpecialToken, attributed_with_markers, safe_text_len_mul};
+use crate::utils::{
+    Attributed, Marker, SpecialToken, attributed_with_markers, peek_markers, safe_text_len_mul,
+};
 
 /// Build a delimited reasoning parser with fixed text at each boundary.
 pub(crate) struct DelimitedReasoningParserBuilder {
@@ -20,7 +22,7 @@ pub(crate) struct DelimitedReasoningParserBuilder {
     after_start: &'static str,
     before_end: &'static str,
     after_end: &'static str,
-    implicit_end: Option<Marker>,
+    implicit_ends: Vec<Marker>,
 }
 
 impl DelimitedReasoningParserBuilder {
@@ -38,7 +40,7 @@ impl DelimitedReasoningParserBuilder {
             after_start: "",
             before_end: "",
             after_end: "",
-            implicit_end: None,
+            implicit_ends: Vec::new(),
         }
     }
 
@@ -66,12 +68,12 @@ impl DelimitedReasoningParserBuilder {
         self
     }
 
-    /// End reasoning without the end marker where `marker` begins, such as a
-    /// tool-call opener the model emits before closing its reasoning. The
-    /// marker itself stays in the content, for the tool parser. `None`, such
-    /// as for a tokenizer without the opener token, leaves no implicit end.
-    pub(crate) fn with_implicit_end(mut self, marker: Option<Marker>) -> Self {
-        self.implicit_end = marker;
+    /// End reasoning without the end marker where any of `markers` begins,
+    /// such as a tool-call opener the model emits before closing its
+    /// reasoning. The marker itself stays in the content, for the tool parser.
+    /// Accepts an `Option`, so a tokenizer without the opener token adds none.
+    pub(crate) fn with_implicit_ends(mut self, markers: impl IntoIterator<Item = Marker>) -> Self {
+        self.implicit_ends.extend(markers);
         self
     }
 
@@ -108,7 +110,7 @@ impl DelimitedReasoningParserBuilder {
             end_token_id,
             after_start: self.after_start,
             after_end: self.after_end,
-            implicit_end: self.implicit_end,
+            implicit_ends: self.implicit_ends,
             current_in_reasoning: false,
             buffer: DecodedText::default(),
             pending_after: "",
@@ -142,9 +144,9 @@ pub(crate) struct DelimitedReasoningParser {
     end_token_id: u32,
     after_start: &'static str,
     after_end: &'static str,
-    /// The marker that ends reasoning in place of the end marker; see
-    /// [`DelimitedReasoningParserBuilder::with_implicit_end`].
-    implicit_end: Option<Marker>,
+    /// Markers that end reasoning in place of the end marker; see
+    /// [`DelimitedReasoningParserBuilder::with_implicit_ends`].
+    implicit_ends: Vec<Marker>,
 
     // Mutable state.
     current_in_reasoning: bool,
@@ -245,7 +247,11 @@ impl DelimitedReasoningParser {
             } else {
                 (&self.start, &self.framed_start)
             };
-            let implicit_end = self.implicit_end.as_ref().filter(|_| self.current_in_reasoning);
+            let implicit_ends: &[Marker] = if self.current_in_reasoning {
+                &self.implicit_ends
+            } else {
+                &[]
+            };
             let mut input = attributed_with_markers(&self.buffer, &());
             if finishing {
                 // Partial delimiters at the end of the stream are body text.
@@ -254,9 +260,8 @@ impl DelimitedReasoningParser {
             let boundary = alt((
                 alt((framed_marker, marker))
                     .map(|delimiter: &str| Boundary::Delimiter(delimiter.len())),
-                |input: &mut Attributed<'_>| match implicit_end {
-                    Some(marker) => peek(marker).value(Boundary::ImplicitEnd).parse_next(input),
-                    None => fail.parse_next(input),
+                |input: &mut Attributed<'_>| {
+                    peek_markers(input, implicit_ends).map(|()| Boundary::ImplicitEnd)
                 },
             ))
             .parse_next(&mut input);
@@ -287,7 +292,7 @@ impl DelimitedReasoningParser {
                 // rest is held back. Fails only on an empty input.
                 Err(_) => {
                     let stops: Vec<&Marker> =
-                        [framed_marker, marker].into_iter().chain(implicit_end).collect();
+                        [framed_marker, marker].into_iter().chain(implicit_ends).collect();
                     safe_text_len_mul(&mut input, &stops).ok()
                 }
             };
@@ -321,7 +326,6 @@ pub(crate) fn last_reasoning_boundary(
 }
 
 /// A reasoning boundary at the cursor.
-#[derive(Clone, Copy)]
 enum Boundary {
     /// The start or end delimiter, of this length including its framing.
     Delimiter(usize),
