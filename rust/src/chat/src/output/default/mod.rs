@@ -166,8 +166,11 @@ impl DefaultChatOutputProcessor {
     ///
     /// With tool parsing off (`tool_choice=none`), a configured parser still
     /// parses the calls so that `max_tool_calls` drops them instead of leaking
-    /// their markup into content, like Python. A missing parser is an error
-    /// only when tool parsing is on.
+    /// their markup into content. This holds for every parser, as for Python's
+    /// parser engines; Python's other parsers (legacy tool parsers, the HF
+    /// response-template parser, the Llama JSON parser) keep the raw call as
+    /// content instead. A missing parser is an error only when tool parsing is
+    /// on.
     fn resolve_tool_parser(
         tool_context: &ResolvedToolContext,
         tokenizer: DynTokenizer,
@@ -435,6 +438,9 @@ mod tests {
         };
 
         let none = ParserSelection::None;
+        let llama3_json = ParserSelection::Explicit("llama3_json".to_string());
+        let llama3_json_text = r#"{"name":"search","parameters":{"query":"vllm"}}"#;
+        let json_answer = r#"{"answer":42}"#;
         let search = || vec!["search".to_string()];
         for (tool_parser, reasoning_parser, text, auto_content, none_content) in [
             // Python's parser engine parses a marked call and drops it: neither
@@ -442,6 +448,9 @@ mod tests {
             // parser and a split tool parser alike.
             (&gemma4, &gemma4, gemma4_text, "Sure.", "Sure."),
             (&qwen3_coder, &none, qwen3_coder_text, "Sure.", "Sure."),
+            // Rust drops a bare JSON call too, where Python's Llama parser
+            // keeps it as content.
+            (&llama3_json, &none, llama3_json_text, "", ""),
         ] {
             assert_eq!(
                 run(tool_parser, reasoning_parser, text, ChatToolChoice::Auto).await,
@@ -450,6 +459,13 @@ mod tests {
             assert_eq!(
                 run(tool_parser, reasoning_parser, text, ChatToolChoice::None).await,
                 (none_content.to_string(), vec![])
+            );
+        }
+        // JSON that is not a call stays content either way.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            assert_eq!(
+                run(&llama3_json, &none, json_answer, tool_choice).await,
+                (json_answer.to_string(), vec![])
             );
         }
         // Without a configured tool parser, the markup stays content.
