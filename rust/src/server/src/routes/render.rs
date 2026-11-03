@@ -20,9 +20,11 @@ use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
-    GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
+    GenerateRequest, GenerateSamplingParams, validate_request as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    ListModelsResponse, ModelObject, StreamOptions, StringOrArray,
+};
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
@@ -97,6 +99,9 @@ fn lower_render_request(
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");
+    // The text layer keeps stop options with decoding; generate reads them
+    // from the sampling params, like Python's.
+    let decode_options = text_request.decode_options;
 
     let request = GenerateRequest {
         request_id: Some(text_request.request_id),
@@ -104,8 +109,11 @@ fn lower_render_request(
         token_ids,
         sampling_params: GenerateSamplingParams {
             n: None,
-            stop: None,
-            include_stop_str_in_output: None,
+            stop: decode_options
+                .stop_strings
+                .filter(|stop| !stop.is_empty())
+                .map(StringOrArray::Array),
+            include_stop_str_in_output: decode_options.include_stop_str_in_output.then_some(true),
             trace_decode_token_ids: None,
             inner: text_request.sampling_params,
         },

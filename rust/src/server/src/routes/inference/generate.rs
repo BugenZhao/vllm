@@ -36,7 +36,7 @@ use self::types::{
     GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
-pub(crate) use self::validate::validate_request_compat;
+pub(crate) use self::validate::validate_request;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
