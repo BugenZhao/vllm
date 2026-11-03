@@ -154,8 +154,8 @@ pub struct SamplingParams {
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
-    /// token generate API send.
-    #[serde(alias = "extra_args")]
+    /// token generate API send and `/render` emits for them.
+    #[serde(rename(serialize = "extra_args"), alias = "extra_args")]
     pub vllm_xargs: Option<HashMap<String, Value>>,
     /// Number of newly generated tokens to batch into each streamed output.
     /// Raises the interval above the frontend-level `--stream-interval`;

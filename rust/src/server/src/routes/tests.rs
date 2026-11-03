@@ -1715,6 +1715,56 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
 }
 
 #[tokio::test]
+async fn render_emits_stop_options_in_sampling_params_like_python() {
+    let cases = [
+        (
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stop": "\n",
+                "include_stop_str_in_output": true
+            }),
+            json!(["\n"]),
+        ),
+        (
+            "/v1/completions/render",
+            json!({
+                "model": "render-model",
+                "prompt": "hello",
+                "stop": ["a", "b"],
+                "include_stop_str_in_output": true
+            }),
+            json!(["a", "b"]),
+        ),
+    ];
+    for (uri, body, expected_stop) in cases {
+        let mut app = test_render_app();
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let rendered = if json.is_array() { &json[0] } else { &json };
+        assert_eq!(rendered["sampling_params"]["stop"], expected_stop, "{uri}");
+        assert_eq!(
+            rendered["sampling_params"]["include_stop_str_in_output"], true,
+            "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn render_list_models_reports_configured_max_model_len() {
     for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
         let mut app = test_render_app_with_max_model_len(configured);
@@ -1884,9 +1934,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["sampling_params"]["bad_words"],
         json!(["blocked"])
     );
-    // Transfer params move to the top level, like Python render.
+    // Transfer params move to the top level, like Python render, and the rest
+    // stay under Python's `extra_args` key.
     assert_eq!(
-        render_json["sampling_params"]["vllm_xargs"],
+        render_json["sampling_params"]["extra_args"],
         json!({"custom": 1})
     );
     assert_eq!(

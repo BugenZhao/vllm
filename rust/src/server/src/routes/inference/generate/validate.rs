@@ -6,12 +6,13 @@ use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 
 /// Enforce the minimal compatibility contract for the Rust token generate
-/// route.
+/// route: [`validate_request`], plus a rejection of each field the route does
+/// not implement yet.
 pub(crate) fn validate_request_compat(
     request: &GenerateRequest,
     served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
-    served_model_names.check(request.model.as_deref())?;
+    validate_request(request, served_model_names)?;
 
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
@@ -47,6 +48,18 @@ pub(crate) fn validate_request_compat(
             "trace_decode_token_ids is not supported."
         );
     }
+
+    Ok(())
+}
+
+/// Validate a token generate request regardless of which fields this route
+/// implements. `/render` checks its output with this, since a Python generate
+/// server that supports more fields may consume it.
+pub(crate) fn validate_request(
+    request: &GenerateRequest,
+    served_model_names: &ServedModelNames,
+) -> Result<(), ApiError> {
+    served_model_names.check(request.model.as_deref())?;
 
     if request.token_ids.is_empty() {
         bail_invalid_request!(
