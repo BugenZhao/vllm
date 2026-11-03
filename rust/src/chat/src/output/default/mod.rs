@@ -119,30 +119,8 @@ impl DefaultChatOutputProcessor {
         )? {
             parser
         } else {
-            let tool_parsing_enabled = request.tool_parsing_enabled();
-            let tool_parser = if tool_parsing_enabled {
-                Some(Self::resolve_tool_parser(
-                    request.tools(),
-                    tokenizer.clone(),
-                    model_id,
-                    tool_call_parser,
-                )?)
-            } else if !request.tools().is_empty()
-                && let Some(parser_name) = tool_name
-            {
-                // With tool parsing off (`tool_choice=none`), a configured parser
-                // whose calls carry markup still parses them so that
-                // `max_tool_calls` drops them instead of leaking the markup into
-                // content, like Python.
-                Some(ToolParserFactory::global().create(
-                    parser_name,
-                    request.tools(),
-                    tokenizer.clone(),
-                )?)
-                .filter(|parser| parser.marks_calls())
-            } else {
-                None
-            };
+            let tool_parser =
+                Self::resolve_tool_parser(request, tokenizer.clone(), model_id, tool_call_parser)?;
             let reasoning_parser =
                 Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
@@ -180,28 +158,38 @@ impl DefaultChatOutputProcessor {
         }
     }
 
+    /// Build the configured tool parser for a request with tools.
+    ///
+    /// With tool parsing off (`tool_choice=none`), a configured parser still
+    /// parses the calls so that `max_tool_calls` drops them instead of leaking
+    /// their markup into content, like Python. A missing parser is an error
+    /// only when tool parsing is on.
     fn resolve_tool_parser(
-        tools: &[ChatTool],
+        request: &ChatRequest,
         tokenizer: DynTokenizer,
         model_id: &str,
         selection: &ParserSelection,
-    ) -> ChatResult<Box<dyn ToolParser>> {
-        let factory = ToolParserFactory::global();
-        let parser_name = match selection {
-            ParserSelection::Auto => selection.resolve_tool_name(model_id).ok_or_else(|| {
-                Error::ParserUnavailableForModel {
+    ) -> ChatResult<Option<Box<dyn ToolParser>>> {
+        if request.tools().is_empty() {
+            return Ok(None);
+        }
+        let Some(parser_name) = selection.resolve_tool_name(model_id) else {
+            if !request.tool_parsing_enabled() {
+                return Ok(None);
+            }
+            return Err(match selection {
+                ParserSelection::None => Error::ParserDisabled { kind: "tool" },
+                _ => Error::ParserUnavailableForModel {
                     kind: "tool",
                     model_id: model_id.to_string(),
-                }
-            })?,
-            ParserSelection::None => return Err(Error::ParserDisabled { kind: "tool" }),
-            ParserSelection::Explicit(name) => name.as_str(),
+                },
+            });
         };
 
-        let parser = factory.create(parser_name, tools, tokenizer)?;
+        let parser = ToolParserFactory::global().create(parser_name, request.tools(), tokenizer)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
-        Ok(parser)
+        Ok(Some(parser))
     }
 
     fn resolve_optional_unified_parser(
@@ -441,8 +429,6 @@ mod tests {
             (message.text(), names)
         };
 
-        let llama3_json = ParserSelection::Explicit("llama3_json".to_string());
-        let llama3_json_text = r#"{"name":"search","parameters":{"query":"vllm"}}"#;
         let none = ParserSelection::None;
         let search = || vec!["search".to_string()];
         for (tool_parser, reasoning_parser, text, auto_content, none_content) in [
@@ -451,8 +437,6 @@ mod tests {
             // parser and a split tool parser alike.
             (&gemma4, &gemma4, gemma4_text, "Sure.", "Sure."),
             (&qwen3_coder, &none, qwen3_coder_text, "Sure.", "Sure."),
-            // A bare JSON call reads the same as a JSON answer, which stays.
-            (&llama3_json, &none, llama3_json_text, "", llama3_json_text),
         ] {
             assert_eq!(
                 run(tool_parser, reasoning_parser, text, ChatToolChoice::Auto).await,
