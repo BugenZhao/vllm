@@ -23,6 +23,12 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
         !is_truthy(value)
     }),
+    // Store Responses API responses for retrieval, `background` and
+    // `previous_response_id`; the Rust frontend keeps no response store.
+    // Python reads it as `bool(int(value))`.
+    ("VLLM_ENABLE_RESPONSES_API_STORE", |value| {
+        !value.trim().parse::<i64>().is_ok_and(|value| value == 0)
+    }),
 ];
 
 /// Unsupported environment variables that only take effect under
@@ -125,6 +131,7 @@ mod tests {
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
         check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
         check_with(&[("VLLM_REQUEST_BODY_LOG_LEVEL", "debug")]).unwrap();
+        check_with(&[("VLLM_ENABLE_RESPONSES_API_STORE", "0")]).unwrap();
     }
 
     #[test]
@@ -133,6 +140,7 @@ mod tests {
             ("VLLM_USE_MODELSCOPE", "True"),
             ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
             ("VLLM_REQUEST_BODY_LOG_LEVEL", "INFO"),
+            ("VLLM_ENABLE_RESPONSES_API_STORE", "1"),
         ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
