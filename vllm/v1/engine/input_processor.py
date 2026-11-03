@@ -198,17 +198,7 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
-            if self.model_config.return_sampling_mask:
-                if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
-                    )
-                if params.top_k <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to "
-                        "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
-                    )
+            params._validate_sampling_mask(self.model_config)
             params._validate_thinking_token_budget(self.vllm_config.reasoning_config)
             if (
                 params.trace_decode_token_ids

@@ -1229,6 +1229,7 @@ class EngineCore:
         that do not know the engine's configuration rely on these to reject
         the request instead of having the engine ignore or fail on it.
         """
+        params._validate_sampling_mask(self.vllm_config.model_config)
         params._validate_thinking_token_budget(self.vllm_config.reasoning_config)
 
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:

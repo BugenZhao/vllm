@@ -1204,6 +1204,21 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
+    def _validate_sampling_mask(self, model_config: ModelConfig) -> None:
+        if not model_config.return_sampling_mask:
+            return
+
+        if self.temperature <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires temperature > 0"
+            )
+        if self.top_k <= 0:
+            raise VLLMValidationError(
+                "sampling distribution replay requires top_k > 0 to "
+                "bound sampling mask size, reduce transfer overhead, "
+                "and avoid potential OOMs"
+            )
+
     def _validate_thinking_token_budget(
         self,
         reasoning_config: ReasoningConfig | None,

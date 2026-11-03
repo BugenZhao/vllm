@@ -157,6 +157,37 @@ async def test_generate_rejects_thinking_token_budget_without_reasoning(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("sampling_params", "error"),
+    [
+        ({"temperature": 0.0, "top_k": 5}, "temperature > 0"),
+        ({"temperature": 0.8, "top_k": 0}, "top_k > 0"),
+    ],
+)
+async def test_generate_sampling_mask_rejects_unbounded_requests(
+    client, sampling_params, error
+):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4, **sampling_params},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert error in resp.json()["error"]["message"]
+
+    payload["sampling_params"] = {"max_tokens": 4, "temperature": 0.8, "top_k": 5}
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
