@@ -16,7 +16,12 @@ from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config import (
+    ModelConfig,
+    ReasoningConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -1197,6 +1202,19 @@ class SamplingParams(
             raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
+            )
+
+    def _validate_thinking_token_budget(
+        self,
+        reasoning_config: ReasoningConfig | None,
+    ) -> None:
+        if self.thinking_token_budget is not None and (
+            reasoning_config is None or not reasoning_config.enabled
+        ):
+            raise VLLMValidationError(
+                "thinking_token_budget is set but reasoning_config is "
+                "not configured. Please set --reasoning-parser "
+                "and/or --reasoning-config to use thinking_token_budget."
             )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
