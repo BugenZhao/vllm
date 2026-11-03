@@ -10196,18 +10196,35 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     engine_task.abort_and_join().await;
 }
 
-/// Captures the access-log events as `LEVEL field=value ...`, with the
-/// nondeterministic `latency` shown only as present.
-#[derive(Clone, Default)]
-struct AccessLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+/// Captures the events of one middleware module (`target`) as
+/// `LEVEL field=value ...`, with the nondeterministic `latency` shown only as
+/// present.
+#[derive(Clone)]
+struct MiddlewareLogCapture {
+    target: &'static str,
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+}
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
+impl MiddlewareLogCapture {
+    fn new(target: &'static str) -> Self {
+        Self {
+            target,
+            lines: Default::default(),
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.lines.lock().expect("middleware log lock").clone()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MiddlewareLogCapture {
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if event.metadata().target() != "vllm_server::middleware::access_log" {
+        if event.metadata().target() != self.target {
             return;
         }
         let mut line = event.metadata().level().to_string();
@@ -10217,7 +10234,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
                 name => line.push_str(&format!(" {name}={value:?}")),
             },
         );
-        self.0.lock().expect("access log lock").push(line);
+        self.lines.lock().expect("middleware log lock").push(line);
     }
 }
 
@@ -10236,7 +10253,7 @@ async fn access_log_lines(
             .with_api_keys(vec!["secret".to_string()])
             .with_access_log(access_log),
     ));
-    let capture = AccessLogCapture::default();
+    let capture = MiddlewareLogCapture::new("vllm_server::middleware::access_log");
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
 
@@ -10246,7 +10263,7 @@ async fn access_log_lines(
     }
 
     engine_task.abort_and_join().await;
-    capture.0.lock().expect("access log lock").clone()
+    capture.lines()
 }
 
 /// One INFO event per response, like Python's uvicorn access log, with the
@@ -10315,6 +10332,75 @@ async fn access_log_disabled_logs_nothing() {
     .await;
 
     assert_eq!(lines, Vec::<String>::new());
+}
+
+/// `--log-error-stack` logs each error response with the error the client
+/// receives, and nothing without the flag. Responses that are not an
+/// `ApiError`, such as the 501 route placeholders, are not logged.
+#[tokio::test]
+#[serial]
+async fn log_error_stack_logs_error_responses() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let chat = |body: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .expect("build request")
+    };
+    let mut logs = Vec::new();
+    for log_error_stack in [true, false] {
+        let (chat_llm, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["test-model".to_string()], chat_llm).with_api_server_options(
+                ApiServerOptions {
+                    log_error_stack,
+                    ..Default::default()
+                },
+            ),
+        ));
+        let capture = MiddlewareLogCapture::new("vllm_server::middleware::error_log");
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+        let requests = [
+            Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"),
+            chat(r#"{"model":"missing","messages":[{"role":"user","content":"hi"}]}"#),
+            chat(r#"{"messages":[{"role":"user","content":"hi"}],"top_p":2}"#),
+            chat("{not json"),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .body(Body::empty())
+                .expect("build request"),
+        ];
+        for request in requests {
+            let response = app.clone().oneshot(request).await.expect("call app");
+            to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        }
+
+        engine_task.abort_and_join().await;
+        logs.push((log_error_stack, capture.lines()));
+    }
+
+    expect_test::expect![[r#"
+        [
+            (
+                true,
+                [
+                    "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" param=\"model\" error=\"The model `missing` does not exist.\"",
+                    "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"BadRequestError\" error=\"top_p: Validation error: top_p must be in (0, 1] - greater than 0.0 and at most 1.0 [{\\\"value\\\": Number(2.0)}]\"",
+                    "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"Bad Request\" error=\"Failed to parse the request body as JSON: key must be a string at line 1 column 2\"",
+                ],
+            ),
+            (
+                false,
+                [],
+            ),
+        ]
+    "#]].assert_debug_eq(&logs);
 }
 
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`

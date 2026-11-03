@@ -256,6 +256,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
+                        no_log_error_stack: false,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -719,6 +721,109 @@ fn args_json_reads_env_only_settings_from_env() {
         ]
     "#]]
     .assert_debug_eq(&errors);
+}
+
+/// `--log-error-stack` defaults to `VLLM_SERVER_DEV_MODE`, and
+/// `--no-log-error-stack` turns it off; the last flag wins, like Python's
+/// `--log-error-stack`/`--no-log-error-stack` pair. Python leaves the flag out
+/// of `--args-json` when it equals that default, so the JSON path falls back
+/// to the env var too.
+#[test]
+fn log_error_stack_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .log_error_stack
+    };
+    // `--server-dev-mode` is the hidden flag `VLLM_SERVER_DEV_MODE` binds.
+    let serve_cases = [
+        &[][..],
+        &["--log-error-stack"],
+        &["--log-error-stack", "false"],
+        &["--server-dev-mode", "1"],
+        &["--server-dev-mode", "1", "--no-log-error-stack"],
+        &["--no-log-error-stack", "--log-error-stack"],
+        &["--log-error-stack", "--no-log-error-stack"],
+    ]
+    .map(|args| (args.join(" "), serve(args)));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().log_error_stack
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    let enabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":true}"#;
+    let dev_mode = [("VLLM_SERVER_DEV_MODE", "1")];
+    let json_cases = [
+        ("default", json(model_only, &[])),
+        ("flag", json(enabled, &[])),
+        ("dev mode", json(model_only, &dev_mode)),
+        ("dev mode, flag off", json(disabled, &dev_mode)),
+    ];
+
+    expect![[r#"
+        (
+            [
+                (
+                    "",
+                    false,
+                ),
+                (
+                    "--log-error-stack",
+                    true,
+                ),
+                (
+                    "--log-error-stack false",
+                    false,
+                ),
+                (
+                    "--server-dev-mode 1",
+                    true,
+                ),
+                (
+                    "--server-dev-mode 1 --no-log-error-stack",
+                    false,
+                ),
+                (
+                    "--no-log-error-stack --log-error-stack",
+                    true,
+                ),
+                (
+                    "--log-error-stack --no-log-error-stack",
+                    false,
+                ),
+            ],
+            [
+                (
+                    "default",
+                    false,
+                ),
+                (
+                    "flag",
+                    true,
+                ),
+                (
+                    "dev mode",
+                    true,
+                ),
+                (
+                    "dev mode, flag off",
+                    false,
+                ),
+            ],
+        )
+    "#]]
+    .assert_debug_eq(&(serve_cases, json_cases));
 }
 
 #[test]
@@ -1668,6 +1773,8 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
+                        no_log_error_stack: false,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -2596,6 +2703,8 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
+                        no_log_error_stack: false,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -2896,6 +3005,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
@@ -3024,6 +3134,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
@@ -3265,6 +3376,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,

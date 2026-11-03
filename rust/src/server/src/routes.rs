@@ -286,6 +286,10 @@ fn build_router_with_options(
         .layer(middleware::cors_layer(&state.cors))
         .layer(from_fn(middleware::strip_cors_on_no_origin));
 
+    if state.api_server_options.log_error_stack {
+        router = router.layer(from_fn(middleware::log_error_response));
+    }
+
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(
             state.clone(),

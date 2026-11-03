@@ -471,6 +471,23 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// If set to True, log the stack trace of error responses. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`. Rust has no stack trace to print, so each error
+    /// response is logged with the error it returns.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        overrides_with = "no_log_error_stack"
+    )]
+    #[serde(default)]
+    pub log_error_stack: Option<bool>,
+
+    /// Do not log error responses, even under `VLLM_SERVER_DEV_MODE`.
+    #[arg(long, overrides_with = "log_error_stack")]
+    #[serde(skip)]
+    pub no_log_error_stack: bool,
+
     /// Register the scale-out `/inference/v1/generate` endpoint.
     #[arg(
         long,
@@ -964,6 +981,8 @@ impl SharedRuntimeArgs {
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
+            log_error_stack: !self.no_log_error_stack
+                && self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,

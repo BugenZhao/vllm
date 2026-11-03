@@ -11,7 +11,7 @@ use vllm_engine_core_client::protocol::output::RequestError;
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 
 /// Small OpenAI-style error family used by the minimal HTTP layer.
-#[derive(Debug, Construct, Macro)]
+#[derive(Debug, Clone, Construct, Macro)]
 pub enum ApiError {
     /// The request is syntactically valid OpenAI JSON but asks for unsupported
     /// behavior.
@@ -93,7 +93,10 @@ impl From<JsonRejection> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status_code(), Json(self.to_error_response())).into_response()
+        let mut response = (self.status_code(), Json(self.to_error_response())).into_response();
+        // Read by the `--log-error-stack` middleware.
+        response.extensions_mut().insert(self);
+        response
     }
 }
 
