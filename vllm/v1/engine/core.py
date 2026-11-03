@@ -42,6 +42,7 @@ from vllm.multimodal.cache import (
     engine_receiver_cache_from_config,
 )
 from vllm.outputs import RequestError
+from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1221,6 +1222,16 @@ class EngineCore:
         """Return the latest committed weight version."""
         return self._weight_version
 
+    def _validate_sampling_params(self, params: SamplingParams) -> None:
+        """Run the request checks that depend on the engine's configuration.
+
+        The Python frontend already runs them in `InputProcessor`; frontends
+        that do not know the engine's configuration rely on these to reject
+        the request instead of having the engine ignore or fail on it.
+        """
+        params._validate_sampling_mask(self.vllm_config.model_config)
+        params._validate_thinking_token_budget(self.vllm_config.reasoning_config)
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 
@@ -1234,6 +1245,9 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
+
+        if request.sampling_params is not None:
+            self._validate_sampling_params(request.sampling_params)
 
         watermark_config = self.vllm_config.watermark_config
         params = request.sampling_params

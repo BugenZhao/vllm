@@ -198,26 +198,8 @@ class InputProcessor:
                     vocab_size=self.model_config.get_vocab_size(),
                 )
 
-            if self.model_config.return_sampling_mask:
-                if params.temperature <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires temperature > 0"
-                    )
-                if params.top_k <= 0:
-                    raise ValueError(
-                        "sampling distribution replay requires top_k > 0 to "
-                        "bound sampling mask size, reduce transfer overhead, "
-                        "and avoid potential OOMs"
-                    )
-            if params.thinking_token_budget is not None and (
-                self.vllm_config.reasoning_config is None
-                or not self.vllm_config.reasoning_config.enabled
-            ):
-                raise VLLMValidationError(
-                    "thinking_token_budget is set but reasoning_config is "
-                    "not configured. Please set --reasoning-parser "
-                    "and/or --reasoning-config to use thinking_token_budget."
-                )
+            params._validate_sampling_mask(self.model_config)
+            params._validate_thinking_token_budget(self.vllm_config.reasoning_config)
             if (
                 params.trace_decode_token_ids
                 and not self.model_config.enable_trace_replay

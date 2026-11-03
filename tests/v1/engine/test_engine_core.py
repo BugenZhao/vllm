@@ -22,6 +22,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -507,6 +508,58 @@ def test_engine_core_invalid_request_id_type():
     engine_core.add_request(*engine_core.preprocess_add_request(valid_request))
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+def test_engine_core_rejects_thinking_token_budget_without_reasoning():
+    """A frontend that does not know whether the engine has reasoning enabled
+    relies on the engine to reject a budget it would otherwise ignore."""
+    vllm_config = EngineArgs(model=MODEL_NAME).create_engine_config()
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+        )
+
+    request = make_request()
+    request.sampling_params = SamplingParams(thinking_token_budget=16)
+    with pytest.raises(VLLMValidationError, match="reasoning_config is not configured"):
+        engine_core.preprocess_add_request(request)
+
+    engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
+    assert len(engine_core.scheduler.waiting) == 1
+
+
+@create_new_process_for_each_test()
+def test_engine_core_rejects_unbounded_sampling_mask_requests():
+    """A frontend that does not know the engine returns sampling masks relies
+    on the engine to reject requests whose mask would span the vocabulary."""
+    vllm_config = EngineArgs(
+        model=MODEL_NAME,
+        return_sampling_mask=True,
+        logprobs_mode="processed_logprobs",
+    ).create_engine_config()
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+        )
+
+    for sampling_params, error in [
+        (SamplingParams(temperature=0.0, top_k=20), "temperature > 0"),
+        (SamplingParams(temperature=0.7), "top_k > 0"),
+    ]:
+        request = make_request()
+        request.sampling_params = sampling_params
+        with pytest.raises(VLLMValidationError, match=error):
+            engine_core.preprocess_add_request(request)
+
+    request = make_request()
+    request.sampling_params = SamplingParams(temperature=0.7, top_k=20)
+    engine_core.add_request(*engine_core.preprocess_add_request(request))
+    assert len(engine_core.scheduler.waiting) == 1
 
 
 @create_new_process_for_each_test()

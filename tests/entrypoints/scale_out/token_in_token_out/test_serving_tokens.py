@@ -139,6 +139,55 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
 
 
 @pytest.mark.asyncio
+async def test_generate_rejects_thinking_token_budget_without_reasoning(client):
+    """The server runs without a reasoning parser, so a budget cannot apply."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4, "thinking_token_budget": 16},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "reasoning_config is not configured" in resp.json()["error"]["message"]
+
+    payload["sampling_params"] = {"max_tokens": 4}
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("sampling_params", "error"),
+    [
+        ({"temperature": 0.0, "top_k": 5}, "temperature > 0"),
+        ({"temperature": 0.8, "top_k": 0}, "top_k > 0"),
+    ],
+)
+async def test_generate_sampling_mask_rejects_unbounded_requests(
+    client, sampling_params, error
+):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 4, **sampling_params},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert error in resp.json()["error"]["message"]
+
+    payload["sampling_params"] = {"max_tokens": 4, "temperature": 0.8, "top_k": 5}
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
