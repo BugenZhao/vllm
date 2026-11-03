@@ -1884,9 +1884,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         render_json["sampling_params"]["bad_words"],
         json!(["blocked"])
     );
-    // Transfer params move to the top level, like Python render.
+    // Transfer params move to the top level, like Python render, and the rest
+    // stay under Python's `extra_args` key.
     assert_eq!(
-        render_json["sampling_params"]["vllm_xargs"],
+        render_json["sampling_params"]["extra_args"],
         json!({"custom": 1})
     );
     assert_eq!(
