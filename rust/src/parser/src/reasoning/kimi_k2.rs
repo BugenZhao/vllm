@@ -25,7 +25,7 @@ impl KimiK2ReasoningParser {
     /// Create a Kimi K2 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         let tool_calls_section_begin =
-            Marker::token_or_text(tokenizer.as_ref(), "<|tool_calls_section_begin|>");
+            Marker::new(tokenizer.as_ref(), "<|tool_calls_section_begin|>");
         Ok(Self {
             inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
                 .with_implicit_end(tool_calls_section_begin)

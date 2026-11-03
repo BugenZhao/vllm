@@ -294,16 +294,14 @@ impl Marker {
         Self::text(String::new()).then_special(token)
     }
 
-    /// A marker spelled `text`, guarded by the dedicated token of `tokenizer`
-    /// with that spelling, or matched by spelling when it has none.
-    pub fn token_or_text(tokenizer: &dyn Tokenizer, text: &str) -> Self {
-        match tokenizer.token_to_id(text) {
-            Some(id) => Self::special(&SpecialToken {
-                text: text.to_string(),
-                id,
-            }),
-            None => Self::text(text),
-        }
+    /// The marker of the dedicated token `tokenizer` spells `text`, or `None`
+    /// when it has no such token.
+    pub fn new(tokenizer: &dyn Tokenizer, text: &str) -> Option<Self> {
+        let id = tokenizer.token_to_id(text)?;
+        Some(Self::special(&SpecialToken {
+            text: text.to_string(),
+            id,
+        }))
     }
 
     /// Append ordinary text, matched by spelling.

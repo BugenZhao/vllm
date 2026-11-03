@@ -24,7 +24,7 @@ pub struct Glm47ReasoningParser {
 impl Glm47ReasoningParser {
     /// Create a GLM-4.7 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
-        let tool_call_start = Marker::token_or_text(tokenizer.as_ref(), "<tool_call>");
+        let tool_call_start = Marker::new(tokenizer.as_ref(), "<tool_call>");
         Ok(Self {
             inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
                 .with_implicit_end(tool_call_start)

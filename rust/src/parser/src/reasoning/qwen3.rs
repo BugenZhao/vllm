@@ -23,7 +23,7 @@ pub struct Qwen3ReasoningParser {
 impl Qwen3ReasoningParser {
     /// Create a Qwen3 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
-        let tool_call_start = Marker::token_or_text(tokenizer.as_ref(), "<tool_call>");
+        let tool_call_start = Marker::new(tokenizer.as_ref(), "<tool_call>");
         Ok(Self {
             inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
                 .with_after_start("\n")
