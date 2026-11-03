@@ -575,6 +575,19 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub skip_model_name_validation: bool,
 
+    /// Register the development routes. Like Python, it is set only through
+    /// `VLLM_SERVER_DEV_MODE`, which must be an integer.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SERVER_DEV_MODE",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub server_dev_mode: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -758,6 +771,10 @@ impl SharedRuntimeArgs {
         }
         if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
             self.skip_model_name_validation = parse_truthy_flag(&value)?;
+        }
+        if let Some(value) = lookup("VLLM_SERVER_DEV_MODE") {
+            self.server_dev_mode = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_SERVER_DEV_MODE: {error}"))?;
         }
         Ok(())
     }
@@ -950,6 +967,7 @@ impl SharedRuntimeArgs {
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
+            server_dev_mode: self.server_dev_mode,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
