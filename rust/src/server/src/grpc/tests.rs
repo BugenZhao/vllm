@@ -50,7 +50,7 @@ use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -438,9 +438,10 @@ where
     )
     .await
     .expect("connect client");
-    let engine_health = EngineHealth::subscribe(&client);
+    let llm = EngineCoreLlm::new(client);
+    let engine_health = EngineHealth::subscribe(&llm);
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
+    let chat = ChatLlm::from_shared_backend(llm, backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -2567,7 +2568,7 @@ async fn control_aggregates_multi_engine_capacity() {
         }
         let client = client_task.await.unwrap().expect("connect multi-engine client");
         let chat = ChatLlm::from_shared_backend(
-            Llm::new(client),
+            EngineCoreLlm::new(client),
             Arc::new(FakeTextBackend::default()) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);
