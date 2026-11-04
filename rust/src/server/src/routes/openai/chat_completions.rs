@@ -680,8 +680,7 @@ impl UpdateOutput {
 ///
 /// Each update is held until the next one ends or the stream finishes, so the
 /// last delta line carries the finish reason: `vllm-chat` emits `Done` after
-/// the last update's `LogprobsDelta`, and a parser may release held-back output
-/// in between, which belongs to that last update.
+/// the last update's `LogprobsDelta`.
 #[derive(Debug)]
 struct StreamDeltaLog {
     /// Where the deltas are logged.
