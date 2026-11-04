@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use expect_test::expect;
 use serde_json::json;
 use serial_test::serial;
 use tower::Service as _;
@@ -152,9 +153,7 @@ async fn responses_rejects_invalid_controls_before_inference() {
             .unwrap(),
         ),
         ("service_tier", json!("bogus")),
-        ("include", json!(["message.output_text.logprobs"])),
         ("include", json!(["unknown"])),
-        ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
         ("spaces_between_special_tokens", json!(false)),
@@ -812,6 +811,358 @@ async fn responses_non_streaming_includes_reasoning_item() {
     assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
     assert_eq!(reasoning["content"][0]["text"], "Need tool.");
     assert_eq!(output[1]["content"][0]["text"], "answer");
+}
+
+/// Serve `outputs` (one engine update each) with sample logprobs on every
+/// token, checking the logprobs count the engine was asked for.
+async fn reasoning_app_with_logprobs(
+    outputs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    expected_engine_logprobs: Option<i32>,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-openai",
+        move |request_id| {
+            RequestBatchOutputs {
+                outputs: outputs
+                    .into_iter()
+                    .map(|(token_ids, finish_reason)| {
+                        let logprobs = sample_logprobs_for_tokens(&token_ids);
+                        request_output_with_logprobs(
+                            request_id,
+                            token_ids,
+                            finish_reason,
+                            None,
+                            Some(logprobs),
+                            None,
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+            .into()
+        },
+        move |request| {
+            assert_eq!(
+                request.sampling_params.as_ref().unwrap().logprobs,
+                expected_engine_logprobs
+            );
+        },
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+    )
+    .await;
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
+/// The `token` of each logprob entry of one output text part or delta.
+fn logprob_tokens(logprobs: &serde_json::Value) -> Vec<&str> {
+    logprobs
+        .as_array()
+        .expect("logprobs array")
+        .iter()
+        .map(|logprob| logprob["token"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_non_streaming_output_text_logprobs_cover_the_whole_output() {
+    let (app, engine_task) =
+        reasoning_app_with_logprobs(reasoning_answer_output_specs(), Some(1)).await;
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+            "top_logprobs": 1
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["top_logprobs"], 1);
+    let output = json["output"].as_array().expect("output items");
+    assert!(output[0].get("logprobs").is_none());
+    let part = &output[1]["content"][0];
+    // Like Python, a non-streaming request is one engine update, so the
+    // text carries the logprobs of every generated token.
+    assert_eq!(
+        logprob_tokens(&part["logprobs"]),
+        [
+            "<think>", "N", "e", "e", "d", " ", "t", "o", "o", "l", ".", "</think>", "a", "n", "s",
+            "w", "e", "r", "!"
+        ]
+    );
+    expect![[r#"
+        {
+          "token": "a",
+          "logprob": -0.1,
+          "bytes": [
+            97
+          ],
+          "top_logprobs": [
+            {
+              "token": "a",
+              "logprob": -0.1,
+              "bytes": [
+                97
+              ]
+            }
+          ]
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&part["logprobs"][12]).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_streaming_output_text_logprobs_ride_text_deltas() {
+    let (app, engine_task) =
+        reasoning_app_with_logprobs(reasoning_answer_output_specs(), Some(2)).await;
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello",
+            "stream": true,
+            "include": ["message.output_text.logprobs"],
+            "top_logprobs": 2
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let payloads = sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"));
+    let of_type = |event_type: &str| {
+        payloads
+            .iter()
+            .filter(|payload| payload["type"] == event_type)
+            .collect::<Vec<_>>()
+    };
+
+    let deltas = of_type("response.output_text.delta");
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0]["delta"], "answer");
+    // The delta shape carries no `bytes`.
+    assert_eq!(
+        deltas[0]["logprobs"][0],
+        json!({
+            "token": "a",
+            "logprob": -0.1,
+            "top_logprobs": [
+                {"token": "a", "logprob": -0.1},
+                {"token": "b", "logprob": -0.2}
+            ]
+        })
+    );
+    assert_eq!(logprob_tokens(&deltas[0]["logprobs"]).len(), 6);
+
+    let added = of_type("response.content_part.added");
+    assert_eq!(added.last().unwrap()["part"]["logprobs"], json!([]));
+    let done = of_type("response.content_part.done");
+    let part = &done.last().unwrap()["part"];
+    assert_eq!(
+        logprob_tokens(&part["logprobs"]),
+        ["a", "n", "s", "w", "e", "r"]
+    );
+    assert_eq!(part["logprobs"][0]["bytes"], json!([97]));
+    assert_eq!(
+        part["logprobs"][0]["top_logprobs"],
+        json!([
+            {"token": "a", "logprob": -0.1, "bytes": [97]},
+            {"token": "b", "logprob": -0.2, "bytes": [98]}
+        ])
+    );
+    assert_eq!(
+        of_type("response.output_text.done")[0]["logprobs"],
+        json!([])
+    );
+    let completed = &payloads.last().expect("completed event")["response"];
+    assert_eq!(completed["output"][1]["content"][0], *part);
+    assert_eq!(completed["top_logprobs"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_non_streaming_hidden_reasoning_drops_output_text_logprobs() {
+    let (app, engine_task) =
+        reasoning_app_with_logprobs(reasoning_answer_output_specs(), Some(0)).await;
+    let response = responses_call(
+        &app,
+        json!({
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+            "include_reasoning": false
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    // The one update covers the hidden reasoning, so its logprobs stay
+    // hidden, as Python drops them.
+    let part = &json["output"][0]["content"][0];
+    assert_eq!(part["text"], "answer");
+    assert!(part.get("logprobs").is_none(), "{part}");
+}
+
+/// Stream one request and return each `response.output_text.delta` with the
+/// tokens of its logprobs.
+async fn streamed_text_deltas_with_logprob_tokens(
+    app: &axum::Router,
+    mut body: serde_json::Value,
+) -> Vec<(String, Vec<String>)> {
+    body["stream"] = json!(true);
+    let response = responses_call(app, body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    sse_json_payloads(std::str::from_utf8(&body).expect("utf8 body"))
+        .into_iter()
+        .filter(|payload| payload["type"] == "response.output_text.delta")
+        .map(|payload| {
+            (
+                payload["delta"].as_str().unwrap().to_string(),
+                logprob_tokens(&payload["logprobs"]).into_iter().map(str::to_string).collect(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_suppressed_tool_call_logprobs_stay_out_of_text() {
+    let outputs = vec![
+        (
+            bytes_to_token_ids(
+                b"<tool_call>\n{\"name\":\"get_weather\", \"arguments\":{}}\n</tool_call>",
+            ),
+            None,
+        ),
+        (bytes_to_token_ids(b"done"), None),
+        (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
+    ];
+    let (app, engine_task) = reasoning_app_with_logprobs(outputs, Some(0)).await;
+    let deltas = streamed_text_deltas_with_logprob_tokens(
+        &app,
+        json!({
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+            "tools": [weather_function_tool()],
+            "tool_choice": "none"
+        }),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(
+        deltas,
+        [(
+            "done".to_string(),
+            ["d", "o", "n", "e"].map(String::from).to_vec()
+        )]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_text_flushed_at_finish_keeps_its_logprobs() {
+    // With tools, the parser holds the trailing `<` back as a possible tool
+    // call until the length limit ends the output.
+    let outputs = vec![
+        (bytes_to_token_ids(b"answer"), None),
+        (
+            bytes_to_token_ids(b"<"),
+            Some(EngineCoreFinishReason::Length),
+        ),
+    ];
+    let (app, engine_task) = reasoning_app_with_logprobs(outputs, Some(0)).await;
+    let deltas = streamed_text_deltas_with_logprob_tokens(
+        &app,
+        json!({
+            "input": "hello",
+            "include": ["message.output_text.logprobs"],
+            "tools": [weather_function_tool()]
+        }),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(
+        deltas,
+        [
+            (
+                "answer".to_string(),
+                ["a", "n", "s", "w", "e", "r"].map(String::from).to_vec()
+            ),
+            ("<".to_string(), vec!["<".to_string()]),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_top_logprobs_without_include_is_ignored() {
+    let (app, engine_task) =
+        reasoning_app_with_logprobs(reasoning_answer_output_specs(), None).await;
+    let response =
+        responses_stream_terminal(&app, json!({"input": "hello", "top_logprobs": 3})).await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(response["top_logprobs"], serde_json::Value::Null);
+    assert!(response["output"][1]["content"][0].get("logprobs").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_hidden_reasoning_tokens_stay_out_of_text_logprobs() {
+    // The reasoning ends and the answer starts in the same engine update.
+    let outputs = vec![
+        (token_ids("<think>Need tool.</think>ans"), None),
+        (bytes_to_token_ids(b"wer"), None),
+        (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
+    ];
+    for (include_reasoning, expected_tokens) in [
+        (
+            true,
+            vec![
+                "<think>", "N", "e", "e", "d", " ", "t", "o", "o", "l", ".", "</think>", "a", "n",
+                "s", "w", "e", "r",
+            ],
+        ),
+        // That update's logprobs would expose the hidden reasoning tokens.
+        (false, vec!["w", "e", "r"]),
+    ] {
+        let (app, engine_task) = reasoning_app_with_logprobs(outputs.clone(), Some(0)).await;
+        let response = responses_stream_terminal(
+            &app,
+            json!({
+                "input": "hello",
+                "include": ["message.output_text.logprobs"],
+                "include_reasoning": include_reasoning
+            }),
+        )
+        .await;
+        engine_task.await.expect("mock engine task");
+        let message = response["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("message item");
+        assert_eq!(message["content"][0]["text"], "answer");
+        assert_eq!(
+            logprob_tokens(&message["content"][0]["logprobs"]),
+            expected_tokens,
+            "include_reasoning={include_reasoning}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

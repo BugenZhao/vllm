@@ -268,6 +268,13 @@ pub(crate) async fn unified_event_stream(
                 for next in state.process_delta(decoded)? {
                     y.yield_ok(next).await;
                 }
+                // The final flush is output of the last update, so it comes
+                // before that update's sample metadata, as on the Harmony path.
+                if finished.is_some() {
+                    for next in state.finish()? {
+                        y.yield_ok(next).await;
+                    }
+                }
                 if logprobs.is_some() || !token_ids.is_empty() {
                     y.yield_ok(AssistantEvent::LogprobsDelta {
                         logprobs,
@@ -276,9 +283,6 @@ pub(crate) async fn unified_event_stream(
                     .await;
                 }
                 if let Some(finished) = finished {
-                    for next in state.finish()? {
-                        y.yield_ok(next).await;
-                    }
                     y.yield_ok(AssistantEvent::Done {
                         usage: ChatTokenUsage {
                             engine: finished.usage,

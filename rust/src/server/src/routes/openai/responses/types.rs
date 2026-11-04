@@ -13,8 +13,8 @@ use std::fmt;
 
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
-    Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
-    ToolReference, default_true, deserialize_request_top_k,
+    ChatLogProbsContent, Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray,
+    ToolChoiceValue, ToolReference, default_true, deserialize_request_top_k,
 };
 use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
@@ -191,6 +191,11 @@ pub enum ResponseToolChoiceObject {
     },
 }
 
+/// `include` value accepted as a no-op (see [`ResponsesRequest`]).
+pub(crate) const INCLUDE_ENCRYPTED_REASONING: &str = "reasoning.encrypted_content";
+/// `include` value that returns logprobs on output text parts.
+pub(crate) const INCLUDE_OUTPUT_TEXT_LOGPROBS: &str = "message.output_text.logprobs";
+
 /// Responses API request body accepted by the Rust frontend.
 ///
 /// Mirrors the Python vLLM `ResponsesRequest` class. Unknown tool,
@@ -204,7 +209,8 @@ pub enum ResponseToolChoiceObject {
 /// `reasoning.encrypted_content`, `reasoning.summary`, and `text.verbosity`
 /// are accepted for Codex/Python compatibility, without generating encrypted
 /// state, summaries, or applying a verbosity policy. Other `include` values
-/// that this frontend cannot produce are rejected.
+/// that this frontend cannot produce, apart from
+/// `message.output_text.logprobs`, are rejected.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct ResponsesRequest {
     /// The model ID served by this frontend. Optional; defaults to the
@@ -264,6 +270,8 @@ pub struct ResponsesRequest {
     pub top_k: Option<u32>,
     #[serde(default)]
     pub min_p: Option<f32>,
+    /// Alternatives per output-text token. Like Python, it only applies with
+    /// `include=["message.output_text.logprobs"]` and is ignored otherwise.
     #[serde(default)]
     pub top_logprobs: Option<i32>,
     #[serde(default)]
@@ -520,12 +528,14 @@ pub enum ResponseOutputContentPart {
     OutputText {
         text: String,
         annotations: Vec<Value>,
-        /// Empty on `response.content_part.added`, like Python; omitted
-        /// elsewhere.
+        /// Logprobs of the decoded updates that produced `text`, under
+        /// `include=["message.output_text.logprobs"]`. Empty on
+        /// `response.content_part.added`, like Python; omitted when not
+        /// requested or when no update was attributed to the text.
         ///
-        /// TODO: populated when `include=message.output_text.logprobs` is
-        /// implemented.
-        logprobs: Option<Vec<Value>>,
+        /// The SDK `Logprob` shape is the Chat Completions logprobs content
+        /// entry, so the chat type is reused.
+        logprobs: Option<Vec<ChatLogProbsContent>>,
     },
     Refusal {
         refusal: String,
