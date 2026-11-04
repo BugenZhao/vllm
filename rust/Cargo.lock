@@ -5876,6 +5876,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "serial_test",
  "sha2",
