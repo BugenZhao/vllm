@@ -2469,6 +2469,51 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// Like Python's `GUARDED_PREFIX`, `--api-key` also guards the opt-in Cohere
+/// routes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn api_key_auth_guards_cohere_routes() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-api-key-cohere",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let app = build_router_with_gates(
+        Arc::new(
+            AppState::new(vec!["model".to_string()], chat)
+                .with_api_keys(vec!["secret".to_string()]),
+        ),
+        RouteGates {
+            scale_out: true,
+            cohere_api: true,
+            ..RouteGates::default()
+        },
+    );
+
+    for (uri, authorization, expected) in [
+        ("/cohere/v2/chat", None, StatusCode::UNAUTHORIZED),
+        ("/cohere/v2/chat/render", None, StatusCode::UNAUTHORIZED),
+        (
+            "/cohere/v2/chat",
+            Some("Bearer secret"),
+            StatusCode::NOT_IMPLEMENTED,
+        ),
+    ] {
+        let mut request = Request::builder().method("POST").uri(uri);
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let response = app
+            .clone()
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), expected, "{uri} {authorization:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cors_default_simple_request_omits_allow_origin() {
