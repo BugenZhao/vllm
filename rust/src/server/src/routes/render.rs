@@ -22,6 +22,7 @@ use crate::render::RenderState;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
+use crate::routes::not_supported;
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -37,6 +38,19 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions/render", post(render_chat))
         .route("/v1/completions/render", post(render_completion))
+        // TODO: implement the remaining routes of Python's render server.
+        .route("/v1/chat/completions/derender", post(not_supported))
+        .route("/v1/completions/derender", post(not_supported))
+        .route("/v1/messages/render", post(not_supported))
+        .route("/v1/responses/render", post(not_supported))
+        .route("/v1/decisions", post(not_supported))
+        .route("/v1/systemone", post(not_supported))
+        .route("/tokenize", post(not_supported))
+        .route("/detokenize", post(not_supported))
+        .route("/load", get(not_supported))
+        .route("/metrics", get(not_supported))
+        .route("/version", get(not_supported))
+        .route("/kv_event_sources", get(not_supported))
         .with_state(state)
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }
@@ -94,6 +108,22 @@ fn lower_render_request(
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
     let mut text_request = prepared.text_request;
+    // Carry the generation-config defaults, like Python: the downstream engine
+    // or generate route may not resolve them against the same config.
+    let effective = &prepared.generate_request.sampling_params;
+    let sampling_params = &mut text_request.sampling_params;
+    sampling_params.temperature = Some(effective.temperature);
+    sampling_params.top_p = Some(effective.top_p);
+    sampling_params.top_k = Some(effective.top_k);
+    sampling_params.min_p = Some(effective.min_p);
+    sampling_params.repetition_penalty = Some(effective.repetition_penalty);
+    sampling_params.presence_penalty = Some(effective.presence_penalty);
+    sampling_params.frequency_penalty = Some(effective.frequency_penalty);
+    // Without a configured `max_model_len` the budget is relative to `u32::MAX`
+    // and means nothing downstream.
+    if state.max_model_len.is_some() {
+        sampling_params.max_tokens = Some(effective.max_tokens);
+    }
     let xargs = &mut text_request.sampling_params.vllm_xargs;
     let kv_transfer_params = hoist_transfer_params(xargs, "kv_transfer_params");
     let ec_transfer_params = hoist_transfer_params(xargs, "ec_transfer_params");

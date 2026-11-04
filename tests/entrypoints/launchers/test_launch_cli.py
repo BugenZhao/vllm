@@ -12,10 +12,11 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import create_autospec, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
+import vllm.entrypoints.cli.launch as launch_module
 import vllm.snapshot.runtime as snapshot_runtime
 import vllm.snapshot.server as snapshot_server
 from vllm.entrypoints.cli import snapshot as snapshot_cli
@@ -93,6 +94,45 @@ def test_cmd_launch_render_calls_run():
     with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
         RenderSubcommand.cmd(args)
         mock_uvloop_run.assert_called_once()
+
+
+def test_cmd_launch_render_execs_rust_frontend(monkeypatch, launch_parser):
+    """Under VLLM_USE_RUST_FRONTEND the parsed arguments and the bound socket
+    reach `vllm-rs render-frontend`, and no Python server starts."""
+    args = launch_parser.parse_args(
+        ["launch", "render", "--model", "test-model", "--served-model-name", "alias"]
+    )
+    sock = MagicMock()
+    sock.fileno.return_value = 42
+    model_config = MagicMock(max_model_len=128, max_logprobs=20)
+    entry = "vllm.entrypoints.launchers.render.entry"
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    monkeypatch.setenv("VLLM_RUST_FRONTEND_PATH", "/bin/vllm-rs")
+    launch_module.envs.disable_envs_cache()
+    with (
+        patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run,
+        patch(f"{entry}.setup_server", return_value=("addr", sock)) as mock_setup,
+        patch(f"{entry}.AsyncEngineArgs") as mock_engine_args,
+        patch(f"{entry}.os.set_inheritable") as mock_inheritable,
+        patch(f"{entry}.os.execv") as mock_execv,
+    ):
+        mock_engine_args.from_cli_args.return_value.create_model_config.return_value = (
+            model_config
+        )
+        RenderSubcommand.cmd(args)
+
+    mock_uvloop_run.assert_not_called()
+    mock_setup.assert_called_once_with(args, reuse_port=False)
+    mock_inheritable.assert_called_once_with(42, True)
+    path, argv = mock_execv.call_args.args
+    assert path == "/bin/vllm-rs"
+    assert argv[:4] == ["/bin/vllm-rs", "render-frontend", "--listen-fd", "42"]
+    assert argv[4] == "--args-json"
+    payload = json.loads(argv[5])
+    assert payload["model_tag"] == "test-model"
+    assert payload["served_model_name"] == ["alias"]
+    assert payload["max_model_len"] == 128
+    assert payload["max_logprobs"] == 20
 
 
 def test_cmd_launch_model_tag_overrides():

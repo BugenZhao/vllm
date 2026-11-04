@@ -277,6 +277,41 @@ class APIServerProcessManager:
             )
 
 
+def rust_frontend_args_dict(args: argparse.Namespace) -> dict[str, Any]:
+    """Build the JSON bootstrap payload of a Python-launched Rust frontend."""
+    from vllm.entrypoints.common.startup import jsonify_non_default_args
+
+    args_dict = jsonify_non_default_args(
+        args,
+        exclude={
+            "api_server_count",
+            # Python passes the bootstrapped engine range explicitly.
+            "data_parallel_rank",
+            "data_parallel_external_lb",
+            "data_parallel_hybrid_lb",
+        },
+    )
+
+    # `model_tag` is the positional `vllm serve` model argument. When the
+    # model is supplied only through `--config`, argparse populates `model`
+    # while leaving `model_tag` unset. The Rust frontend requires
+    # `model_tag` in its JSON bootstrap payload, so use the resolved model
+    # as a fallback.
+    model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+    if model_tag is not None:
+        args_dict["model_tag"] = model_tag
+
+    # The Rust `frontend` subcommand parses --args-json via serde_json,
+    # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+    # declarations on SharedRuntimeArgs fields. Forward the env-driven
+    # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+    # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+    # frontends.
+    args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+    args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+    return args_dict
+
+
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
@@ -331,36 +366,7 @@ class RustFrontendProcessManager:
             inherited_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.common.startup import jsonify_non_default_args
-
-        args_dict = jsonify_non_default_args(
-            args,
-            exclude={
-                "api_server_count",
-                # Python passes the bootstrapped engine range explicitly.
-                "data_parallel_rank",
-                "data_parallel_external_lb",
-                "data_parallel_hybrid_lb",
-            },
-        )
-
-        # `model_tag` is the positional `vllm serve` model argument. When the
-        # model is supplied only through `--config`, argparse populates `model`
-        # while leaving `model_tag` unset. The Rust frontend requires
-        # `model_tag` in its JSON bootstrap payload, so use the resolved model
-        # as a fallback.
-        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
-        if model_tag is not None:
-            args_dict["model_tag"] = model_tag
-
-        # The Rust `frontend` subcommand parses --args-json via serde_json,
-        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
-        # declarations on SharedRuntimeArgs fields. Forward the env-driven
-        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
-        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
-        # frontends.
-        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
-        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_dict = rust_frontend_args_dict(args)
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 

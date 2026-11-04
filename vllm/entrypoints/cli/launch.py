@@ -6,13 +6,17 @@ import inspect
 
 import uvloop
 
+from vllm import envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
+from vllm.entrypoints.launchers.render.entry import (
+    exec_rust_render,
+    run_launch_fastapi,
+)
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -61,7 +65,10 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        uvloop.run(run_launch_fastapi(args))
+        if envs.VLLM_USE_RUST_FRONTEND:
+            exec_rust_render(args)
+        else:
+            uvloop.run(run_launch_fastapi(args))
 
 
 class LaunchSubcommand(CLISubcommand):

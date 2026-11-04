@@ -86,7 +86,7 @@ fn main() -> ExitCode {
     let process_label =
         match env::args_os().nth(1).as_deref().and_then(OsStr::to_str).unwrap_or_default() {
             "bench" => "Bench",
-            "serve" | "frontend" => "RustFrontend",
+            "serve" | "frontend" | "render-frontend" => "RustFrontend",
             _ => "Rust",
         };
     vllm_tracing::init_tracing(process_label);
@@ -225,6 +225,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Command::Render(args) => {
             vllm_server::serve_render(args.into_config(), shutdown_signal()).await
+        }
+        Command::RenderFrontend(args) => {
+            let config = args.into_config().map_err(|error| anyhow!(error))?;
+            vllm_server::serve_render(config, shutdown_signal()).await
         }
     }
 }

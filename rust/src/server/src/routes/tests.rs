@@ -521,6 +521,10 @@ impl TextBackend for FakeChatBackend {
     fn model_id(&self) -> &str {
         &self.model_id
     }
+
+    fn sampling_hints(&self) -> vllm_text::Result<vllm_text::SamplingHints> {
+        Ok(self.sampling_hints.clone())
+    }
 }
 
 impl ChatBackend for FakeChatBackend {
@@ -961,6 +965,27 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn render_router_reports_unimplemented_python_routes() {
+    let app = test_render_app();
+    for (method, route) in [
+        ("POST", "/v1/chat/completions/derender"),
+        ("POST", "/v1/completions/derender"),
+        ("POST", "/v1/messages/render"),
+        ("POST", "/v1/responses/render"),
+        ("POST", "/v1/decisions"),
+        ("POST", "/v1/systemone"),
+        ("POST", "/tokenize"),
+        ("POST", "/detokenize"),
+        ("GET", "/load"),
+        ("GET", "/metrics"),
+        ("GET", "/version"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        assert_route_not_supported(&app, method, route, route).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1638,6 +1663,94 @@ async fn render_chat_omits_unset_sampling_params() {
         "unexpected null in {sampling_params:?}"
     );
     assert_eq!(sampling_params["max_tokens"], 8);
+}
+
+#[tokio::test]
+async fn render_reports_effective_sampling_defaults() {
+    let backend = Arc::new(FakeChatBackend {
+        sampling_hints: vllm_text::SamplingHints {
+            default_temperature: Some(0.25),
+            default_top_p: Some(0.75),
+            default_top_k: Some(5),
+            default_min_p: Some(0.125),
+            default_presence_penalty: Some(0.5),
+            default_frequency_penalty: Some(0.25),
+            default_max_tokens: Some(7),
+            ..Default::default()
+        },
+        ..FakeChatBackend::new()
+    });
+    let mut app = build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        max_model_len: Some(1024),
+        text: TextRequestProcessor::new(backend.clone(), 1024),
+        chat: ChatRequestProcessor::render_only(backend),
+    }));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "top_p": 0.5
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    let sampling_params = &json["sampling_params"];
+    // From the generation config.
+    assert_eq!(sampling_params["temperature"], 0.25);
+    assert_eq!(sampling_params["top_k"], 5);
+    assert_eq!(sampling_params["min_p"], 0.125);
+    assert_eq!(sampling_params["presence_penalty"], 0.5);
+    assert_eq!(sampling_params["frequency_penalty"], 0.25);
+    assert_eq!(sampling_params["max_tokens"], 7);
+    // The request wins over the generation config.
+    assert_eq!(sampling_params["top_p"], 0.5);
+    // vLLM's neutral default when neither sets it.
+    assert_eq!(sampling_params["repetition_penalty"], 1.0);
+}
+
+#[tokio::test]
+async fn render_omits_max_tokens_budget_without_max_model_len() {
+    let mut app = test_render_app_with_max_model_len(None);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        json["sampling_params"].get("max_tokens").is_none(),
+        "{json}"
+    );
 }
 
 #[tokio::test]

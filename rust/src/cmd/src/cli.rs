@@ -105,6 +105,9 @@ pub enum Command {
     Bench(BenchCommand),
     /// Run engine-free request rendering and preprocessing.
     Render(RenderArgs),
+    /// Run the render server as a worker bootstrapped by `vllm launch render`.
+    #[command(hide = true)]
+    RenderFrontend(RenderFrontendArgs),
 }
 
 /// Supported benchmark commands.
@@ -212,13 +215,17 @@ impl RenderArgs {
             tokenizer,
             hf_config,
             hf_overrides: self.hf_overrides,
+            generation_config: Default::default(),
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
-            host: self.host,
-            port: self.port,
+            listener_mode: HttpListenerMode::BindTcp {
+                host: self.host,
+                port: self.port,
+            },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend: Default::default(),
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
@@ -729,6 +736,13 @@ impl SharedRuntimeArgs {
         })
     }
 
+    /// Finish arguments deserialized from `--args-json`, which bypasses clap's
+    /// env support and its handling of unsupported arguments.
+    fn finish_json_bootstrap(&mut self) -> Result<(), String> {
+        self.apply_env_fallbacks(|name| std::env::var(name).ok())?;
+        self.unsupported.check()
+    }
+
     /// Apply fallback logic for configuration from env variables, using
     /// `lookup` to read the environment.
     fn apply_env_fallbacks(
@@ -1091,11 +1105,196 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     let mut args: SharedRuntimeArgs = serde_json::from_str(value)
         .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
-    // --args-json is parsed with serde, so clap's env support does not run for
-    // the Python-supervised frontend path.
-    args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
-    args.unsupported.check()?;
+    args.finish_json_bootstrap()?;
     Ok(args)
+}
+
+fn parse_render_args_json(value: &str) -> Result<RenderRuntimeArgs, String> {
+    let mut args: RenderRuntimeArgs = serde_json::from_str(value)
+        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    args.runtime.finish_json_bootstrap()?;
+    Ok(args)
+}
+
+/// Arguments for running the render server as a Python-bootstrapped worker.
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
+pub struct RenderFrontendArgs {
+    /// Inherited listening socket file descriptor passed by `vllm launch render`.
+    #[arg(long)]
+    pub listen_fd: i32,
+
+    /// Python's parsed `vllm launch render` arguments as one JSON object.
+    #[arg(long = "args-json", value_parser = parse_render_args_json, value_name = "JSON")]
+    pub args: RenderRuntimeArgs,
+}
+
+/// The `--args-json` object of [`RenderFrontendArgs`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RenderRuntimeArgs {
+    #[serde(flatten)]
+    pub runtime: SharedRuntimeArgs,
+    /// Resolved by Python from the flag and the model config. On `vllm serve`
+    /// the frontend learns it from the engine instead.
+    #[serde(default)]
+    pub max_model_len: Option<u32>,
+}
+
+impl RenderFrontendArgs {
+    /// Convert the arguments into the render server's config, or fail on any
+    /// argument the render server would otherwise silently drop.
+    pub(super) fn into_config(self) -> Result<RenderConfig, String> {
+        let Self {
+            listen_fd,
+            args:
+                RenderRuntimeArgs {
+                    runtime,
+                    max_model_len,
+                },
+        } = self;
+        let keep_alive_timeout = runtime.keep_alive_timeout();
+        let structured_outputs_backend = runtime.structured_outputs_backend();
+        let tls = runtime.ssl.tls_config();
+        let ModelFileSources {
+            model,
+            tokenizer,
+            hf_config,
+        } = runtime.model.file_sources();
+
+        // Destructured without `..` so that a new argument has to choose a
+        // group here.
+        let SharedRuntimeArgs {
+            // Consumed by the render server.
+            model: _,
+            ssl: _,
+            structured_outputs_config: _,
+            hf_overrides,
+            generation_config,
+            tool_call_parser,
+            reasoning_parser,
+            tool_strict_level,
+            renderer,
+            max_logprobs,
+            chat_template,
+            default_chat_template_kwargs,
+            reasoning_effort_map,
+            trust_request_chat_template,
+            exclude_tools_when_tool_choice_none,
+            chat_template_content_format,
+            skip_model_name_validation,
+            served_model_name,
+            // Python's render server honors these, and this one does not yet.
+            http_timeout_keep_alive: _,
+            enable_log_requests,
+            enable_request_id_headers,
+            enable_tokenizer_info_endpoint,
+            api_key,
+            http_max_request_body_size,
+            allowed_origins,
+            allowed_methods,
+            allowed_headers,
+            allow_credentials,
+            root_path,
+            // Python's render server ignores these too.
+            lora_modules: _,
+            // No consumer: the render server is always language-only and rejects
+            // every multimodal request.
+            language_model_only: _,
+            limit_mm_per_prompt: _,
+            // Meaningless without an engine, generation output or metrics. The
+            // render server always registers its routes.
+            engine_ready_timeout_secs: _,
+            stream_interval: _,
+            shutdown_timeout: _,
+            return_tokens_as_token_ids: _,
+            enable_log_outputs: _,
+            enable_log_deltas: _,
+            max_log_len: _,
+            enable_prompt_tokens_details: _,
+            enable_per_request_metrics: _,
+            enable_scale_out: _,
+            sse_keep_alive_interval: _,
+            disable_log_stats: _,
+            custom_histogram_buckets: _,
+            log_stats_interval: _,
+            disable_request_id_randomization: _,
+            disable_access_log: _,
+            disable_access_log_for_endpoints: _,
+            profiler_config: _,
+            // Checked when `--args-json` was parsed.
+            unsupported: _,
+        } = runtime;
+
+        let rejected = [
+            (
+                "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+                keep_alive_timeout != DEFAULT_KEEP_ALIVE_TIMEOUT,
+            ),
+            ("--enable-log-requests", enable_log_requests),
+            ("--enable-request-id-headers", enable_request_id_headers),
+            (
+                "--enable-tokenizer-info-endpoint",
+                enable_tokenizer_info_endpoint,
+            ),
+            ("--api-key/VLLM_API_KEY", !api_key.is_empty()),
+            (
+                "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+                http_max_request_body_size.is_some(),
+            ),
+            (
+                "--allowed-origins",
+                allowed_origins != default_cors_origins(),
+            ),
+            (
+                "--allowed-methods",
+                allowed_methods != default_cors_wildcard(),
+            ),
+            (
+                "--allowed-headers",
+                allowed_headers != default_cors_wildcard(),
+            ),
+            ("--allow-credentials", allow_credentials),
+            (
+                "--root-path",
+                root_path.is_some_and(|path| !path.is_empty()),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect::<Vec<_>>();
+        if !rejected.is_empty() {
+            return Err(format!(
+                "the Rust render server does not support: {}. \
+                 Set VLLM_USE_RUST_FRONTEND=0 to use the Python render server.",
+                rejected.join(", ")
+            ));
+        }
+
+        Ok(RenderConfig {
+            model: model.id,
+            revision: model.revision,
+            tokenizer,
+            hf_config,
+            hf_overrides,
+            generation_config,
+            served_model_name,
+            skip_model_name_validation,
+            listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            tool_call_parser,
+            reasoning_parser,
+            tool_strict_level,
+            structured_outputs_backend,
+            renderer,
+            chat_template,
+            default_chat_template_kwargs: default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: reasoning_effort_map.unwrap_or_default(),
+            trust_request_chat_template,
+            exclude_tools_when_tool_choice_none,
+            chat_template_content_format,
+            max_model_len,
+            max_logprobs,
+            tls,
+        })
+    }
 }
 
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.

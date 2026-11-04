@@ -9,6 +9,12 @@ Our renderer API is designed to disaggregate the render phase(preprocessing) and
 The dedicated `vllm launch render` server always exposes the `/render` and
 `/derender` endpoints.
 
+With `VLLM_USE_RUST_FRONTEND=1`, `vllm launch render` runs the Rust render
+server. It implements the chat and completions `/render` endpoints; `/derender`
+and the other endpoints it does not implement return 501, and arguments it does
+not implement fail at startup. Set `VLLM_USE_RUST_FRONTEND=0` to use the Python
+render server.
+
 Scale-out endpoints, including `/render`, `/derender`, and
 `/inference/v1/generate`, are disabled by default on a standard inference
 server. To expose them with `vllm serve`, opt in explicitly:
