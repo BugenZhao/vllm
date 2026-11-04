@@ -89,9 +89,16 @@ fn main() -> ExitCode {
             "serve" | "frontend" => "RustFrontend",
             _ => "Rust",
         };
-    vllm_tracing::init_tracing(process_label);
-
-    let cli = Cli::parse();
+    // Parsing warns about no-op arguments before `--log-level` is known.
+    let cli = {
+        let _guard = vllm_tracing::set_default_tracing(process_label);
+        Cli::parse()
+    };
+    let log_level = match &cli.command {
+        Command::Serve(args) => args.effective_log_level().map(|level| level.as_str()),
+        _ => None,
+    };
+    vllm_tracing::init_tracing_with_level(process_label, log_level);
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

@@ -119,18 +119,23 @@ impl UnsupportedArgs {
 
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
-            let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
-            return Err(format!(
-                "
-The following arguments are not implemented in Rust frontend yet:
-{bullets}
-
-Remove these arguments to continue."
-            ));
+            return Err(unsupported_args_error(unsupported));
         }
 
         Ok(())
     }
+}
+
+/// The startup error listing arguments the Rust frontend does not implement.
+pub(crate) fn unsupported_args_error<'a>(keys: impl IntoIterator<Item = &'a str>) -> String {
+    let bullets = keys.into_iter().map(|key| format!("- {key}")).join("\n");
+    format!(
+        "
+The following arguments are not implemented in Rust frontend yet:
+{bullets}
+
+Remove these arguments to continue."
+    )
 }
 
 /// Frontend-owned Python `vllm serve` top-level arguments that `vllm-rs`

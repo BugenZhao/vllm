@@ -10,6 +10,7 @@ use std::{env, fmt, process};
 use time::UtcOffset;
 use time::macros::format_description;
 use tracing::level_filters::LevelFilter;
+use tracing::subscriber::DefaultGuard;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
@@ -32,7 +33,23 @@ const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
 
 /// Install the process-wide vLLM-style tracing subscriber.
 pub fn init_tracing(process_label: &str) {
-    let _ = tracing_subscriber::registry().with(vllm_fmt_layer(process_label)).try_init();
+    init_tracing_with_level(process_label, None);
+}
+
+/// Install the process-wide vLLM-style tracing subscriber. A given `log_level`,
+/// a Python logging level name, takes the place of `VLLM_LOGGING_LEVEL`.
+pub fn init_tracing_with_level(process_label: &str, log_level: Option<&str>) {
+    let _ = tracing_subscriber::registry()
+        .with(vllm_fmt_layer(process_label, log_level))
+        .try_init();
+}
+
+/// Install the vLLM-style tracing subscriber on the current thread until the
+/// guard drops, for events emitted before the process-wide level is known.
+pub fn set_default_tracing(process_label: &str) -> DefaultGuard {
+    tracing_subscriber::registry()
+        .with(vllm_fmt_layer(process_label, None))
+        .set_default()
 }
 
 /// Install the process-wide vLLM-style tracing subscriber, with an
@@ -43,17 +60,22 @@ where
 {
     let _ = tracing_subscriber::registry()
         .with(layer)
-        .with(vllm_fmt_layer(process_label))
+        .with(vllm_fmt_layer(process_label, None))
         .try_init();
 }
 
-/// The vLLM-style fmt layer filtered by `VLLM_LOGGING_LEVEL` / `RUST_LOG`.
-fn vllm_fmt_layer<S>(process_label: &str) -> impl Layer<S> + Send + Sync + 'static + use<S>
+/// The vLLM-style fmt layer filtered by `log_level` / `VLLM_LOGGING_LEVEL` /
+/// `RUST_LOG`.
+fn vllm_fmt_layer<S>(
+    process_label: &str,
+    log_level: Option<&str>,
+) -> impl Layer<S> + Send + Sync + 'static + use<S>
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    let vllm_logging_level = env::var("VLLM_LOGGING_LEVEL").ok();
     let filter = build_targets_filter(
-        env::var("VLLM_LOGGING_LEVEL").ok().as_deref(),
+        log_level.or(vllm_logging_level.as_deref()),
         env::var("RUST_LOG").ok().as_deref(),
     );
     let formatter = VllmEventFormatter::new(process_label);
