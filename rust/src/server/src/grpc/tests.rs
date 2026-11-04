@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
+use std::num::NonZeroU32;
 use std::os::fd::IntoRawFd;
 use std::os::unix::net::UnixListener;
 use std::pin::Pin;
@@ -52,7 +53,7 @@ use vllm_engine_core_client::test_utils::{
     IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task_with_ready,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{EngineCoreLlm, Llm as _};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -64,7 +65,10 @@ use super::convert::json_to_proto_struct;
 use super::health::{EngineHealth, HealthMonitor};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
-use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
+use super::{
+    ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, LlmGrpcService,
+    LlmServiceImpl, pb,
+};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -2962,6 +2966,626 @@ async fn grpc_pause_withdraws_readiness_but_not_liveness() {
             HealthServingStatus::Serving
         );
     }
+
+    server_task.abort();
+}
+
+// ========================================================================================
+// RemoteLlm round trip
+// ========================================================================================
+
+/// A text facade over a scripted engine, either through an `EngineCoreLlm` or
+/// through a `RemoteLlm` and a gRPC server, plus what the engine received.
+struct LlmHarness<R = EngineCoreRequest> {
+    text: vllm_text::TextLlm,
+    recorded: tokio::sync::oneshot::Receiver<R>,
+    engine_task: MockEngineTask,
+    server_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LlmHarness {
+    /// `TextLlm` over an `EngineCoreLlm`.
+    async fn local(outputs: Vec<EngineCoreOutput>) -> Self {
+        let (recorded_tx, recorded) = tokio::sync::oneshot::channel();
+        Self::local_with(recording_engine_script(outputs, recorded_tx), recorded).await
+    }
+
+    /// `TextLlm` over a `RemoteLlm` connected to a gRPC server that serves an
+    /// `EngineCoreLlm`.
+    async fn remote(outputs: Vec<EngineCoreOutput>) -> Self {
+        Self::local(outputs).await.into_remote().await
+    }
+
+    async fn decoded(
+        self,
+        request: vllm_text::TextRequest,
+    ) -> EngineRun<vllm_text::DecodedTextEvent> {
+        use futures::TryStreamExt as _;
+
+        let outputs = (self.text.generate(request).await.expect("submit text request"))
+            .try_collect()
+            .await
+            .expect("collect text events");
+        EngineRun {
+            engine_request: self.finish().await,
+            outputs,
+        }
+        .normalized()
+    }
+
+    async fn raw(self, request: vllm_text::TextRequest) -> EngineRun<vllm_llm::GenerateOutput> {
+        use futures::TryStreamExt as _;
+
+        let outputs = (self.text.generate_raw(request).await.expect("submit text request"))
+            .try_collect()
+            .await
+            .expect("collect raw outputs");
+        EngineRun {
+            engine_request: self.finish().await,
+            outputs,
+        }
+        .normalized()
+    }
+}
+
+impl LlmHarness<Vec<EngineCoreRequest>> {
+    /// `TextLlm` over an `EngineCoreLlm` whose engine runs one sample per
+    /// entry of `samples`.
+    async fn local_samples(samples: Vec<Vec<EngineCoreOutput>>) -> Self {
+        let (recorded_tx, recorded) = tokio::sync::oneshot::channel();
+        Self::local_with(parallel_engine_script(samples, recorded_tx), recorded).await
+    }
+
+    /// `TextLlm` over a `RemoteLlm` connected to a gRPC server that serves an
+    /// `EngineCoreLlm` whose engine runs one sample per entry of `samples`.
+    async fn remote_samples(samples: Vec<Vec<EngineCoreOutput>>) -> Self {
+        Self::local_samples(samples).await.into_remote().await
+    }
+
+    /// Generate `n` samples and collect each one's text events.
+    async fn decoded_n(self, request: vllm_text::TextRequest, n: NonZeroU32) -> SampledRun {
+        use futures::TryStreamExt as _;
+
+        let streams = (self.text.generate_n(request, n).await).expect("submit text request");
+        let samples = futures::future::try_join_all(
+            streams
+                .into_iter()
+                .map(|stream| stream.try_collect::<Vec<vllm_text::DecodedTextEvent>>()),
+        )
+        .await
+        .expect("collect text events");
+        SampledRun {
+            engine_requests: self.finish().await,
+            samples,
+        }
+        .normalized()
+    }
+}
+
+impl<R: Send + 'static> LlmHarness<R> {
+    async fn local_with<F>(script: F, recorded: tokio::sync::oneshot::Receiver<R>) -> Self
+    where
+        F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a>
+            + Send
+            + 'static,
+    {
+        let (text, engine_task) = engine_core_text(b"engine-local", script).await;
+        Self {
+            text,
+            recorded,
+            engine_task,
+            server_task: None,
+        }
+    }
+
+    /// Serve this harness's `EngineCoreLlm` over gRPC and reach it through a
+    /// `RemoteLlm`.
+    async fn into_remote(self) -> Self {
+        let chat = ChatLlm::new(self.text, Arc::new(FakeTextBackend::default()));
+        let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+        let (channel, server_task) = start_llm_test_server(state).await;
+        let llm = vllm_remote_llm::RemoteLlm::connect(channel).await.expect("connect remote llm");
+        Self {
+            text: vllm_text::TextLlm::new(llm, Arc::new(FakeTextBackend::default())),
+            recorded: self.recorded,
+            engine_task: self.engine_task,
+            server_task: Some(server_task),
+        }
+    }
+
+    /// Wait for the engine script and return what the engine received.
+    async fn finish(self) -> R {
+        self.engine_task.await.expect("mock engine task");
+        if let Some(server_task) = self.server_task {
+            server_task.abort();
+        }
+        self.recorded.await.expect("engine received a request")
+    }
+}
+
+/// What one scripted engine run observed: the request the engine received and
+/// what the text facade's caller saw.
+#[derive(Debug, PartialEq)]
+struct EngineRun<T> {
+    engine_request: EngineCoreRequest,
+    outputs: Vec<T>,
+}
+
+impl<T: Normalize> EngineRun<T> {
+    /// Clear values that legitimately differ between runs: generated request
+    /// IDs, arrival times, and engine timestamps.
+    fn normalized(mut self) -> Self {
+        self.engine_request.request_id.clear();
+        self.engine_request.arrival_time = 0.0;
+        self.outputs.iter_mut().for_each(Normalize::normalize);
+        self
+    }
+}
+
+/// What one scripted engine run of parallel samples observed: the child
+/// requests the engine received, in submission order, and each sample's text
+/// events.
+#[derive(Debug, PartialEq)]
+struct SampledRun {
+    engine_requests: Vec<EngineCoreRequest>,
+    samples: Vec<Vec<vllm_text::DecodedTextEvent>>,
+}
+
+impl SampledRun {
+    /// Like [`EngineRun::normalized`], but keep the sample index that prefixes
+    /// each child request ID.
+    fn normalized(mut self) -> Self {
+        for request in &mut self.engine_requests {
+            let (index, _) = request.request_id.split_once('_').expect("child request ID");
+            request.request_id = index.to_string();
+            request.arrival_time = 0.0;
+        }
+        self.samples.iter_mut().flatten().for_each(Normalize::normalize);
+        self
+    }
+
+    fn texts(&self) -> Vec<String> {
+        (self.samples.iter())
+            .map(|events| {
+                (events.iter())
+                    .filter_map(|event| match event {
+                        vllm_text::DecodedTextEvent::TextDelta { decoded, .. } => {
+                            Some(decoded.text.as_str())
+                        }
+                        vllm_text::DecodedTextEvent::Start { .. } => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+trait Normalize {
+    fn normalize(&mut self);
+}
+
+impl Normalize for vllm_text::DecodedTextEvent {
+    fn normalize(&mut self) {
+        if let vllm_text::DecodedTextEvent::TextDelta {
+            finished: Some(finished),
+            ..
+        } = self
+        {
+            finished.timestamps = Default::default();
+        }
+    }
+}
+
+impl Normalize for vllm_llm::GenerateOutput {
+    fn normalize(&mut self) {
+        self.request_id.clear();
+        self.timestamps = Default::default();
+    }
+}
+
+impl EngineRun<vllm_text::DecodedTextEvent> {
+    fn text(&self) -> String {
+        (self.outputs.iter())
+            .filter_map(|event| match event {
+                vllm_text::DecodedTextEvent::TextDelta { decoded, .. } => {
+                    Some(decoded.text.as_str())
+                }
+                vllm_text::DecodedTextEvent::Start { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// A `TextLlm` over an `EngineCoreLlm` whose engine runs `script`.
+async fn engine_core_text<F>(
+    engine_id: impl Into<EngineId>,
+    script: F,
+) -> (vllm_text::TextLlm, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id,
+        default_ready_response(),
+        script,
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let text = vllm_text::TextLlm::new(
+        EngineCoreLlm::new(client),
+        Arc::new(FakeTextBackend::default()),
+    );
+    (text, engine_task)
+}
+
+/// Serve `state` the way a worker does for a `RemoteLlm`: Control,
+/// `vllm.internal.Llm`, and health.
+async fn start_llm_test_server(state: Arc<AppState>) -> (Channel, tokio::task::JoinHandle<()>) {
+    let engine_health = EngineHealth::subscribe(state.llm());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (health_reporter, health_service) = health_reporter();
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health, true).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server_task = tokio::spawn(async move {
+        let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
+        let server_result = health_monitor
+            .serve(shutdown, std::future::pending(), |stop| {
+                TonicServer::builder()
+                    .add_service(health_service)
+                    .add_service(ControlServer::new(ControlServiceImpl::new(state.clone())))
+                    .add_service(LlmGrpcService::new(LlmServiceImpl::new(state)))
+                    .serve_with_incoming_shutdown(incoming, stop)
+            })
+            .await
+            .expect("grpc server is never forced to abort");
+        server_result.expect("grpc server");
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    (channel, server_task)
+}
+
+/// A mock engine script that records the submitted request and replies with
+/// `outputs`, addressed to that request.
+fn recording_engine_script(
+    outputs: Vec<EngineCoreOutput>,
+    recorded: tokio::sync::oneshot::Sender<EngineCoreRequest>,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let add = recv_engine_message(dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            let request_id = request.request_id.clone();
+            let _ = recorded.send(request);
+            // One engine step per output, so each becomes its own update.
+            for output in outputs {
+                let output = EngineCoreOutput {
+                    request_id: request_id.clone(),
+                    ..output
+                };
+                let batch = RequestBatchOutputs {
+                    outputs: vec![output],
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+            }
+        })
+    }
+}
+
+/// Record the child requests of one parallel-sampling request, one per entry
+/// of `samples`, then send one output of every unfinished sample per engine
+/// step.
+fn parallel_engine_script(
+    samples: Vec<Vec<EngineCoreOutput>>,
+    recorded: tokio::sync::oneshot::Sender<Vec<EngineCoreRequest>>,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let mut requests = Vec::new();
+            for _ in &samples {
+                let add = recv_engine_message(dealer).await;
+                requests.push(
+                    rmp_serde::from_slice::<EngineCoreRequest>(&add[1]).expect("decode request"),
+                );
+            }
+            let request_ids: Vec<_> = requests.iter().map(|r| r.request_id.clone()).collect();
+            let _ = recorded.send(requests);
+            let steps = samples.iter().map(Vec::len).max().unwrap_or_default();
+            for step in 0..steps {
+                let outputs = (samples.iter().zip(&request_ids))
+                    .filter_map(|(outputs, request_id)| {
+                        outputs.get(step).map(|output| EngineCoreOutput {
+                            request_id: request_id.clone(),
+                            ..output.clone()
+                        })
+                    })
+                    .collect();
+                let batch = RequestBatchOutputs {
+                    outputs,
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+            }
+        })
+    }
+}
+
+/// A request that sets most engine sampling fields, so the engine request
+/// comparison covers their wire conversion.
+fn round_trip_request() -> vllm_text::TextRequest {
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+
+    vllm_text::TextRequest {
+        request_id: "round-trip".to_string(),
+        prompt: Prompt::TokenIds(b"hello".iter().map(|&b| u32::from(b)).collect()),
+        sampling_params: vllm_text::SamplingParams {
+            // Resolved from the model defaults on the caller's side.
+            temperature: None,
+            presence_penalty: Some(0.0),
+            frequency_penalty: Some(0.5),
+            repetition_penalty: Some(1.1),
+            top_p: Some(0.9),
+            top_k: Some(5),
+            min_p: Some(0.05),
+            seed: Some(7),
+            max_tokens: Some(16),
+            min_tokens: Some(1),
+            thinking_token_budget: Some(8),
+            stop_token_ids: Some(vec![3]),
+            logit_bias: Some([(u32::from(b'x'), -2.0)].into()),
+            allowed_token_ids: Some((0..128).collect()),
+            bad_words: Some(vec!["qq".to_string()]),
+            repetition_detection: Some(RepetitionDetectionParams {
+                max_pattern_size: 4,
+                min_pattern_size: 2,
+                min_count: 3,
+            }),
+            structured_outputs: Some(StructuredOutputsParams::json(serde_json::json!({
+                "type": "object",
+                "properties": {"n": {"type": "number", "minimum": 1.5}},
+            }))),
+            skip_reading_prefix_cache: Some(true),
+            stream_interval: std::num::NonZeroU32::new(2),
+            vllm_xargs: Some(
+                [(
+                    "kv_transfer_params".to_string(),
+                    serde_json::json!({"do_remote_decode": true, "port": 5600}),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        },
+        decode_options: vllm_text::TextDecodeOptions {
+            stop_strings: Some(vec!["!".to_string()]),
+            ..Default::default()
+        },
+        priority: 3,
+        cache_salt: Some("tenant-a".to_string()),
+        session_id: Some("session-1".to_string()),
+        kv_hints: Some(KvHintsEnvelope {
+            protocol_version: "0.1".to_string(),
+            message_id: "msg-1".to_string(),
+            actions: vec![KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "example.action".to_string(),
+                action_version: "1.0".to_string(),
+                payload: [("blocks".to_string(), serde_json::json!([1, 2]))].into(),
+            }],
+        }),
+        reasoning_parser_kwargs:
+            vllm_engine_core_client::protocol::request::ReasoningParserKwargs {
+                chat_template_kwargs: [("enable_thinking".to_string(), serde_json::json!(false))]
+                    .into(),
+            },
+        reasoning_ended: Some(true),
+        ..vllm_text::TextRequest::for_test()
+    }
+}
+
+fn byte_outputs(chunks: &[&[u8]], finish_reason: EngineCoreFinishReason) -> Vec<EngineCoreOutput> {
+    let last = chunks.len() - 1;
+    (chunks.iter().enumerate())
+        .map(|(index, chunk)| {
+            request_output(
+                "",
+                chunk.iter().map(|&b| u32::from(b)).collect(),
+                (index == last).then_some(finish_reason),
+            )
+        })
+        .collect()
+}
+
+/// The caller's text layer stops on a stop string while the remote engine is
+/// still generating; dropping the stream ends the remote request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_with_stop_string() {
+    let outputs = byte_outputs(&[b"hel", b"lo!", b"xy"], EngineCoreFinishReason::Length);
+    let local = LlmHarness::local(outputs.clone()).await.decoded(round_trip_request()).await;
+    let remote = LlmHarness::remote(outputs).await.decoded(round_trip_request()).await;
+    assert_eq!(local.text(), "hello");
+    assert_eq!(remote, local);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_with_logprobs() {
+    use vllm_engine_core_client::protocol::logprobs::{
+        Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
+    };
+
+    fn position(token_id: u8, rank: u32) -> PositionLogprobs {
+        PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: u32::from(token_id),
+                    logprob: -0.25,
+                    rank,
+                },
+                TokenLogprob {
+                    token_id: u32::from(b'z'),
+                    logprob: -1.5,
+                    rank: 1,
+                },
+            ],
+        }
+    }
+
+    let request = vllm_text::TextRequest {
+        sampling_params: vllm_text::SamplingParams {
+            logprobs: Some(1),
+            prompt_logprobs: Some(1),
+            ..round_trip_request().sampling_params
+        },
+        ..round_trip_request()
+    };
+    let mut outputs = byte_outputs(&[b"o", b"k"], EngineCoreFinishReason::Length);
+    outputs[0].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'o', 2)],
+    }));
+    outputs[0].new_prompt_logprobs_tensors = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: b"ello".iter().map(|&b| position(b, 3)).collect(),
+    }));
+    outputs[1].new_logprobs = Some(MaybeWireLogprobs::Direct(Logprobs {
+        positions: vec![position(b'k', 1)],
+    }));
+    let local = LlmHarness::local(outputs.clone()).await.decoded(request.clone()).await;
+    let remote = LlmHarness::remote(outputs).await.decoded(request).await;
+    assert_eq!(local.text(), "ok");
+    assert_eq!(remote, local);
+}
+
+/// Terminal metadata that only the raw token stream exposes survives the wire:
+/// the stop token, KV transfer parameters, cached tokens, sampling mask, and
+/// speculative-decoding metrics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_raw_outputs() {
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+    use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
+    use vllm_engine_core_client::protocol::stats::PrefillStats;
+
+    let request = vllm_text::TextRequest {
+        decode_options: Default::default(),
+        ..round_trip_request()
+    };
+    let mut outputs = byte_outputs(&[b"o", b"k", &[3]], EngineCoreFinishReason::Stop);
+    outputs[0].prefill_stats = Some(Box::new(PrefillStats {
+        num_prompt_tokens: 5,
+        num_computed_tokens: 1,
+        num_cached_tokens: 4,
+        ..Default::default()
+    }));
+    outputs[1].new_sampling_mask = Some(MaybeWireSamplingMask::Direct(SamplingMask {
+        rows: vec![vec![1, 2]],
+    }));
+    let last = outputs.last_mut().unwrap();
+    last.stop_reason = Some(StopReason::TokenId(3));
+    last.kv_transfer_params = Some(Box::new(serde_json::json!({
+        "remote_request_id": "round-trip",
+        "remote_port": 5600,
+    })));
+    last.spec_decode_metrics = Some(Box::new(RequestSpecDecodeMetrics {
+        num_spec_tokens: 2,
+        histogram: vec![1, 0, 1],
+        num_draft_tokens: 4,
+        ..Default::default()
+    }));
+    let local = LlmHarness::local(outputs.clone()).await.raw(request.clone()).await;
+    let remote = LlmHarness::remote(outputs).await.raw(request).await;
+    let terminal = local.outputs.last().unwrap();
+    assert!(terminal.kv_transfer_params.is_some() && terminal.spec_decode_metrics.is_some());
+    assert_eq!(remote, local);
+}
+
+/// The server fans out the samples: the engine receives the same child
+/// requests, with derived IDs and seeds, and each sample reaches the caller on
+/// its own stream, including one the caller's stop string ends early.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn remote_llm_matches_local_with_parallel_samples() {
+    let samples = vec![
+        byte_outputs(&[b"ab", b"cd"], EngineCoreFinishReason::Length),
+        byte_outputs(&[b"xy", b"z!", b"qq"], EngineCoreFinishReason::Length),
+    ];
+    let n = NonZeroU32::new(2).unwrap();
+    let local = (LlmHarness::local_samples(samples.clone()).await)
+        .decoded_n(round_trip_request(), n)
+        .await;
+    let remote = (LlmHarness::remote_samples(samples).await)
+        .decoded_n(round_trip_request(), n)
+        .await;
+    assert_eq!(local.texts(), ["abcd", "xyz"]);
+    let seeds: Vec<_> = (local.engine_requests.iter())
+        .map(|request| request.sampling_params.as_ref().unwrap().seed)
+        .collect();
+    assert_eq!(seeds, [Some(7), Some(8)]);
+    assert_eq!(remote, local);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_llm_readiness_follows_server_but_health_does_not() {
+    let (text, _engine_task) = engine_core_text(b"engine-remote-readiness", |dealer, push| {
+        boxed_test_future(serve_pausable_engine(dealer, push))
+    })
+    .await;
+    let chat = ChatLlm::new(text, Arc::new(FakeTextBackend::default()));
+    let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
+    let (channel, server_task) = start_llm_test_server(state).await;
+    let llm = vllm_remote_llm::RemoteLlm::connect(channel).await.expect("connect remote llm");
+    let readiness = llm.subscribe_readiness();
+    let health = llm.subscribe_health();
+    let mut control = llm.control_client();
+
+    let wait_for = |ready: bool| {
+        let mut readiness = readiness.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(2), readiness.wait_for(|&r| r == ready))
+                .await
+                .expect("timed out waiting for remote readiness")
+                .map(|_| ())
+                .expect("readiness channel open");
+        }
+    };
+
+    control
+        .pause_generation(pb::PauseGenerationRequest::default())
+        .await
+        .expect("pause generation");
+    wait_for(false).await;
+    assert!(
+        *health.borrow(),
+        "a paused server must not fail the remote `Llm`"
+    );
+
+    control
+        .resume_generation(pb::ResumeGenerationRequest {})
+        .await
+        .expect("resume generation");
+    wait_for(true).await;
+    assert!(*health.borrow());
 
     server_task.abort();
 }
