@@ -155,6 +155,48 @@ pub enum ServiceTier {
     Priority,
 }
 
+/// Responses API `prompt_cache_retention` values. Accepted and echoed; the
+/// frontend does not act on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheRetention {
+    /// Older OpenAI SDKs send `in-memory`; it is echoed as `in_memory`.
+    #[serde(rename = "in_memory", alias = "in-memory")]
+    InMemory,
+    #[serde(rename = "24h")]
+    Hours24,
+}
+
+/// Responses API `prompt_cache_options`. Accepted and echoed with defaults
+/// applied; the frontend does not act on them. The request-only `prewarm`
+/// key is not declared: its cache preparation is not implemented, and it is
+/// omitted from the echo, like OpenAI's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PromptCacheOptions {
+    #[serde(default)]
+    pub mode: PromptCacheMode,
+    #[serde(default)]
+    pub ttl: PromptCacheTtl,
+    #[serde(default)]
+    pub comparison_response_id: Option<String>,
+}
+
+/// Responses API `prompt_cache_options.mode` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheMode {
+    #[default]
+    Implicit,
+    Explicit,
+}
+
+/// Responses API `prompt_cache_options.ttl` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptCacheTtl {
+    #[default]
+    #[serde(rename = "30m")]
+    Minutes30,
+}
+
 /// One Responses API tool.
 ///
 /// The function tool is the chat-completions [`Function`] flattened next to
@@ -272,6 +314,14 @@ pub struct ResponsesRequest {
     pub truncation: Option<ResponseTruncation>,
     #[serde(default)]
     pub user: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    #[serde(default)]
+    pub safety_identifier: Option<String>,
     #[serde(default)]
     pub include: Option<Vec<String>>,
     #[serde(default)]
@@ -658,7 +708,15 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub prompt: Option<Value>,
     #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    #[serde(default)]
     pub reasoning: Option<ResponsesReasoning>,
+    #[serde(default)]
+    pub safety_identifier: Option<String>,
     pub service_tier: ServiceTier,
     pub temperature: f32,
     #[serde(default)]
@@ -823,7 +881,11 @@ mod tests {
             parallel_tool_calls: true,
             previous_response_id: None,
             prompt: None,
+            prompt_cache_key: None,
+            prompt_cache_options: None,
+            prompt_cache_retention: None,
             reasoning: None,
+            safety_identifier: None,
             service_tier: ServiceTier::Auto,
             temperature: 1.0,
             text: None,
@@ -889,7 +951,11 @@ mod tests {
               "parallel_tool_calls": true,
               "previous_response_id": null,
               "prompt": null,
+              "prompt_cache_key": null,
+              "prompt_cache_options": null,
+              "prompt_cache_retention": null,
               "reasoning": null,
+              "safety_identifier": null,
               "service_tier": "auto",
               "temperature": 1.0,
               "text": null,

@@ -23,11 +23,12 @@ use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
-    InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
-    ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
-    ResponseObject, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
-    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
-    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier,
+    InputTokensDetails, OutputTokensDetails, PromptCacheOptions, PromptCacheRetention,
+    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseInputRole,
+    ResponseItemStatus, ResponseMessageContent, ResponseObject, ResponseTextConfig,
+    ResponseTextFormat, ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation,
+    ResponseUsage, ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse,
+    ResponsesTool, ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -60,6 +61,10 @@ pub(crate) struct ResponseMeta {
     pub text: Option<ResponseTextConfig>,
     pub truncation: ResponseTruncation,
     pub user: Option<String>,
+    pub prompt_cache_key: Option<String>,
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    pub safety_identifier: Option<String>,
 }
 
 /// Lowered responses request plus the response metadata carried by every SSE
@@ -112,6 +117,10 @@ pub(crate) fn prepare_responses_request(
         text,
         truncation,
         user,
+        prompt_cache_key,
+        prompt_cache_options,
+        prompt_cache_retention,
+        safety_identifier,
         include: _,
         presence_penalty,
         frequency_penalty,
@@ -296,6 +305,10 @@ pub(crate) fn prepare_responses_request(
         text,
         truncation,
         user,
+        prompt_cache_key,
+        prompt_cache_options,
+        prompt_cache_retention,
+        safety_identifier,
     };
 
     Ok(PreparedResponsesRequest {
@@ -700,6 +713,10 @@ pub(crate) fn build_response(
         text,
         truncation,
         user,
+        prompt_cache_key,
+        prompt_cache_options,
+        prompt_cache_retention,
+        safety_identifier,
     }: ResponseMeta,
     sampling: EffectiveSampling,
     request_id: String,
@@ -722,7 +739,11 @@ pub(crate) fn build_response(
         parallel_tool_calls,
         previous_response_id,
         prompt: None,
+        prompt_cache_key,
+        prompt_cache_options,
+        prompt_cache_retention,
         reasoning,
+        safety_identifier,
         service_tier,
         temperature: sampling.temperature,
         text,
