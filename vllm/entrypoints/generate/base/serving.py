@@ -160,7 +160,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
         try:
             self.system_fingerprint: str | None = get_system_fingerprint(
-                engine_client.vllm_config
+                engine_client.vllm_config, engine_client.get_config_hash()
             )
         except Exception:
             # Never fail server startup over the fingerprint.

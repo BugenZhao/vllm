@@ -7,8 +7,10 @@ Four modes, configured via ``--fingerprint-mode``:
 
 * ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>`` — encodes
   server version, any non-trivial parallelism degree (tp/pp/dp/ep), and an
-  8-char prefix of ``vllm_config.compute_hash()`` (covers model identity,
-  quant config, speculative, attention backend, etc.).
+  8-char prefix of the engine's config hash: ``compute_hash()`` of its
+  initialized ``VllmConfig``, reported in its ready response (covers model
+  identity, quant config, speculative, attention backend, etc.), or
+  ``nohash`` when no engine reported one.
 * ``hash``: ``vllm-<version>-<hash8>`` — parallelism stripped.
 * ``custom``: user-provided literal via ``--fingerprint-value``.
 * ``none``: the field is omitted (serialized as ``null``).
@@ -39,14 +41,18 @@ def set_default_fingerprint_mode(
     _CUSTOM_VALUE = custom_value
 
 
-def get_system_fingerprint(vllm_config: Any) -> str | None:
-    """Return the fingerprint for ``vllm_config`` using the mode configured by
-    ``set_default_fingerprint_mode``."""
-    return build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
+def get_system_fingerprint(vllm_config: Any, config_hash: str | None) -> str | None:
+    """Return the fingerprint using the mode configured by
+    ``set_default_fingerprint_mode``. ``config_hash`` is the engine-reported
+    config hash; ``vllm_config`` supplies the parallelism."""
+    return build_system_fingerprint(
+        vllm_config, config_hash, _DEFAULT_MODE, _CUSTOM_VALUE
+    )
 
 
 def build_system_fingerprint(
     vllm_config: Any,
+    config_hash: str | None,
     mode: FingerprintMode = "full",
     custom_value: str | None = None,
 ) -> str | None:
@@ -57,10 +63,7 @@ def build_system_fingerprint(
 
     from vllm import __version__ as vllm_version
 
-    try:
-        hash8 = vllm_config.compute_hash()[:8]
-    except Exception:
-        hash8 = "nohash"
+    hash8 = config_hash[:8] if config_hash else "nohash"
 
     if mode == "hash":
         return f"vllm-{vllm_version}-{hash8}"

@@ -8,9 +8,13 @@ import pytest
 
 from vllm.entrypoints.serve.utils import fingerprint as fp
 
+# The engine-reported config hash.
+HASH = "a3b21f94deadbeef"
 
-def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):
-    c = SimpleNamespace(
+
+def _cfg(tp=1, pp=1, dp=1, ep=False):
+    # No `compute_hash`: the fingerprint uses only the engine-reported hash.
+    return SimpleNamespace(
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
@@ -18,8 +22,6 @@ def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):
             enable_expert_parallel=ep,
         )
     )
-    c.compute_hash = lambda: digest
-    return c
 
 
 @pytest.fixture(autouse=True)
@@ -34,46 +36,46 @@ def test_four_modes_produce_expected_shapes():
 
     cfg = _cfg(tp=8, ep=True)
 
-    assert fp.build_system_fingerprint(cfg, "full") == (f"vllm-{v}-tp8-ep-a3b21f94")
-    assert fp.build_system_fingerprint(cfg, "hash") == f"vllm-{v}-a3b21f94"
-    assert fp.build_system_fingerprint(cfg, "custom", "my-fp") == "my-fp"
-    assert fp.build_system_fingerprint(cfg, "none") is None
+    assert fp.build_system_fingerprint(cfg, HASH, "full") == (
+        f"vllm-{v}-tp8-ep-a3b21f94"
+    )
+    assert fp.build_system_fingerprint(cfg, HASH, "hash") == f"vllm-{v}-a3b21f94"
+    assert fp.build_system_fingerprint(cfg, HASH, "custom", "my-fp") == "my-fp"
+    assert fp.build_system_fingerprint(cfg, HASH, "none") is None
 
 
 def test_full_mode_emits_only_non_trivial_parallelism():
     from vllm import __version__ as v
 
     # Single-GPU: nothing between version and hash.
-    assert fp.build_system_fingerprint(_cfg(), "full") == f"vllm-{v}-a3b21f94"
+    assert fp.build_system_fingerprint(_cfg(), HASH, "full") == f"vllm-{v}-a3b21f94"
     # All parallelism axes.
     assert (
-        fp.build_system_fingerprint(_cfg(tp=8, pp=2, dp=4, ep=True), "full")
+        fp.build_system_fingerprint(_cfg(tp=8, pp=2, dp=4, ep=True), HASH, "full")
         == f"vllm-{v}-tp8-pp2-dp4-ep-a3b21f94"
     )
 
 
 def test_get_respects_set_default():
     cfg = _cfg(tp=8)
-    full = fp.get_system_fingerprint(cfg)
-    assert full == fp.get_system_fingerprint(cfg)
+    full = fp.get_system_fingerprint(cfg, HASH)
+    assert full == fp.get_system_fingerprint(cfg, HASH)
 
     fp.set_default_fingerprint_mode("hash")
-    hashed = fp.get_system_fingerprint(cfg)
+    hashed = fp.get_system_fingerprint(cfg, HASH)
     assert hashed is not None
     assert hashed != full
     assert "tp8" not in hashed
 
     fp.set_default_fingerprint_mode("custom", "deploy-42")
-    assert fp.get_system_fingerprint(cfg) == "deploy-42"
+    assert fp.get_system_fingerprint(cfg, HASH) == "deploy-42"
 
     fp.set_default_fingerprint_mode("none")
-    assert fp.get_system_fingerprint(cfg) is None
+    assert fp.get_system_fingerprint(cfg, HASH) is None
 
 
-def test_compute_hash_failure_does_not_raise():
-    cfg = _cfg()
-    cfg.compute_hash = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-    full_fp = fp.build_system_fingerprint(cfg, "full")
-    assert full_fp is not None and full_fp.endswith("-nohash")
-    hash_fp = fp.build_system_fingerprint(cfg, "hash")
+def test_missing_engine_hash_reports_nohash():
+    full_fp = fp.build_system_fingerprint(_cfg(tp=2), None, "full")
+    assert full_fp is not None and full_fp.endswith("-tp2-nohash")
+    hash_fp = fp.build_system_fingerprint(_cfg(), None, "hash")
     assert hash_fp is not None and hash_fp.endswith("-nohash")
