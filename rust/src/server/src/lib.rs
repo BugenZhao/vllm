@@ -10,6 +10,7 @@ mod listener;
 mod lora;
 mod middleware;
 mod model_names;
+mod npy;
 mod render;
 mod routes;
 mod runtime;
