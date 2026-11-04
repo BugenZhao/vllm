@@ -9,16 +9,16 @@ use tonic_health::server::HealthReporter;
 use tracing::{debug, info, warn};
 use vllm_llm::Llm;
 
-use super::{ControlGrpcService, InferenceGrpcService};
+use super::{ControlGrpcService, InferenceGrpcService, LlmGrpcService};
 
 /// Health service for liveness probes. It reports `NOT_SERVING` only after an
 /// engine failure: pause, sleep, weight updates, and orderly shutdown leave it
 /// `SERVING` until the listener closes.
 pub(crate) const LIVENESS_SERVICE: &str = "liveness";
 
-/// Health service for readiness probes. Like `vllm.Inference`, it reports
-/// whether the engines can accept and process new requests, and
-/// `NOT_SERVING` on shutdown or engine failure.
+/// Health service for readiness probes. Like `vllm.Inference` and
+/// `vllm.internal.Llm`, it reports whether the engines can accept and process
+/// new requests, and `NOT_SERVING` on shutdown or engine failure.
 pub(crate) const READINESS_SERVICE: &str = "readiness";
 
 /// The [`Llm`] signals that the gRPC health services follow.
@@ -44,7 +44,8 @@ pub(crate) struct HealthMonitor {
     engine: EngineHealth,
     /// Whether `vllm.Control` is served, so its health is published.
     serves_control: bool,
-    /// Readiness as last published to `readiness` and `vllm.Inference`.
+    /// Readiness as last published to `readiness`, `vllm.Inference`, and
+    /// `vllm.internal.Llm`.
     ready: bool,
 }
 
@@ -172,6 +173,7 @@ impl HealthMonitor {
         withdrawn.cancel();
 
         reporter.clear_service_status(inference_service).await;
+        reporter.clear_service_status(LlmGrpcService::NAME).await;
         reporter.clear_service_status(control_service).await;
         reporter.clear_service_status("").await;
         reporter.clear_service_status(LIVENESS_SERVICE).await;
@@ -185,7 +187,11 @@ async fn set_readiness(reporter: &HealthReporter, ready: bool) {
     } else {
         ServingStatus::NotServing
     };
-    for service in [READINESS_SERVICE, InferenceGrpcService::NAME] {
+    for service in [
+        READINESS_SERVICE,
+        InferenceGrpcService::NAME,
+        LlmGrpcService::NAME,
+    ] {
         reporter.set_service_status(service, status).await;
     }
 }

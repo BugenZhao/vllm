@@ -5756,6 +5756,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -5849,6 +5850,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-remote-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "thiserror-ext",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tonic-health",
+ "tracing",
+ "vllm-llm",
+ "vllm-proto",
+]
+
+[[package]]
 name = "vllm-server"
 version = "0.1.0"
 dependencies = [
@@ -5906,6 +5927,7 @@ dependencies = [
  "vllm-llm",
  "vllm-metrics",
  "vllm-proto",
+ "vllm-remote-llm",
  "vllm-text",
  "vllm-tokenizer",
  "zeromq",
