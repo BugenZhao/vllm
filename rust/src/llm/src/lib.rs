@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
@@ -43,7 +44,7 @@ use crate::request_metrics::{
 pub type BoxGenerateOutputStream = BoxStream<'static, Result<GenerateOutput>>;
 
 /// Facts about the model and engine fixed when an [`Llm`] is created.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmInfo {
     /// Effective context length, after the engine auto-fitted its KV cache.
     pub max_model_len: u32,
