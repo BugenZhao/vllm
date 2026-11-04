@@ -117,6 +117,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
+            state.system_fingerprint.clone(),
             api_server_options,
             prepared.options,
         );
@@ -129,6 +130,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
+            state.system_fingerprint.clone(),
             api_server_options,
             prepared.options,
         )
@@ -148,6 +150,7 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -267,7 +270,7 @@ async fn collect_completion(
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
@@ -280,6 +283,7 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
         log_outputs,
@@ -411,12 +415,15 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(
+                        let mut final_chunk = final_chunk(
                             &envelope,
                             finished.finish_reason,
                             finished.kv_transfer_params.map(|value| *value),
                             finished.weight_versions.filter(|_| return_weight_versions),
                         )?;
+                        if !include_usage {
+                            final_chunk.system_fingerprint = system_fingerprint.clone();
+                        }
                         if let Some(output_log) = output_log.take() {
                             log_outputs.log(
                                 LoggedOutput::StreamComplete,
@@ -442,6 +449,7 @@ async fn completion_chunk_stream(
                                     None,
                                 ),
                                 metrics,
+                                system_fingerprint.clone(),
                             )))
                             .await;
                         }
@@ -502,12 +510,17 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(
+                    let mut final_chunk = final_chunk(
                         &envelope,
                         finished.finish_reason,
                         finished.kv_transfer_params.map(|value| *value),
                         finished.weight_versions.filter(|_| return_weight_versions),
                     )?;
+                    // Like Python, the last chunk carries the fingerprint:
+                    // this one, or the usage chunk that follows.
+                    if !include_usage {
+                        final_chunk.system_fingerprint = system_fingerprint.clone();
+                    }
                     if let Some(output_log) = output_log.take() {
                         log_outputs.log(
                             LoggedOutput::StreamComplete,
@@ -533,6 +546,7 @@ async fn completion_chunk_stream(
                                 None,
                             ),
                             metrics,
+                            system_fingerprint.clone(),
                         )))
                         .await;
                     }
@@ -636,10 +650,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -808,6 +824,7 @@ mod tests {
                 "cmpl-1".into(),
                 "model".into(),
                 1,
+                None,
                 ApiServerOptions {
                     enable_per_request_metrics: enabled,
                     ..Default::default()
@@ -838,6 +855,7 @@ mod tests {
             "cmpl-1".into(),
             "model".into(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions::default(),
         )
@@ -942,6 +960,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -1099,6 +1118,7 @@ mod tests {
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 ResponseOptions {
                     requested_logprobs: Some(0),
@@ -1154,6 +1174,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1217,6 +1238,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1284,6 +1306,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1340,6 +1363,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1401,6 +1425,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1481,6 +1506,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1559,6 +1585,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
