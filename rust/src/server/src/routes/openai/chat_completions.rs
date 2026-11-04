@@ -32,6 +32,7 @@ pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
+use crate::npy::npy_base64;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
@@ -191,7 +192,9 @@ async fn collect_chat_completion(
         kv_transfer_params,
         ec_transfer_params,
         weight_versions,
+        routed_experts,
     } = collected;
+    let routed_experts = routed_experts.as_ref().map(npy_base64).transpose()?;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
@@ -299,7 +302,7 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
-            routed_experts: None,
+            routed_experts,
             weight_versions: weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
@@ -1259,6 +1262,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1356,6 +1360,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1406,6 +1411,7 @@ mod tests {
                 timestamps: Default::default(),
                 spec_decode_metrics: None,
                 weight_versions: None,
+                routed_experts: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: Some(Box::new(json!({"remote_block_ids": [1, 2]}))),
                 ec_transfer_params: None,
@@ -1475,6 +1481,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1560,6 +1567,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1697,6 +1705,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1780,6 +1789,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1846,6 +1856,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -1930,6 +1941,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2006,6 +2018,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 weight_versions: None,
+                routed_experts: None,
             }),
         ]);
 
@@ -2071,6 +2084,7 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     weight_versions: None,
+                    routed_experts: None,
                 }),
             ]);
 

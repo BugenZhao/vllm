@@ -8,6 +8,7 @@ use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
@@ -66,6 +67,9 @@ pub(crate) enum AssistantEvent {
         ec_transfer_params: Option<Box<serde_json::Value>>,
         /// Weight-version spans over all generated token positions.
         weight_versions: Option<Vec<WeightVersionSpan>>,
+        /// Routed-expert rows for the whole request, when the engine returned
+        /// any. Boxed to keep the per-token variants of this enum small.
+        routed_experts: Option<Box<WireNdArray>>,
     },
 }
 

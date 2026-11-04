@@ -16,6 +16,7 @@ mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
+mod routed_experts;
 
 pub use error::{Error, Result};
 pub use output::{
@@ -24,6 +25,7 @@ pub use output::{
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
+pub use routed_experts::RoutedExpertsRows;
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::inflight::InflightRequests;

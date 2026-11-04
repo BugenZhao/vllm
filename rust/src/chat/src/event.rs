@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{RequestTimestamps, TokenUsage, WeightVersionSpan};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
@@ -250,5 +251,8 @@ pub enum ChatEvent {
         ec_transfer_params: Option<Box<serde_json::Value>>,
         /// Weight-version spans over all generated token positions.
         weight_versions: Option<Vec<WeightVersionSpan>>,
+        /// Routed-expert rows for the whole request, when the engine returned
+        /// any. Boxed to keep the per-token variants of this enum small.
+        routed_experts: Option<Box<WireNdArray>>,
     },
 }
