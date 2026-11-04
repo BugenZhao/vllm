@@ -23,11 +23,12 @@ use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
-    InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
-    ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
-    ResponseObject, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
-    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
-    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier,
+    INCLUDE_OUTPUT_TEXT_LOGPROBS, InputTokensDetails, OutputTokensDetails,
+    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseInputRole,
+    ResponseItemStatus, ResponseMessageContent, ResponseObject, ResponseTextConfig,
+    ResponseTextFormat, ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation,
+    ResponseUsage, ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse,
+    ResponsesTool, ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -70,6 +71,9 @@ pub(crate) struct PreparedResponsesRequest {
     pub meta: ResponseMeta,
     /// Whether reasoning items appear in the output.
     pub include_reasoning: bool,
+    /// Alternatives per output-text token when
+    /// `include=["message.output_text.logprobs"]` asks for logprobs.
+    pub output_top_logprobs: Option<i32>,
     pub chat_request: ChatRequest,
 }
 
@@ -112,7 +116,7 @@ pub(crate) fn prepare_responses_request(
         text,
         truncation,
         user,
-        include: _,
+        include,
         presence_penalty,
         frequency_penalty,
         repetition_penalty,
@@ -140,6 +144,13 @@ pub(crate) fn prepare_responses_request(
     } = request;
 
     let response_model = lora_resolution.response_model();
+    // Like Python, `top_logprobs` only applies when output logprobs are
+    // included, and the response echoes the value sent to the engine.
+    let output_top_logprobs = include
+        .iter()
+        .flatten()
+        .any(|field| field == INCLUDE_OUTPUT_TEXT_LOGPROBS)
+        .then(|| top_logprobs.unwrap_or(0));
 
     let (messages, continue_final) = convert_input(&instructions, input)?;
     let generation_prompt_mode = if continue_final {
@@ -231,7 +242,7 @@ pub(crate) fn prepare_responses_request(
             max_tokens: max_output_tokens,
             min_tokens,
             thinking_token_budget: None,
-            logprobs: None,
+            logprobs: output_top_logprobs,
             prompt_logprobs: None,
             prompt_logprob_token_ids: None,
             prompt_logprob_start: None,
@@ -292,7 +303,7 @@ pub(crate) fn prepare_responses_request(
         previous_response_id,
         reasoning,
         service_tier: service_tier.unwrap_or_default(),
-        top_logprobs,
+        top_logprobs: output_top_logprobs,
         text,
         truncation,
         user,
@@ -302,6 +313,7 @@ pub(crate) fn prepare_responses_request(
         request_id,
         meta,
         include_reasoning,
+        output_top_logprobs,
         chat_request,
     })
 }

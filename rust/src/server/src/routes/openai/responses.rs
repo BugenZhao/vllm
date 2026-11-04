@@ -34,7 +34,9 @@ use vllm_chat::{ChatEvent, ChatEventStream, ChatEventStreamTrait, ChatTokenUsage
 use vllm_llm::RequestTimestamps;
 
 use self::convert::{build_response, build_usage, prepare_responses_request};
-use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
+use self::streaming::{
+    OutputItemStreamer, OutputLogprobsOptions, ResponseStreamEvent, SequencedEvent,
+};
 use self::types::{
     IncompleteDetails, ResponseError, ResponseItemStatus, ResponseOutputItem, ResponsesRequest,
     ResponsesResponse,
@@ -86,12 +88,16 @@ pub async fn create_responses(
         prepared.request_id,
         created_at,
     );
+    let output_logprobs = prepared.output_top_logprobs.map(|top_logprobs| OutputLogprobsOptions {
+        top_logprobs,
+        return_tokens_as_token_ids: api_server_options.default_return_tokens_as_token_ids,
+    });
 
     if stream_requested {
         let event_stream = responses_event_stream(
             chat_stream,
             response,
-            prepared.include_reasoning,
+            OutputItemStreamer::new(prepared.include_reasoning, output_logprobs),
             api_server_options.enable_per_request_metrics,
         );
         let sse_stream = responses_sse_stream(event_stream).instrument(request_span);
@@ -100,7 +106,7 @@ pub async fn create_responses(
         match collect_responses(
             chat_stream,
             response,
-            prepared.include_reasoning,
+            OutputItemStreamer::new(prepared.include_reasoning, output_logprobs),
             &api_server_options,
         )
         .instrument(request_span)
@@ -141,14 +147,13 @@ fn response_not_found(response_id: &str) -> ApiError {
 async fn collect_responses(
     mut stream: ChatEventStream,
     response: ResponsesResponse,
-    include_reasoning: bool,
+    mut items: OutputItemStreamer,
     ApiServerOptions {
         enable_log_requests,
         enable_per_request_metrics,
         ..
     }: &ApiServerOptions,
 ) -> Result<ResponsesResponse, ApiError> {
-    let mut items = OutputItemStreamer::new(include_reasoning);
     let terminal = loop {
         let Some(event) = stream.next().await else {
             return Err(server_error!(
@@ -162,7 +167,7 @@ async fn collect_responses(
             )
         })?;
         // Only the final output matters here; the item events are discarded.
-        items.on_event(&event);
+        items.on_event(&event)?;
         if let Some(terminal) = TerminalOutput::from_event(event) {
             break terminal;
         }
@@ -296,12 +301,10 @@ fn failed_response(
 async fn responses_event_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
     response: ResponsesResponse,
-    include_reasoning: bool,
+    mut items: OutputItemStreamer,
     enable_per_request_metrics: bool,
     mut y: TryYielder<ResponseStreamEvent, Infallible>,
 ) -> Result<(), Infallible> {
-    let mut items = OutputItemStreamer::new(include_reasoning);
-
     let initial = Arc::new(response);
     y.yield_ok(ResponseStreamEvent::Created {
         response: Arc::clone(&initial),
@@ -315,9 +318,20 @@ async fn responses_event_stream(
 
     let mut terminal = None;
     while let Some(next) = stream.next().await {
+        let next = match next {
+            Ok(event) => items
+                .on_event(&event)
+                .map(|events| (events, event))
+                .inspect_err(|error| error!(?error, "failed to build responses stream events"))
+                .ok(),
+            Err(error) => {
+                error!(error = %error.as_report(), "responses stream failed");
+                None
+            }
+        };
         match next {
-            Ok(event) => {
-                for event in items.on_event(&event) {
+            Some((events, event)) => {
+                for event in events {
                     y.yield_ok(event).await;
                 }
                 if let Some(output) = TerminalOutput::from_event(event) {
@@ -325,8 +339,7 @@ async fn responses_event_stream(
                     break;
                 }
             }
-            Err(error) => {
-                error!(error = %error.as_report(), "responses stream failed");
+            None => {
                 for event in items.on_stream_end(None) {
                     y.yield_ok(event).await;
                 }

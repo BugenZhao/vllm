@@ -23,6 +23,9 @@ use super::types::{
     AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
     ResponsesResponse, TextPart,
 };
+use crate::error::ApiError;
+use crate::routes::openai::utils::logprobs::decoded_logprobs_to_openai_chat;
+use crate::routes::openai::utils::types::ChatLogProbsContent;
 
 /// One Responses API SSE event payload.
 ///
@@ -72,15 +75,17 @@ pub(crate) enum ResponseStreamEvent {
         output_index: u32,
         content_index: u32,
         delta: String,
-        /// TODO: populated when output logprobs are implemented.
-        logprobs: Vec<Value>,
+        /// Logprobs of the tokens of this delta's decoded update, when
+        /// requested; empty otherwise.
+        logprobs: Vec<TextDeltaLogprob>,
     },
     OutputTextDone {
         item_id: String,
         output_index: u32,
         content_index: u32,
         text: String,
-        /// TODO: populated when output logprobs are implemented.
+        /// Always empty, like Python; the content part carries the text's
+        /// logprobs.
         logprobs: Vec<Value>,
     },
     ReasoningTextDelta {
@@ -154,6 +159,97 @@ impl<'a> SequencedEvent<'a> {
     }
 }
 
+/// One token's logprob on a `response.output_text.delta` event. The SDK's
+/// delta shape, unlike the content part's, carries no `bytes`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct TextDeltaLogprob {
+    token: String,
+    logprob: f32,
+    top_logprobs: Vec<TextDeltaTopLogprob>,
+}
+
+/// One alternative token of a [`TextDeltaLogprob`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct TextDeltaTopLogprob {
+    token: String,
+    logprob: f32,
+}
+
+impl From<&ChatLogProbsContent> for TextDeltaLogprob {
+    fn from(content: &ChatLogProbsContent) -> Self {
+        Self {
+            token: content.token.clone(),
+            logprob: content.logprob,
+            top_logprobs: content
+                .top_logprobs
+                .iter()
+                .map(|top| TextDeltaTopLogprob {
+                    token: top.token.clone(),
+                    logprob: top.logprob,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// How to render output-text logprobs, when
+/// `include=["message.output_text.logprobs"]` requests them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OutputLogprobsOptions {
+    pub top_logprobs: i32,
+    pub return_tokens_as_token_ids: bool,
+}
+
+/// Per-update state for attaching logprobs to output text.
+///
+/// Like Python, the logprobs of one decoded update go to that update's text
+/// delta, and are dropped when the update outputs no text: per engine step
+/// when streaming, and the whole output otherwise, since a non-streaming
+/// request is one update. `vllm-chat` emits an update's `LogprobsDelta` after
+/// its other events, so those events are held until it arrives.
+struct OutputLogprobs {
+    options: OutputLogprobsOptions,
+    /// Chat events of the current decoded update.
+    update: Vec<ChatEvent>,
+    /// Logprobs of the update being processed, until its text takes them.
+    update_logprobs: Vec<ChatLogProbsContent>,
+}
+
+impl OutputLogprobs {
+    /// Hold one event of the current update. Text deltas of one block are
+    /// merged so that the update's logprobs stay on a single delta event.
+    fn hold(&mut self, event: &ChatEvent) {
+        if let ChatEvent::BlockDelta {
+            index,
+            kind: AssistantBlockKind::Text,
+            delta,
+            token_count,
+        } = event
+            && let Some(ChatEvent::BlockDelta {
+                index: held_index,
+                kind: AssistantBlockKind::Text,
+                delta: held_delta,
+                token_count: held_token_count,
+            }) = self.update.last_mut()
+            && held_index == index
+        {
+            held_delta.push_str(delta);
+            *held_token_count = held_token_count.zip(*token_count).map(|(a, b)| a + b);
+            return;
+        }
+        self.update.push(event.clone());
+    }
+}
+
+/// The kind of the block one event starts, extends, or ends.
+fn block_kind(event: &ChatEvent) -> Option<AssistantBlockKind> {
+    match event {
+        ChatEvent::BlockStart { kind, .. } | ChatEvent::BlockDelta { kind, .. } => Some(*kind),
+        ChatEvent::BlockEnd { block, .. } => Some(block.kind()),
+        _ => None,
+    }
+}
+
 /// Content part carried by `response.content_part.*` events.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -181,6 +277,8 @@ pub(crate) struct OutputItemStreamer {
     /// event: its status is unknown until another item starts or generation
     /// ends.
     last_item_done_pending: bool,
+    /// Output-text logprobs state, when requested.
+    logprobs: Option<OutputLogprobs>,
 }
 
 /// The currently streamed assistant output item.
@@ -192,6 +290,7 @@ enum OpenItem {
     Message {
         item_id: String,
         text: String,
+        logprobs: Vec<ChatLogProbsContent>,
     },
     FunctionCall {
         item_id: String,
@@ -202,17 +301,87 @@ enum OpenItem {
 }
 
 impl OutputItemStreamer {
-    pub(crate) fn new(include_reasoning: bool) -> Self {
+    pub(crate) fn new(
+        include_reasoning: bool,
+        output_logprobs: Option<OutputLogprobsOptions>,
+    ) -> Self {
         Self {
             current: None,
             include_reasoning,
             completed_items: Vec::new(),
             last_item_done_pending: false,
+            logprobs: output_logprobs.map(|options| OutputLogprobs {
+                options,
+                update: Vec::new(),
+                update_logprobs: Vec::new(),
+            }),
         }
     }
 
     /// Process one chat event, returning the SSE events to emit.
-    pub(crate) fn on_event(&mut self, event: &ChatEvent) -> Vec<ResponseStreamEvent> {
+    pub(crate) fn on_event(
+        &mut self,
+        event: &ChatEvent,
+    ) -> Result<Vec<ResponseStreamEvent>, ApiError> {
+        let Some(logprobs) = self.logprobs.as_mut() else {
+            return Ok(self.process_event(event));
+        };
+        match event {
+            ChatEvent::LogprobsDelta {
+                logprobs: delta, ..
+            } => {
+                if let Some(delta) = delta {
+                    let OutputLogprobsOptions {
+                        top_logprobs,
+                        return_tokens_as_token_ids,
+                    } = logprobs.options;
+                    let content = decoded_logprobs_to_openai_chat(
+                        delta,
+                        top_logprobs,
+                        return_tokens_as_token_ids,
+                    )?
+                    .content;
+                    logprobs.update_logprobs = content.unwrap_or_default();
+                }
+                Ok(self.flush_update())
+            }
+            // Events after the last `LogprobsDelta`, such as closing blocks,
+            // form a last update.
+            ChatEvent::Done { .. } => Ok(self.flush_update()),
+            event => {
+                logprobs.hold(event);
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// Process the held events of one decoded update with its logprobs.
+    fn flush_update(&mut self) -> Vec<ResponseStreamEvent> {
+        let Some(logprobs) = self.logprobs.as_mut() else {
+            return vec![];
+        };
+        let update = std::mem::take(&mut logprobs.update);
+        // As in Chat Completions, an update with hidden reasoning keeps its
+        // token metadata hidden too.
+        if !self.include_reasoning
+            && update
+                .iter()
+                .any(|event| block_kind(event) == Some(AssistantBlockKind::Reasoning))
+        {
+            logprobs.update_logprobs.clear();
+        }
+        let mut events = Vec::new();
+        for event in &update {
+            events.extend(self.process_event(event));
+        }
+        if let Some(logprobs) = self.logprobs.as_mut() {
+            logprobs.update_logprobs.clear();
+        }
+        events
+    }
+
+    /// Map one chat event onto SSE events.
+    fn process_event(&mut self, event: &ChatEvent) -> Vec<ResponseStreamEvent> {
         let mut events = match event {
             ChatEvent::Start { .. } | ChatEvent::LogprobsDelta { .. } | ChatEvent::Done { .. } => {
                 vec![]
@@ -276,7 +445,8 @@ impl OutputItemStreamer {
         &mut self,
         finish_reason: Option<&FinishReason>,
     ) -> Vec<ResponseStreamEvent> {
-        let mut events = self.close_current(None);
+        let mut events = self.flush_update();
+        events.extend(self.close_current(None));
         if matches!(finish_reason, Some(FinishReason::Length))
             && let Some(last) = self.completed_items.last_mut()
         {
@@ -350,6 +520,7 @@ impl OutputItemStreamer {
         self.current = Some(OpenItem::Message {
             item_id: item_id.clone(),
             text: String::new(),
+            logprobs: Vec::new(),
         });
         vec![
             ResponseStreamEvent::OutputItemAdded { output_index, item },
@@ -400,17 +571,30 @@ impl OutputItemStreamer {
     }
 
     fn text_delta(&mut self, delta: String) -> ResponseStreamEvent {
-        let Some(OpenItem::Message { item_id, text }) = self.current.as_mut() else {
+        let delta_logprobs = self
+            .logprobs
+            .as_mut()
+            .map(|logprobs| std::mem::take(&mut logprobs.update_logprobs))
+            .unwrap_or_default();
+        let output_index = self.output_index();
+        let Some(OpenItem::Message {
+            item_id,
+            text,
+            logprobs,
+        }) = self.current.as_mut()
+        else {
             unreachable!("text delta requires an open message item");
         };
         text.push_str(&delta);
-        ResponseStreamEvent::OutputTextDelta {
+        let event = ResponseStreamEvent::OutputTextDelta {
             item_id: item_id.clone(),
-            output_index: self.output_index(),
+            output_index,
             content_index: 0,
             delta,
-            logprobs: vec![],
-        }
+            logprobs: delta_logprobs.iter().map(TextDeltaLogprob::from).collect(),
+        };
+        logprobs.extend(delta_logprobs);
+        event
     }
 
     fn function_call_delta(&mut self, delta: String) -> ResponseStreamEvent {
@@ -467,11 +651,15 @@ impl OutputItemStreamer {
                     item,
                 )
             }
-            OpenItem::Message { item_id, text } => {
+            OpenItem::Message {
+                item_id,
+                text,
+                logprobs,
+            } => {
                 let part = ResponseOutputContentPart::OutputText {
                     text: text.clone(),
                     annotations: vec![],
-                    logprobs: None,
+                    logprobs: (!logprobs.is_empty()).then_some(logprobs),
                 };
                 let item = ResponseOutputItem::Message {
                     id: item_id.clone(),
@@ -573,26 +761,31 @@ fn block_text(block: &AssistantContentBlock) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::*;
 
     #[test]
     fn empty_function_call_emits_arguments_done() {
-        let mut streamer = OutputItemStreamer::new(true);
-        streamer.on_event(&ChatEvent::ToolCallStart {
-            index: 0,
-            id: "call_1".to_string(),
-            name: "empty".to_string(),
-        });
-
-        let mut events = streamer.on_event(&ChatEvent::ToolCallEnd {
-            index: 0,
-            call: AssistantToolCall {
+        let mut streamer = OutputItemStreamer::new(true, None);
+        streamer
+            .on_event(&ChatEvent::ToolCallStart {
+                index: 0,
                 id: "call_1".to_string(),
                 name: "empty".to_string(),
-                arguments: String::new(),
-            },
-        });
+            })
+            .unwrap();
+
+        let mut events = streamer
+            .on_event(&ChatEvent::ToolCallEnd {
+                index: 0,
+                call: AssistantToolCall {
+                    id: "call_1".to_string(),
+                    name: "empty".to_string(),
+                    arguments: String::new(),
+                },
+            })
+            .unwrap();
         events.extend(streamer.on_stream_end(Some(&FinishReason::Stop(None))));
         let payloads: Vec<Value> = events
             .iter()
@@ -606,7 +799,7 @@ mod tests {
 
     #[test]
     fn empty_reasoning_block_is_not_an_output_item() {
-        let mut streamer = OutputItemStreamer::new(true);
+        let mut streamer = OutputItemStreamer::new(true, None);
         for event in [
             ChatEvent::BlockStart {
                 index: 0,
@@ -635,13 +828,95 @@ mod tests {
                 },
             },
         ] {
-            streamer.on_event(&event);
+            streamer.on_event(&event).unwrap();
         }
 
         let items = streamer.into_output_items();
         assert!(
             matches!(&items[..], [ResponseOutputItem::Message { .. }]),
             "{items:?}"
+        );
+    }
+
+    /// One decoded update's `LogprobsDelta` for `tokens`.
+    fn logprobs_delta(tokens: &[&str]) -> ChatEvent {
+        ChatEvent::LogprobsDelta {
+            logprobs: Some(DecodedLogprobs {
+                positions: tokens
+                    .iter()
+                    .map(|token| DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 0,
+                            token: token.to_string(),
+                            logprob: -0.5,
+                            rank: 1,
+                        }],
+                    })
+                    .collect(),
+            }),
+            token_ids: vec![0; tokens.len()],
+        }
+    }
+
+    fn text_delta(delta: &str) -> ChatEvent {
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+            delta: delta.to_string(),
+            token_count: None,
+        }
+    }
+
+    /// Feed `events` to a streamer that includes output-text logprobs and
+    /// return each text delta with the tokens of its logprobs.
+    fn text_deltas_with_logprob_tokens(events: Vec<ChatEvent>) -> Vec<(String, Vec<String>)> {
+        let mut streamer = OutputItemStreamer::new(
+            true,
+            Some(OutputLogprobsOptions {
+                top_logprobs: 0,
+                return_tokens_as_token_ids: false,
+            }),
+        );
+        let mut emitted = Vec::new();
+        for event in events {
+            emitted.extend(streamer.on_event(&event).unwrap());
+        }
+        emitted
+            .into_iter()
+            .filter_map(|event| match event {
+                ResponseStreamEvent::OutputTextDelta {
+                    delta, logprobs, ..
+                } => Some((
+                    delta,
+                    logprobs.into_iter().map(|logprob| logprob.token).collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn update_without_text_drops_its_logprobs() {
+        let deltas = text_deltas_with_logprob_tokens(vec![
+            // A parser held `<` back, or a suppressed tool call: the update
+            // outputs nothing.
+            logprobs_delta(&["<"]),
+            text_delta("<b"),
+            logprobs_delta(&["b"]),
+        ]);
+        assert_eq!(deltas, [("<b".to_string(), vec!["b".to_string()])]);
+    }
+
+    #[test]
+    fn text_deltas_of_one_update_merge_onto_one_delta() {
+        let deltas = text_deltas_with_logprob_tokens(vec![
+            text_delta("a"),
+            text_delta("b"),
+            logprobs_delta(&["a", "b"]),
+        ]);
+        assert_eq!(
+            deltas,
+            [("ab".to_string(), vec!["a".to_string(), "b".to_string()])]
         );
     }
 }

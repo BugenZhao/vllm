@@ -805,7 +805,7 @@ pub struct ChatLogProbs {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbsContent` class.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatLogProbsContent {
     pub token: String,
     pub logprob: f32,
@@ -814,7 +814,7 @@ pub struct ChatLogProbsContent {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProb` class.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopLogProb {
     pub token: String,
     pub logprob: f32,
