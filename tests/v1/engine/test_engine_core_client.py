@@ -456,6 +456,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._fingerprint_engine = None
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -517,6 +518,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._fingerprint_engine = None
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -548,6 +550,53 @@ def test_apply_ready_response_syncs_mamba_block_size():
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.mamba_block_size == 1056
+
+
+def test_apply_ready_response_keeps_config_hash_of_smallest_engine():
+    import msgspec
+
+    client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
+    client._fingerprint_engine = None
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
+    )
+    client.stats_update_address = None
+    assert client.get_config_hash() is None
+
+    def ready(max_model_len: int, config_hash: str | None) -> bytes:
+        return msgspec.msgpack.encode(
+            EngineCoreReadyResponse(
+                max_model_len=max_model_len,
+                num_gpu_blocks=100,
+                block_size=16,
+                dp_stats_address=None,
+                dtype="bfloat16",
+                vllm_version="test",
+                world_size=1,
+                data_parallel_size=1,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                decode_context_parallel_size=1,
+                data_parallel_rank=0,
+                max_num_seqs=256,
+                max_num_batched_tokens=8192,
+                instance_id="test-instance",
+                supports_lora=False,
+                max_loras=0,
+                config_hash=config_hash,
+            )
+        )
+
+    # Dense DP ranks auto-fit `max_model_len` independently: the fingerprint
+    # hashes the engine whose limit the frontend keeps.
+    client._apply_ready_response(ready(8192, "cf9be74a00"))
+    client._apply_ready_response(ready(4096, "e380051600"))
+    client._apply_ready_response(ready(6144, "0123456789"))
+    assert client.vllm_config.model_config.max_model_len == 4096
+    assert client.get_config_hash() == "e380051600"
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -1587,6 +1636,7 @@ def test_apply_ready_response_retains_kv_event_sources():
 
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
+    client._fingerprint_engine = None
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),

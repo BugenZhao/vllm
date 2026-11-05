@@ -95,6 +95,11 @@ class EngineCoreClient(ABC):
         """KV-event publisher config of each ready engine, keyed by DP rank."""
         return {}
 
+    def get_config_hash(self) -> str | None:
+        """`compute_hash()` of the engines' initialized config, reported in
+        their ready responses; None if no engine reported one."""
+        return None
+
     @staticmethod
     def make_client(
         multiprocess_mode: bool,
@@ -632,6 +637,9 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        # (max_model_len, config_hash) of the engine with the smallest
+        # max_model_len, the limit `_apply_ready_response` keeps.
+        self._fingerprint_engine: tuple[int, str | None] | None = None
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -881,6 +889,11 @@ class MPClient(EngineCoreClient):
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
+        if (
+            self._fingerprint_engine is None
+            or response.max_model_len < self._fingerprint_engine[0]
+        ):
+            self._fingerprint_engine = (response.max_model_len, response.config_hash)
 
         # Setup KV cache config with initialization state from
         # engine core process. Sum num_gpu_blocks from all engines in DP case.
@@ -940,6 +953,11 @@ class MPClient(EngineCoreClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
+
+    def get_config_hash(self) -> str | None:
+        if self._fingerprint_engine is None:
+            return None
+        return self._fingerprint_engine[1]
 
 
 def _process_utility_output(

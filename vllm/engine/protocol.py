@@ -72,6 +72,11 @@ class EngineClient(ABC):
         """KV-event publisher config of each engine, keyed by DP rank."""
         return {}
 
+    def get_config_hash(self) -> str | None:
+        """`compute_hash()` of the engine's initialized config, for
+        `system_fingerprint`; None if no engine reported one."""
+        return None
+
     def check_admission(  # noqa: B027
         self, n: int = 1, request_id: str | None = None
     ) -> None:
