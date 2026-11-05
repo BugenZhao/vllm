@@ -105,14 +105,16 @@ impl From<QueryRejection> for ApiError {
     fn from(error: QueryRejection) -> Self {
         // Axum deserializes through `serde_path_to_error`; name the failing
         // field like FastAPI's `loc`, and leave `param` unset without one.
-        let param = std::error::Error::source(&error)
-            .and_then(|error| error.source())
-            .and_then(|error| {
-                error.downcast_ref::<serde_path_to_error::Error<serde::de::value::Error>>()
-            })
-            .map(|error| error.path().to_string())
-            .filter(|path| path != ".")
-            .map(|path| format!("query.{path}"));
+        let param = std::iter::successors(
+            Some(&error as &(dyn std::error::Error + 'static)),
+            |error| error.source(),
+        )
+        .find_map(|error| {
+            error.downcast_ref::<serde_path_to_error::Error<serde::de::value::Error>>()
+        })
+        .map(|error| error.path().to_string())
+        .filter(|path| path != ".")
+        .map(|path| format!("query.{path}"));
         Self::invalid_query(error.body_text(), param)
     }
 }
