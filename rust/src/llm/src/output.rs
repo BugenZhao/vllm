@@ -21,10 +21,10 @@ use vllm_engine_core_client::{
 };
 
 use crate::RequestTimestamps;
-use crate::error::Result;
+use crate::aux_output::{AuxOutputRows, ROUTED_EXPERTS};
+use crate::error::{Error, Result};
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
-use crate::routed_experts::RoutedExpertsRows;
 
 /// Output tokens `[start, end)` were sampled by weights labelled `version`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -219,7 +219,7 @@ pub struct GenerateOutput {
     /// the rows of every output they keep and concatenate them when the
     /// request finishes, so text decoding can drop the rows of tokens cut off
     /// by a stop string.
-    pub routed_experts: RoutedExpertsRows,
+    pub routed_experts: AuxOutputRows,
     /// Snapshot of engine lifecycle timestamps after this output.
     ///
     /// Every output carries a snapshot because text decoding may finish the
@@ -311,7 +311,7 @@ impl GenerateOutput {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
-            routed_experts: RoutedExpertsRows::default(),
+            routed_experts: AuxOutputRows::default(),
             timestamps: RequestTimestamps::default(),
         }
     }
@@ -460,7 +460,7 @@ impl GenerateOutputStream {
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
             weight_versions,
-            routed_experts: RoutedExpertsRows::from_engine(raw.routed_experts),
+            routed_experts: AuxOutputRows::from_engine(raw.routed_experts),
             timestamps: self.request_metrics.timestamps(),
         };
 
@@ -543,7 +543,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             let mut prompt_token_id_logprobs = None;
             let mut prompt_cache_usage = PromptCacheUsage::default();
             let mut collected: Option<CollectedGenerateOutput> = None;
-            let mut routed_experts = RoutedExpertsRows::default();
+            let mut routed_experts = AuxOutputRows::default();
 
             while let Some(output) = stream.next().await.transpose()? {
                 prompt_cache_usage.merge(output.prompt_cache_usage);
@@ -608,7 +608,9 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
-                    collected.routed_experts = routed_experts.concat(&collected.request_id)?;
+                    collected.routed_experts = routed_experts.concat().map_err(
+                        Error::aux_output_rows(ROUTED_EXPERTS, &collected.request_id),
+                    )?;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

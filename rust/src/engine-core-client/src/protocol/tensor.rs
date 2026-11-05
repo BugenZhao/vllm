@@ -212,6 +212,73 @@ pub type WireTensor = WireArray<TensorDtype>;
 /// Numeric array with a typed NumPy descriptor or native-endian Torch dtype.
 pub type WireNdArray = WireArray<NumpyDtype>;
 
+fn unresolved_aux_frame() -> String {
+    "array data is an unresolved auxiliary frame".to_string()
+}
+
+impl WireNdArray {
+    /// Bytes per row along axis 0, for an array with at least one axis.
+    fn row_bytes(&self) -> Result<usize, String> {
+        let row_shape = self.shape.get(1..).ok_or_else(|| "a 0-d array has no rows".to_string())?;
+        row_shape
+            .checked_numel()
+            .and_then(|numel| numel.checked_mul(self.dtype.scalar.element_size()))
+            .ok_or_else(|| format!("array row size overflows: {:?}", self.shape))
+    }
+
+    fn raw_bytes(&self) -> Result<&[u8], String> {
+        self.data
+            .as_raw_view()
+            .map(|data| data.as_ref())
+            .ok_or_else(unresolved_aux_frame)
+    }
+
+    /// Keep the first `num_rows` rows along axis 0, like NumPy's
+    /// `array[:num_rows]`; arrays with no more rows are unchanged.
+    pub fn truncate_rows(&mut self, num_rows: usize) -> Result<(), String> {
+        let row_bytes = self.row_bytes()?;
+        if num_rows >= self.shape[0] {
+            return Ok(());
+        }
+        let WireArrayData::RawView(data) = &mut self.data else {
+            return Err(unresolved_aux_frame());
+        };
+        data.truncate(num_rows * row_bytes);
+        self.shape[0] = num_rows;
+        Ok(())
+    }
+
+    /// Concatenate arrays along axis 0, like NumPy's `np.concatenate`; `None`
+    /// for no arrays. The arrays must share their dtype and row shape.
+    pub fn concat_rows(arrays: impl IntoIterator<Item = Self>) -> Result<Option<Self>, String> {
+        let mut arrays = arrays.into_iter();
+        let Some(first) = arrays.next() else {
+            return Ok(None);
+        };
+        first.row_bytes()?;
+        first.raw_bytes()?;
+        let mut rest = arrays.peekable();
+        if rest.peek().is_none() {
+            return Ok(Some(first));
+        }
+        let mut num_rows = first.shape[0];
+        let mut data = first.raw_bytes()?.to_vec();
+        for array in rest {
+            if array.dtype != first.dtype || array.shape.get(1..) != first.shape.get(1..) {
+                return Err(format!(
+                    "cannot concatenate {:?} {:?} rows onto {:?} {:?} rows",
+                    array.dtype, array.shape, first.dtype, first.shape
+                ));
+            }
+            num_rows += array.shape[0];
+            data.extend_from_slice(array.raw_bytes()?);
+        }
+        let mut shape = first.shape;
+        shape[0] = num_rows;
+        Ok(Some(Self::from_raw(first.dtype, shape, data)))
+    }
+}
+
 /// Python array/tensor payload reference inside [`WireNdArray`].
 ///
 /// The data can be either an inline msgpack raw-view extension or an index into
@@ -326,6 +393,52 @@ impl Serialize for WireArrayData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `[rows, 2]` u8 array with one `[value, 0]` row per value.
+    fn rows(values: &[u8]) -> WireNdArray {
+        WireNdArray::from_raw(
+            TensorDtype::U8,
+            vec![values.len(), 2],
+            values.iter().flat_map(|&value| [value, 0]).collect(),
+        )
+    }
+
+    #[test]
+    fn truncate_rows_keeps_leading_rows() {
+        let mut array = rows(&[1, 2, 3]);
+        array.truncate_rows(5).unwrap();
+        assert_eq!(array, rows(&[1, 2, 3]));
+        array.truncate_rows(1).unwrap();
+        assert_eq!(array, rows(&[1]));
+        array.truncate_rows(0).unwrap();
+        assert_eq!(array, rows(&[]));
+
+        let mut scalar = WireNdArray::from_raw(TensorDtype::U8, vec![], vec![7]);
+        assert!(scalar.truncate_rows(0).is_err());
+        let mut unresolved = rows(&[1]);
+        unresolved.data = WireArrayData::AuxIndex(1);
+        assert!(unresolved.truncate_rows(0).is_err());
+    }
+
+    #[test]
+    fn concat_rows_joins_along_axis_0() {
+        assert_eq!(WireNdArray::concat_rows([]).unwrap(), None);
+        assert_eq!(
+            WireNdArray::concat_rows([rows(&[1, 2]), rows(&[]), rows(&[3])]).unwrap(),
+            Some(rows(&[1, 2, 3]))
+        );
+        let other_row_shape = WireNdArray::from_raw(TensorDtype::U8, vec![1, 1], vec![0]);
+        assert!(WireNdArray::concat_rows([rows(&[1]), other_row_shape]).is_err());
+        let other_dtype = WireNdArray::from_raw(TensorDtype::I8, vec![1, 2], vec![0, 0]);
+        assert!(WireNdArray::concat_rows([rows(&[1]), other_dtype]).is_err());
+
+        // A single array is validated like several.
+        let scalar = WireNdArray::from_raw(TensorDtype::U8, vec![], vec![7]);
+        assert!(WireNdArray::concat_rows([scalar]).is_err());
+        let mut unresolved = rows(&[1]);
+        unresolved.data = WireArrayData::AuxIndex(1);
+        assert!(WireNdArray::concat_rows([unresolved]).is_err());
+    }
 
     #[test]
     fn tensor_and_ndarray_preserve_their_dtype_wire_contracts() {

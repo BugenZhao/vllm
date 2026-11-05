@@ -453,7 +453,7 @@ async fn generate_merges_outputs_by_stream_interval() {
     };
     let routed_experts: Vec<_> = outputs
         .iter()
-        .map(|output| output.routed_experts.clone().concat("req").unwrap())
+        .map(|output| output.routed_experts.clone().concat().unwrap())
         .collect();
     assert_eq!(
         routed_experts,

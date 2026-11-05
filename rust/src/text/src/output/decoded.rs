@@ -12,8 +12,8 @@ use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopRe
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
-    FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, RoutedExpertsRows,
-    TokenUsage, WeightVersionSpan,
+    AuxOutputRows, FinishReason, GenerateOutput, PromptCacheUsage, ROUTED_EXPERTS,
+    RequestTimestamps, TokenUsage, WeightVersionSpan,
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
@@ -185,7 +185,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut sampling_mask: Option<SamplingMask> = None;
-    let mut routed_experts = RoutedExpertsRows::default();
+    let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
@@ -281,7 +281,9 @@ pub async fn decoded_text_event_stream(
         if let Some(num_tokens) = truncate_tokens_to {
             // Like Python's `_trim_surplus_tokens`, drop the routed-expert
             // rows of the cut tokens from the end of this output's rows.
-            new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens);
+            new_routed_experts.drop_trailing(new_token_ids.len() - num_tokens).map_err(
+                vllm_llm::Error::aux_output_rows(ROUTED_EXPERTS, &request_id),
+            )?;
             new_token_ids.truncate(num_tokens);
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
@@ -333,7 +335,9 @@ pub async fn decoded_text_event_stream(
                     last.end = last.end.min(output_token_count);
                 }
             }
-            let routed_experts = std::mem::take(&mut routed_experts).concat(&request_id)?;
+            let routed_experts = std::mem::take(&mut routed_experts).concat().map_err(
+                vllm_llm::Error::aux_output_rows(ROUTED_EXPERTS, &request_id),
+            )?;
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();

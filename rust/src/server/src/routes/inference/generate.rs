@@ -23,8 +23,8 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
-    RoutedExpertsRows, TokenUsage,
+    AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
+    GenerateOutputStreamExt as _, ROUTED_EXPERTS, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -179,7 +179,7 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
-    let mut routed_experts = RoutedExpertsRows::default();
+    let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
@@ -241,7 +241,11 @@ async fn generate_chunk_stream(
                 let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
                 let routed_experts = if finish_reason.is_some() {
                     std::mem::take(&mut routed_experts)
-                        .concat(&request_id)
+                        .concat()
+                        .map_err(vllm_llm::Error::aux_output_rows(
+                            ROUTED_EXPERTS,
+                            &request_id,
+                        ))
                         .map_err(|error| server_error!("{}", error.to_report_string()))?
                 } else {
                     None
@@ -1012,7 +1016,7 @@ mod tests {
     async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
         // Each output carries its own rows; the final chunk joins them.
         let rows = |start: u8| {
-            RoutedExpertsRows::from(WireNdArray::from_raw(
+            AuxOutputRows::from(WireNdArray::from_raw(
                 TensorDtype::U8,
                 vec![1, 3, 2],
                 (start..start + 6).collect(),
