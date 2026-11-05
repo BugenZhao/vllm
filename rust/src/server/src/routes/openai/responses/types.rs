@@ -155,6 +155,29 @@ pub enum ServiceTier {
     Priority,
 }
 
+/// Request fields the frontend validates at most and echoes back unchanged on
+/// the response. Flattened into both [`ResponsesRequest`] and
+/// [`ResponsesResponse`], so they need no per-field plumbing in between.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponseEchoFields {
+    /// Accepted without built-in tools, which it would limit.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Size-checked in validation.
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(default)]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    #[serde(default)]
+    pub safety_identifier: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
 /// Responses API `prompt_cache_retention` values. Accepted and echoed; the
 /// frontend does not act on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +272,9 @@ pub enum ResponseToolChoiceObject {
 /// that this frontend cannot produce are rejected.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct ResponsesRequest {
+    /// Fields echoed back unchanged; see [`ResponseEchoFields`].
+    #[serde(flatten)]
+    pub echo: ResponseEchoFields,
     /// The model ID served by this frontend. Optional; defaults to the
     /// served model when omitted.
     #[serde(default)]
@@ -268,10 +294,6 @@ pub struct ResponsesRequest {
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    #[serde(default)]
-    pub metadata: Option<HashMap<String, String>>,
     #[serde(default)]
     pub previous_response_id: Option<String>,
     /// Harmony-only stateless replay history. The Rust frontend does not
@@ -312,16 +334,6 @@ pub struct ResponsesRequest {
     pub text: Option<ResponseTextConfig>,
     #[serde(default)]
     pub truncation: Option<ResponseTruncation>,
-    #[serde(default)]
-    pub user: Option<String>,
-    #[serde(default)]
-    pub prompt_cache_key: Option<String>,
-    #[serde(default)]
-    pub prompt_cache_options: Option<PromptCacheOptions>,
-    #[serde(default)]
-    pub prompt_cache_retention: Option<PromptCacheRetention>,
-    #[serde(default)]
-    pub safety_identifier: Option<String>,
     #[serde(default)]
     pub include: Option<Vec<String>>,
     #[serde(default)]
@@ -696,10 +708,6 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub instructions: Option<String>,
     pub max_output_tokens: u32,
-    #[serde(default)]
-    pub max_tool_calls: Option<u32>,
-    #[serde(default)]
-    pub metadata: Option<HashMap<String, String>>,
     pub model: String,
     pub output: Vec<ResponseOutputItem>,
     pub parallel_tool_calls: bool,
@@ -708,15 +716,7 @@ pub struct ResponsesResponse {
     #[serde(default)]
     pub prompt: Option<Value>,
     #[serde(default)]
-    pub prompt_cache_key: Option<String>,
-    #[serde(default)]
-    pub prompt_cache_options: Option<PromptCacheOptions>,
-    #[serde(default)]
-    pub prompt_cache_retention: Option<PromptCacheRetention>,
-    #[serde(default)]
     pub reasoning: Option<ResponsesReasoning>,
-    #[serde(default)]
-    pub safety_identifier: Option<String>,
     pub service_tier: ServiceTier,
     pub temperature: f32,
     #[serde(default)]
@@ -731,8 +731,6 @@ pub struct ResponsesResponse {
     pub truncation: ResponseTruncation,
     #[serde(default)]
     pub usage: Option<ResponseUsage>,
-    #[serde(default)]
-    pub user: Option<String>,
     /// vLLM-specific per-request metrics. Omitted unless enabled server-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<PerRequestMetrics>,
@@ -742,6 +740,9 @@ pub struct ResponsesResponse {
     pub kv_transfer_params: Option<Value>,
     #[serde(default)]
     pub ec_transfer_params: Option<Value>,
+    /// Fields echoed back unchanged; see [`ResponseEchoFields`].
+    #[serde(flatten)]
+    pub echo: ResponseEchoFields,
 }
 
 /// The failure detail carried by a failed Responses API response.
@@ -865,8 +866,7 @@ mod tests {
             incomplete_details: None,
             instructions: Some("be terse".to_string()),
             max_output_tokens: 16,
-            max_tool_calls: None,
-            metadata: None,
+            echo: ResponseEchoFields::default(),
             model: "test-model".to_string(),
             output: vec![ResponseOutputItem::Message {
                 id: "msg_1".to_string(),
@@ -881,11 +881,7 @@ mod tests {
             parallel_tool_calls: true,
             previous_response_id: None,
             prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_options: None,
-            prompt_cache_retention: None,
             reasoning: None,
-            safety_identifier: None,
             service_tier: ServiceTier::Auto,
             temperature: 1.0,
             text: None,
@@ -911,7 +907,6 @@ mod tests {
                 },
                 total_tokens: 5,
             }),
-            user: None,
             metrics: None,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
@@ -930,8 +925,6 @@ mod tests {
               "incomplete_details": null,
               "instructions": "be terse",
               "max_output_tokens": 16,
-              "max_tool_calls": null,
-              "metadata": null,
               "model": "test-model",
               "output": [
                 {
@@ -951,11 +944,7 @@ mod tests {
               "parallel_tool_calls": true,
               "previous_response_id": null,
               "prompt": null,
-              "prompt_cache_key": null,
-              "prompt_cache_options": null,
-              "prompt_cache_retention": null,
               "reasoning": null,
-              "safety_identifier": null,
               "service_tier": "auto",
               "temperature": 1.0,
               "text": null,
@@ -981,11 +970,17 @@ mod tests {
                 },
                 "total_tokens": 5
               },
-              "user": null,
               "presence_penalty": 0.0,
               "frequency_penalty": 0.0,
               "kv_transfer_params": null,
-              "ec_transfer_params": null
+              "ec_transfer_params": null,
+              "max_tool_calls": null,
+              "metadata": null,
+              "prompt_cache_key": null,
+              "prompt_cache_options": null,
+              "prompt_cache_retention": null,
+              "safety_identifier": null,
+              "user": null
             }"#]]
         .assert_eq(&serde_json::to_string_pretty(&response).unwrap());
     }
