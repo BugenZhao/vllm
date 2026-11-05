@@ -3,10 +3,7 @@
 
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 
-use crate::error::Error;
-
-/// Artifact name of the routed-expert rows, used in errors.
-pub const ROUTED_EXPERTS: &str = "routed_experts";
+use crate::error::Result;
 
 /// Rows of one token-aligned auxiliary output (Python's AuxOutput, such as
 /// routed experts), kept as the engine sent them: one chunk per engine output,
@@ -43,7 +40,7 @@ impl AuxOutputRows {
     /// Drop up to `num_rows` rows from the end, like Python's
     /// `rows[:-num_rows]` for the tokens a stop string cut off. A chunk keeps
     /// its row shape even when no row is left in it.
-    pub fn drop_trailing(&mut self, mut num_rows: usize) -> Result<(), String> {
+    pub fn drop_trailing(&mut self, mut num_rows: usize) -> Result<()> {
         for chunk in self.chunks.iter_mut().rev() {
             if num_rows == 0 {
                 break;
@@ -58,8 +55,8 @@ impl AuxOutputRows {
 
     /// Concatenate the rows along the token axis, like Python's
     /// `np.concatenate`; `None` when no output carried rows.
-    pub fn concat(self) -> Result<Option<WireNdArray>, String> {
-        WireNdArray::concat_rows(self.chunks)
+    pub fn concat(self) -> Result<Option<WireNdArray>> {
+        Ok(WireNdArray::concat_rows(self.chunks)?)
     }
 }
 
@@ -69,27 +66,13 @@ impl From<WireNdArray> for AuxOutputRows {
     }
 }
 
-impl Error {
-    /// Map a row-operation failure on `artifact` to a request error, for
-    /// `map_err`.
-    pub fn aux_output_rows(
-        artifact: &'static str,
-        request_id: &str,
-    ) -> impl FnOnce(String) -> Self {
-        let request_id = request_id.to_string();
-        move |message| Self::AuxOutputRows {
-            artifact,
-            request_id,
-            message,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::protocol::dtype::TensorDtype;
+    use vllm_engine_core_client::protocol::tensor::ArrayRowsError;
 
     use super::*;
+    use crate::error::Error;
 
     /// One `[1, 2]` row per value.
     fn rows(values: &[u8]) -> WireNdArray {
@@ -133,13 +116,9 @@ mod tests {
             vec![1, 2, 1],
             vec![0, 0],
         )));
-        let error = all.concat().map_err(Error::aux_output_rows(ROUTED_EXPERTS, "req"));
         assert!(matches!(
-            error,
-            Err(Error::AuxOutputRows {
-                artifact: ROUTED_EXPERTS,
-                ..
-            })
+            all.concat(),
+            Err(Error::AuxOutputRows(ArrayRowsError::Mismatch { .. }))
         ));
     }
 }

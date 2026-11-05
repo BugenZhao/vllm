@@ -18,7 +18,7 @@ mod output;
 mod request;
 mod request_metrics;
 
-pub use aux_output::{AuxOutputRows, ROUTED_EXPERTS};
+pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,

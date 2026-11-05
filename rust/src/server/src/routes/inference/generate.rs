@@ -24,7 +24,7 @@ use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::{
     AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
-    GenerateOutputStreamExt as _, ROUTED_EXPERTS, TokenUsage,
+    GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -37,7 +37,6 @@ pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::npy::npy_base64;
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
@@ -46,6 +45,7 @@ use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
@@ -242,10 +242,6 @@ async fn generate_chunk_stream(
                 let routed_experts = if finish_reason.is_some() {
                     std::mem::take(&mut routed_experts)
                         .concat()
-                        .map_err(vllm_llm::Error::aux_output_rows(
-                            ROUTED_EXPERTS,
-                            &request_id,
-                        ))
                         .map_err(|error| server_error!("{}", error.to_report_string()))?
                 } else {
                     None

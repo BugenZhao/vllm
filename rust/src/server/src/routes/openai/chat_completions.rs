@@ -32,7 +32,6 @@ pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
-use crate::npy::npy_base64;
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
@@ -51,6 +50,7 @@ use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::{LoggedOutput, chat_output_text};
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_chat_request(

@@ -21,8 +21,8 @@ use vllm_engine_core_client::{
 };
 
 use crate::RequestTimestamps;
-use crate::aux_output::{AuxOutputRows, ROUTED_EXPERTS};
-use crate::error::{Error, Result};
+use crate::aux_output::AuxOutputRows;
+use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
@@ -608,9 +608,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.ec_transfer_params = output.ec_transfer_params.map(|value| *value);
                     collected.spec_decode_metrics = output.spec_decode_metrics.map(|value| *value);
                     collected.weight_versions = output.weight_versions;
-                    collected.routed_experts = routed_experts.concat().map_err(
-                        Error::aux_output_rows(ROUTED_EXPERTS, &collected.request_id),
-                    )?;
+                    collected.routed_experts = routed_experts.concat()?;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

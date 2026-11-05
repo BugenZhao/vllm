@@ -39,7 +39,6 @@ use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
-use crate::npy::npy_base64;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
@@ -50,6 +49,7 @@ use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
 pub(crate) fn lower_completion_request(

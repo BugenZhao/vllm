@@ -20,10 +20,6 @@ pub enum Error {
         token_count: usize,
         row_count: usize,
     },
-    #[error("{artifact} rows for request `{request_id}`: {message}")]
-    AuxOutputRows {
-        artifact: &'static str,
-        request_id: String,
-        message: String,
-    },
+    #[error("invalid auxiliary output rows")]
+    AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
 }

@@ -212,36 +212,54 @@ pub type WireTensor = WireArray<TensorDtype>;
 /// Numeric array with a typed NumPy descriptor or native-endian Torch dtype.
 pub type WireNdArray = WireArray<NumpyDtype>;
 
-fn unresolved_aux_frame() -> String {
-    "array data is an unresolved auxiliary frame".to_string()
+/// A row operation on a [`WireNdArray`] that the array does not support.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ArrayRowsError {
+    #[error("a 0-d array has no rows")]
+    NoRowAxis,
+    #[error("array row size overflows: {shape:?}")]
+    RowSizeOverflow { shape: Vec<usize> },
+    #[error("array data is an unresolved auxiliary frame")]
+    UnresolvedAuxFrame,
+    #[error(
+        "cannot concatenate {dtype:?} {shape:?} rows onto {first_dtype:?} {first_shape:?} rows"
+    )]
+    Mismatch {
+        dtype: NumpyDtype,
+        shape: Vec<usize>,
+        first_dtype: NumpyDtype,
+        first_shape: Vec<usize>,
+    },
 }
 
 impl WireNdArray {
     /// Bytes per row along axis 0, for an array with at least one axis.
-    fn row_bytes(&self) -> Result<usize, String> {
-        let row_shape = self.shape.get(1..).ok_or_else(|| "a 0-d array has no rows".to_string())?;
+    fn row_bytes(&self) -> Result<usize, ArrayRowsError> {
+        let row_shape = self.shape.get(1..).ok_or(ArrayRowsError::NoRowAxis)?;
         row_shape
             .checked_numel()
             .and_then(|numel| numel.checked_mul(self.dtype.scalar.element_size()))
-            .ok_or_else(|| format!("array row size overflows: {:?}", self.shape))
+            .ok_or_else(|| ArrayRowsError::RowSizeOverflow {
+                shape: self.shape.clone(),
+            })
     }
 
-    fn raw_bytes(&self) -> Result<&[u8], String> {
+    fn raw_bytes(&self) -> Result<&[u8], ArrayRowsError> {
         self.data
             .as_raw_view()
             .map(|data| data.as_ref())
-            .ok_or_else(unresolved_aux_frame)
+            .ok_or(ArrayRowsError::UnresolvedAuxFrame)
     }
 
     /// Keep the first `num_rows` rows along axis 0, like NumPy's
     /// `array[:num_rows]`; arrays with no more rows are unchanged.
-    pub fn truncate_rows(&mut self, num_rows: usize) -> Result<(), String> {
+    pub fn truncate_rows(&mut self, num_rows: usize) -> Result<(), ArrayRowsError> {
         let row_bytes = self.row_bytes()?;
         if num_rows >= self.shape[0] {
             return Ok(());
         }
         let WireArrayData::RawView(data) = &mut self.data else {
-            return Err(unresolved_aux_frame());
+            return Err(ArrayRowsError::UnresolvedAuxFrame);
         };
         data.truncate(num_rows * row_bytes);
         self.shape[0] = num_rows;
@@ -250,7 +268,9 @@ impl WireNdArray {
 
     /// Concatenate arrays along axis 0, like NumPy's `np.concatenate`; `None`
     /// for no arrays. The arrays must share their dtype and row shape.
-    pub fn concat_rows(arrays: impl IntoIterator<Item = Self>) -> Result<Option<Self>, String> {
+    pub fn concat_rows(
+        arrays: impl IntoIterator<Item = Self>,
+    ) -> Result<Option<Self>, ArrayRowsError> {
         let mut arrays = arrays.into_iter();
         let Some(first) = arrays.next() else {
             return Ok(None);
@@ -265,10 +285,12 @@ impl WireNdArray {
         let mut data = first.raw_bytes()?.to_vec();
         for array in rest {
             if array.dtype != first.dtype || array.shape.get(1..) != first.shape.get(1..) {
-                return Err(format!(
-                    "cannot concatenate {:?} {:?} rows onto {:?} {:?} rows",
-                    array.dtype, array.shape, first.dtype, first.shape
-                ));
+                return Err(ArrayRowsError::Mismatch {
+                    dtype: array.dtype,
+                    shape: array.shape,
+                    first_dtype: first.dtype,
+                    first_shape: first.shape,
+                });
             }
             num_rows += array.shape[0];
             data.extend_from_slice(array.raw_bytes()?);
