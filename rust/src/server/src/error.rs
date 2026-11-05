@@ -308,9 +308,7 @@ mod tests {
 
     #[test]
     fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
-        let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
-            request_id: "req-1".to_string(),
-        });
+        let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds);
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
     }

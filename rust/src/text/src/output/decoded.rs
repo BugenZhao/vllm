@@ -319,7 +319,6 @@ pub async fn decoded_text_event_stream(
                 && mask.rows.len() != output_token_count
             {
                 return Err(vllm_llm::Error::SamplingMaskTokenCountMismatch {
-                    request_id,
                     token_count: output_token_count,
                     row_count: mask.rows.len(),
                 }
