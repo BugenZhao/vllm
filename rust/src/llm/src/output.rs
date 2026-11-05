@@ -24,6 +24,7 @@ use crate::RequestTimestamps;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
+use crate::request_trace::RequestTrace;
 
 /// Output tokens `[start, end)` were sampled by weights labelled `version`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -324,6 +325,8 @@ pub struct GenerateOutputStream {
     remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// Taken when the request finishes and its `llm_request` span is exported.
+    trace: Option<RequestTrace>,
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
     num_output_tokens: usize,
@@ -342,6 +345,7 @@ impl GenerateOutputStream {
         remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
+        trace: Option<RequestTrace>,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
@@ -353,10 +357,18 @@ impl GenerateOutputStream {
             })),
             raw_stream,
             request_metrics,
+            trace,
             weight_version_starts: Vec::new(),
             num_output_tokens: 0,
             routed_experts_chunks: Vec::new(),
             _request_guard: request_guard,
+        }
+    }
+
+    /// Export the request's `llm_request` span, at most once.
+    fn emit_trace(&mut self, finished_at: f64) {
+        if let Some(trace) = self.trace.take() {
+            trace.emit(&self.request_metrics, finished_at);
         }
     }
 
@@ -447,6 +459,7 @@ impl GenerateOutputStream {
             && !rejected
         {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
+            self.emit_trace(received_at);
         }
         let weight_versions = self.weight_version_spans();
         let routed_experts = if finish_reason.is_some() {
@@ -554,13 +567,18 @@ impl Drop for GenerateOutputStream {
         // matching terminal request metrics here so frontend-driven aborts are still
         // visible as `finished_reason=...` instead of disappearing from observability
         // entirely.
+        let finished_at = current_unix_timestamp_secs();
         let finish_reason = match AbortCause::current() {
             AbortCause::DroppedStream => FinishReason::Abort,
-            AbortCause::StopStringMatched => FinishReason::Stop(None),
+            AbortCause::StopStringMatched => {
+                // Python finishes such a request in its output processor, which
+                // traces it; a client abort removes the request untraced.
+                self.emit_trace(finished_at);
+                FinishReason::Stop(None)
+            }
         };
 
-        self.request_metrics
-            .record_finished(current_unix_timestamp_secs(), finish_reason);
+        self.request_metrics.record_finished(finished_at, finish_reason);
     }
 }
 

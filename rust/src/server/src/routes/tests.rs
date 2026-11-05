@@ -5249,6 +5249,87 @@ async fn engine_request_errors_map_to_http_status() {
     }
 }
 
+/// Each OpenAI route exports the request's `llm_request` span under the W3C
+/// trace context the client sent, without forwarding it to the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openai_routes_trace_requests_under_client_trace_context() {
+    use opentelemetry::trace::TracerProvider as _;
+
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({"model": model, "messages": [{"role": "user", "content": "hi"}]}),
+            "chatcmpl-trace-req",
+        ),
+        (
+            "/v1/completions",
+            json!({"model": model, "prompt": "hi"}),
+            "cmpl-trace-req",
+        ),
+        (
+            "/v1/responses",
+            json!({"model": model, "input": "hi"}),
+            "resp_trace-req",
+        ),
+    ];
+    for (uri, body, request_id) in cases {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("test");
+        let backend = Arc::new(FakeChatBackend::new());
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| ChatLlm::from_shared_backend(llm.with_tracer(Some(tracer)), backend),
+            |request| assert_eq!(request.trace_headers, None),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("X-Request-Id", "trace-req")
+                    .header(
+                        "traceparent",
+                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                    )
+                    .header("tracestate", "vendor=value")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.finish().await;
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let [span] = spans.as_slice() else {
+            panic!("{uri}: expected one span, got {spans:?}");
+        };
+        assert_eq!(span.name, "llm_request", "{uri}");
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "{uri}"
+        );
+        assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7", "{uri}");
+        assert_eq!(
+            span.span_context.trace_state().header(),
+            "vendor=value",
+            "{uri}"
+        );
+        let span_request_id = (span.attributes.iter())
+            .find(|kv| kv.key.as_str() == "gen_ai.request.id")
+            .map(|kv| kv.value.to_string());
+        assert_eq!(span_request_id.as_deref(), Some(request_id), "{uri}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn include_usage_adds_final_usage_chunk_before_done() {

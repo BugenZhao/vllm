@@ -67,6 +67,23 @@ pub(crate) struct RequestMetricsTracker {
     watermark_requests: Option<U64Counter>,
 }
 
+/// Per-request stats reported on the `llm_request` span, in seconds and tokens.
+///
+/// The latencies are the ones the request histograms observe, so the
+/// engine-timestamp ones are zero when engines do not record stats.
+pub(crate) struct RequestSpanStats {
+    /// Unix timestamp, in seconds, when the request arrived at the frontend.
+    pub arrival_time: f64,
+    pub time_to_first_token: f64,
+    pub e2e: f64,
+    pub queued: f64,
+    pub prefill: f64,
+    pub decode: f64,
+    pub inference: f64,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 /// Request-level metric state shared by the `n` children of one
 /// parallel-sampling request.
 ///
@@ -379,6 +396,22 @@ impl RequestMetricsTracker {
             events.request_queue_time_seconds.observe(queue_time_seconds);
             events.request_prefill_time_seconds.observe(prefill_time_seconds);
             events.request_inference_time_seconds.observe(inference_time_seconds);
+        }
+    }
+
+    /// The request's stats as an `llm_request` span reports them, for a request
+    /// that finished at `finished_at`.
+    pub(crate) fn span_stats(&self, finished_at: f64) -> RequestSpanStats {
+        RequestSpanStats {
+            arrival_time: self.arrival_time,
+            time_to_first_token: self.first_token_latency,
+            e2e: finished_at - self.arrival_time,
+            queued: diff_or_zero(self.scheduled_ts, self.queued_ts),
+            prefill: diff_or_zero(self.first_token_ts, self.scheduled_ts),
+            decode: diff_or_zero(self.last_token_ts, self.first_token_ts),
+            inference: diff_or_zero(self.last_token_ts, self.scheduled_ts),
+            prompt_tokens: self.prompt_len,
+            completion_tokens: self.num_generation_tokens,
         }
     }
 

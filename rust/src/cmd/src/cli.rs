@@ -695,6 +695,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Target URL to which OpenTelemetry traces will be sent.
+    ///
+    /// The frontend exports one `llm_request` span per finished request, over
+    /// gRPC or `http/protobuf` per `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`.
+    /// `--collect-detailed-traces` is engine-owned and passes through.
+    #[arg(long)]
+    #[serde(default)]
+    pub otlp_traces_endpoint: Option<String>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -905,6 +914,7 @@ impl SharedRuntimeArgs {
             manages_engine: false,
             keep_alive_timeout,
             profiler,
+            otlp_traces_endpoint: self.otlp_traces_endpoint.clone(),
         }
     }
 
@@ -992,6 +1002,7 @@ impl SharedRuntimeArgs {
             manages_engine,
             keep_alive_timeout,
             profiler,
+            otlp_traces_endpoint: self.otlp_traces_endpoint.clone(),
         }
     }
 
@@ -1350,6 +1361,13 @@ impl ServeArgs {
 
         let mut managed_engine = self.managed_engine.clone();
         managed_engine.python_args.extend(self.runtime.model.python_args());
+        // Python's engine reads it too, for example to accept
+        // `--collect-detailed-traces`.
+        if let Some(endpoint) = &self.runtime.otlp_traces_endpoint {
+            managed_engine
+                .python_args
+                .extend(["--otlp-traces-endpoint".to_owned(), endpoint.clone()]);
+        }
         managed_engine.into_config(
             self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
