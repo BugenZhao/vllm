@@ -9,6 +9,7 @@ use std::str::FromStr;
 use clap::Args;
 use clap::builder::{TypedValueParser, ValueParserFactory};
 use itertools::Itertools;
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Marker type for frontend-owned `serve` arguments that `vllm-rs` recognizes
@@ -31,6 +32,40 @@ Remove this unsupported argument to continue.
 Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
 This may lead to unexpected behavior as the Rust frontend will completely ignore that argument."
             .to_string())
+    }
+}
+
+/// Marker type for fields of a JSON config argument that the Rust frontend
+/// implements only at their default value, such as `--logging-config`'s
+/// `formatter`.
+///
+/// Any other value fails deserialization, so `vllm-rs serve` and the Python
+/// supervisor's `--args-json` both reject it while parsing, with no separate
+/// check. The given value is kept, so the config can be forwarded to the
+/// managed engine as is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DefaultOnly<T>(pub T);
+
+impl<'de, T> Deserialize<'de> for DefaultOnly<T>
+where
+    T: Deserialize<'de> + Serialize + Default + PartialEq,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = T::deserialize(deserializer)?;
+        let default = T::default();
+        if value != default {
+            let json = |value: &T| serde_json::to_string(value).unwrap_or_default();
+            return Err(D::Error::custom(format!(
+                "{} is not implemented in Rust frontend yet; only the default {} is",
+                json(&value),
+                json(&default)
+            )));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -119,23 +154,18 @@ impl UnsupportedArgs {
 
         if !unsupported.is_empty() {
             unsupported.sort_unstable();
-            return Err(unsupported_args_error(unsupported));
-        }
-
-        Ok(())
-    }
-}
-
-/// The startup error listing arguments the Rust frontend does not implement.
-pub(crate) fn unsupported_args_error<'a>(keys: impl IntoIterator<Item = &'a str>) -> String {
-    let bullets = keys.into_iter().map(|key| format!("- {key}")).join("\n");
-    format!(
-        "
+            let bullets = unsupported.into_iter().map(|key| format!("- {key}")).join("\n");
+            return Err(format!(
+                "
 The following arguments are not implemented in Rust frontend yet:
 {bullets}
 
 Remove these arguments to continue."
-    )
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Frontend-owned Python `vllm serve` top-level arguments that `vllm-rs`

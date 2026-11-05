@@ -19,13 +19,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use clap::error::ErrorKind;
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_with::{DefaultOnNull, OneOrMany, serde_as};
+use serde_with::{DefaultOnNull, DisplayFromStr, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
@@ -44,8 +43,9 @@ use vllm_server::{
     RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
+use vllm_tracing::LogLevel;
 
-use crate::cli::logging::{LogLevel, LoggingConfig};
+use crate::cli::logging::LoggingConfig;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -63,6 +63,15 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// The level of the Rust frontend's own logs for this command.
+    pub fn log_level(&self) -> LogLevel {
+        match &self.command {
+            Command::Serve(args) => args.runtime.effective_log_level(),
+            Command::Frontend(args) => args.runtime.effective_log_level(),
+            _ => LogLevel::from_env(),
+        }
+    }
+
     pub fn parse() -> Self {
         Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
     }
@@ -74,45 +83,25 @@ impl Cli {
     {
         let args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
         let repartitioned_args = repartition_managed_engine_args::<Self>(&args, Some("serve"))?;
-        <Self as Parser>::try_parse_from(&repartitioned_args)
-            .and_then(Self::check_logging_config)
-            .inspect(|cli| {
-                if let Command::Serve(serve) = &cli.command
-                    && serve.debug_cli
-                {
-                    println!(
-                        "Original CLI args: {}\n",
-                        args.join(OsStr::new(" ")).display()
-                    );
-                    println!(
-                        "Repartitioned CLI args: {}\n",
-                        repartitioned_args.join(OsStr::new(" ")).display()
-                    );
-                    println!(
-                        "Passthrough Python args: {}",
-                        serve.managed_engine.python_args.join(" ")
-                    );
-                    std::process::exit(0);
-                }
-            })
-    }
-
-    /// Check `--logging-config` once on its final value, which may supersede
-    /// earlier ones.
-    fn check_logging_config(self) -> Result<Self, clap::Error> {
-        if let Command::Serve(serve) = &self.command
-            && let Some(logging_config) = &serve.runtime.logging_config
-        {
-            logging_config.check().map_err(|message| {
-                let mut command = <Self as CommandFactory>::command();
-                let serve = command.find_subcommand_mut("serve").expect("serve is a subcommand");
-                serve.error(
-                    ErrorKind::ValueValidation,
-                    format!("invalid value for '--logging-config <JSON>': {message}"),
-                )
-            })?;
-        }
-        Ok(self)
+        <Self as Parser>::try_parse_from(&repartitioned_args).inspect(|cli| {
+            if let Command::Serve(serve) = &cli.command
+                && serve.debug_cli
+            {
+                println!(
+                    "Original CLI args: {}\n",
+                    args.join(OsStr::new(" ")).display()
+                );
+                println!(
+                    "Repartitioned CLI args: {}\n",
+                    repartitioned_args.join(OsStr::new(" ")).display()
+                );
+                println!(
+                    "Passthrough Python args: {}",
+                    serve.managed_engine.python_args.join(" ")
+                );
+                std::process::exit(0);
+            }
+        })
     }
 }
 
@@ -718,11 +707,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Log level of the Rust frontend and the managed Python engine, one of
+    /// Python's level names (CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET; any
+    /// case). Overrides `--logging-config.log_level` and `VLLM_LOGGING_LEVEL`.
+    #[arg(long)]
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
+    pub log_level: Option<LogLevel>,
+
     /// vLLM logging configuration as a JSON object. Only `log_level` is
     /// implemented; a JSON formatter, a Python `dictConfig` file, or
-    /// `configure_logging: false` fail startup. The Python supervisor exports
-    /// the level as `VLLM_LOGGING_LEVEL` and forwards this only when another
-    /// field is set.
+    /// `configure_logging: false` fail startup. The Python supervisor forwards
+    /// it only when a field other than the level is set.
     ///
     /// The last occurrence wins, as in Python, where the merged dotted forms
     /// come after a plain `--logging-config`.
@@ -801,6 +797,16 @@ impl SharedRuntimeArgs {
             serde_json::to_string(config)
                 .expect("structured outputs config serialization should not fail")
         })
+    }
+
+    /// The level of the Rust frontend's own logs, with Python's precedence:
+    /// `--log-level`, then `--logging-config.log_level`, then
+    /// `VLLM_LOGGING_LEVEL`, then `INFO`. `RUST_LOG` still refines it per
+    /// target (`vllm_tracing`).
+    pub fn effective_log_level(&self) -> LogLevel {
+        self.log_level
+            .or_else(|| self.logging_config.as_ref()?.log_level)
+            .unwrap_or_else(LogLevel::from_env)
     }
 
     /// Return the logging config as JSON for managed Python engine forwarding.
@@ -1224,20 +1230,27 @@ fn parse_byte_count(value: &str) -> Result<usize, String> {
     value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
 }
 
+/// Deserialize JSON, naming the path of a failing field, such as
+/// `logging_config.formatter` in `--args-json`.
+fn from_json_str<T: DeserializeOwned>(value: &str) -> Result<T, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    let value =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|e| e.to_report_string())?;
+    deserializer.end().map_err(|e| e.to_report_string())?;
+    Ok(value)
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
-    serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
+    from_json_str(value).map_err(|e| format!("invalid JSON object: {e}"))
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let mut args: SharedRuntimeArgs = serde_json::from_str(value)
-        .map_err(|e| format!("invalid JSON arguments: {}", e.as_report()))?;
+    let mut args: SharedRuntimeArgs =
+        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
     args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
     args.unsupported.check()?;
-    if let Some(logging_config) = &args.logging_config {
-        logging_config.check()?;
-    }
     Ok(args)
 }
 
@@ -1320,10 +1333,6 @@ pub struct ServeArgs {
     /// gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
-    /// Log level of the Rust frontend and the managed Python engine. Overrides
-    /// `--logging-config.log_level` and `VLLM_LOGGING_LEVEL`.
-    #[arg(long, value_enum)]
-    pub log_level: Option<LogLevel>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -1344,12 +1353,6 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// The log level set on the command line, with Python's precedence:
-    /// `--log-level` over `--logging-config.log_level`.
-    pub fn effective_log_level(&self) -> Option<LogLevel> {
-        self.log_level.or_else(|| self.runtime.logging_config.as_ref()?.log_level)
-    }
-
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
     pub fn to_frontend_config(
@@ -1415,10 +1418,10 @@ impl ServeArgs {
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
         }
-        if let Some(log_level) = self.effective_log_level() {
+        if let Some(log_level) = self.runtime.log_level {
             managed_engine
                 .python_args
-                .extend(["--log-level".to_string(), log_level.as_str().to_string()]);
+                .extend(["--log-level".to_string(), log_level.to_string()]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

@@ -12,10 +12,9 @@ use vllm_server::{
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
+use vllm_tracing::LogLevel;
 
-use super::{
-    BenchCommand, Cli, Command, LogLevel, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
-};
+use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -224,7 +223,6 @@ fn serve_args_forward_python_flags_with_separator() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
-                    log_level: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
@@ -307,6 +305,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
                         logging_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -568,15 +567,16 @@ fn serve_args_forward_log_level_to_managed_engine() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--log-level",
-        "DEBUG",
+        "debug",
     ])
     .unwrap();
+    assert_eq!(cli.log_level(), LogLevel::Debug);
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.log_level, Some(LogLevel::Debug));
 
+    // Python's `--log-level` choices are upper case only.
     let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
@@ -589,28 +589,54 @@ fn serve_args_forward_log_level_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// Python's `--log-level` choices are upper case only.
+/// Level names are case-insensitive, with Python logging's `WARN` and `FATAL`
+/// aliases, as `VLLM_LOGGING_LEVEL` already was.
 #[test]
-fn serve_rejects_log_level_python_rejects() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--log-level",
-        "debug",
-    ])
-    .unwrap_err();
+fn serve_accepts_log_level_names_in_any_case() {
+    let cases: &[(&[&str], LogLevel)] = &[
+        (&["--log-level", "Warning"], LogLevel::Warning),
+        (&["--log-level", "warn"], LogLevel::Warning),
+        (&["--log-level", "fatal"], LogLevel::Critical),
+        (&["--logging-config.log_level", "debug"], LogLevel::Debug),
+        (
+            &["--logging-config", r#"{"log_level":"notset"}"#],
+            LogLevel::Notset,
+        ),
+    ];
+    for &(case, expected) in cases {
+        let cli = Cli::try_parse_from(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
+        )
+        .unwrap();
+        assert_eq!(cli.log_level(), expected, "{case:?}");
+    }
 
-    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    for case in [
+        &["--log-level", "verbose"][..],
+        &["--logging-config.log_level", "verbose"],
+    ] {
+        let error = Cli::try_parse_from(
+            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ValueValidation,
+            "{case:?}"
+        );
+    }
 }
 
 /// Python's `--logging-config` and its dotted forms set the level, and
 /// `--log-level` overrides it in either order.
 #[test]
 fn serve_resolves_log_level_like_python() {
-    let cases: &[(&[&str], &str)] = &[
-        (&["--logging-config.log_level", "ERROR"], "ERROR"),
-        (&["--logging-config", r#"{"log_level":"ERROR"}"#], "ERROR"),
+    let cases: &[(&[&str], LogLevel)] = &[
+        (&["--logging-config.log_level", "ERROR"], LogLevel::Error),
+        (
+            &["--logging-config", r#"{"log_level":"ERROR"}"#],
+            LogLevel::Error,
+        ),
         (
             &[
                 "--logging-config.log_level",
@@ -618,11 +644,11 @@ fn serve_resolves_log_level_like_python() {
                 "--log-level",
                 "ERROR",
             ],
-            "ERROR",
+            LogLevel::Error,
         ),
         (
             &["--log-level", "ERROR", "--logging-config.log_level=DEBUG"],
-            "ERROR",
+            LogLevel::Error,
         ),
         // A plain `--logging-config` and dotted forms: the merged dotted forms
         // come last and win, in either order.
@@ -633,7 +659,7 @@ fn serve_resolves_log_level_like_python() {
                 "--logging-config.log_level",
                 "DEBUG",
             ],
-            "DEBUG",
+            LogLevel::Debug,
         ),
         (
             &[
@@ -642,17 +668,7 @@ fn serve_resolves_log_level_like_python() {
                 "--logging-config",
                 r#"{"log_level":"ERROR"}"#,
             ],
-            "DEBUG",
-        ),
-        // Only the final value is checked.
-        (
-            &[
-                "--logging-config",
-                r#"{"formatter":"json"}"#,
-                "--logging-config.log_level",
-                "DEBUG",
-            ],
-            "DEBUG",
+            LogLevel::Debug,
         ),
         // Explicit defaults of the other fields are what Rust does anyway.
         (
@@ -663,7 +679,7 @@ fn serve_resolves_log_level_like_python() {
                 "text",
                 "--logging-config.configure_logging=true",
             ],
-            "WARNING",
+            LogLevel::Warning,
         ),
     ];
     for &(case, expected) in cases {
@@ -671,31 +687,27 @@ fn serve_resolves_log_level_like_python() {
             ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
         )
         .unwrap();
+        assert_eq!(cli.log_level(), expected, "{case:?}");
 
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        assert_eq!(
-            args.effective_log_level().map(LogLevel::as_str),
-            Some(expected),
-            "{case:?}"
-        );
         assert!(args.managed_engine.python_args.is_empty(), "{case:?}");
-        let config = args.to_managed_engine_config(5555, &topology(&args), None);
-        let index = config.python_args.iter().position(|arg| arg == "--log-level").unwrap();
-        assert_eq!(config.python_args[index + 1], expected, "{case:?}");
     }
 }
 
-/// Python's defaults for the other fields come from env vars
+/// The managed engine gets the logging arguments as given and resolves them
+/// itself. Python's defaults for the other fields come from env vars
 /// (`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_CONFIG_PATH`), so explicit values
-/// still reach the managed engine, with `null` kept apart from omission.
+/// still reach it, with `null` kept apart from omission.
 #[test]
 fn serve_forwards_logging_config_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
+        "--logging-config.log_level",
+        "debug",
         "--logging-config.configure_logging",
         "true",
         "--logging-config.pylogging_config_file",
@@ -712,7 +724,7 @@ fn serve_forwards_logging_config_to_managed_engine() {
     expect![[r#"
         [
             "--logging-config",
-            "{\"configure_logging\":true,\"pylogging_config_file\":null}",
+            "{\"log_level\":\"DEBUG\",\"configure_logging\":true,\"pylogging_config_file\":null}",
             "--log-level",
             "ERROR",
             "--reasoning-parser",
@@ -734,8 +746,14 @@ fn serve_rejects_logging_config() {
             "--logging-config.pylogging_config_file",
             "/tmp/logging.json",
         ],
-        &["--logging-config.log_level", "debug"],
         &["--logging-config.handlers", "[]"],
+        // Every occurrence is parsed, so a superseded one fails as well.
+        &[
+            "--logging-config",
+            r#"{"formatter":"json"}"#,
+            "--logging-config.formatter",
+            "text",
+        ],
     ];
     for &case in cases {
         let error = Cli::try_parse_from(
@@ -761,43 +779,40 @@ fn serve_rejects_logging_config() {
     ])
     .unwrap_err();
     expect![[r#"
-        error: invalid value for '--logging-config <JSON>': 
-        The following arguments are not implemented in Rust frontend yet:
-        - logging_config.formatter
-
-        Remove these arguments to continue.
-
-        Usage: vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]
+        error: invalid value '{"formatter":"json","log_level":"DEBUG"}' for '--logging-config <JSON>': invalid JSON object: formatter: "json" is not implemented in Rust frontend yet; only the default "text" is at line 1 column 19
 
         For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
+    "#]].assert_eq(&error.to_string());
 }
 
-/// The Python supervisor forwards a `--logging-config` that sets more than the
-/// level, which it exports as `VLLM_LOGGING_LEVEL`.
+/// The Python supervisor sends the resolved level as `log_level`, and
+/// `logging_config` only when it sets more than the level.
 #[test]
-fn frontend_args_json_rejects_logging_config() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-listener-fd",
-        "999999",
-        "--output-listener-fd",
-        "999998",
-        "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}"#,
-    ])
+fn frontend_args_json_resolves_logging_args() {
+    let parse = |args_json: &str| {
+        Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+    };
+
+    let cli = parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG"}"#).unwrap();
+    assert_eq!(cli.log_level(), LogLevel::Debug);
+
+    let error = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}"#,
+    )
     .unwrap_err();
-
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}' for '--args-json <JSON>': 
-        The following arguments are not implemented in Rust frontend yet:
-        - logging_config.formatter
-
-        Remove these arguments to continue.
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: "json" is not implemented in Rust frontend yet; only the default "text" is at line 1 column 107
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -2241,6 +2256,7 @@ fn frontend_args_accept_json() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
                         logging_config: None,
                     },
                 },
@@ -3093,7 +3109,6 @@ fn serve_args_accept_handshake_aliases() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
-                    log_level: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
@@ -3176,6 +3191,7 @@ fn serve_args_accept_handshake_aliases() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        log_level: None,
                         logging_config: None,
                     },
                     managed_engine: ManagedEngineArgs {

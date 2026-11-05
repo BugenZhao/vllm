@@ -363,13 +363,12 @@ class RustFrontendProcessManager:
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
 
         # The logging arguments default to argparse.SUPPRESS, so they are not
-        # among the non-default args. The Rust frontend reads the resolved level
-        # from its environment and rejects the rest, which it does not implement.
-        child_env = None
+        # among the non-default args. The Rust frontend takes the resolved level
+        # and rejects the rest, which it does not implement.
         if logging_config := getattr(args, "logging_config", None):
             from vllm.config.logging import LoggingConfig
 
-            child_env = {**os.environ, "VLLM_LOGGING_LEVEL": logging_config.log_level}
+            args_dict["log_level"] = logging_config.log_level
             default = LoggingConfig()
             if replace(logging_config, log_level=default.log_level) != default:
                 args_dict["logging_config"] = asdict(logging_config)
@@ -385,7 +384,7 @@ class RustFrontendProcessManager:
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._listeners = [input_listener, output_listener]
         try:
-            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds, env=child_env)
+            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
         except BaseException:
             for listener in self._listeners:
                 listener.cleanup()

@@ -94,11 +94,7 @@ fn main() -> ExitCode {
         let _guard = vllm_tracing::set_default_tracing(process_label);
         Cli::parse()
     };
-    let log_level = match &cli.command {
-        Command::Serve(args) => args.effective_log_level().map(|level| level.as_str()),
-        _ => None,
-    };
-    vllm_tracing::init_tracing_with_level(process_label, log_level);
+    vllm_tracing::init_tracing_with_level(process_label, cli.log_level());
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

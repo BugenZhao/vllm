@@ -599,8 +599,8 @@ def test_rust_frontend_receives_resolved_logging_config(
     monkeypatch, cli_args, level, forwarded
 ):
     """Logging arguments are not among the non-default args. The resolved level
-    reaches the Rust frontend's environment, and whatever else is set reaches
-    --args-json, where the frontend rejects it."""
+    reaches --args-json as log_level, and whatever else is set as
+    logging_config, which the frontend rejects."""
     import subprocess as subprocess_mod
 
     from vllm.entrypoints.common.cli_args import make_arg_parser
@@ -648,9 +648,9 @@ def test_rust_frontend_receives_resolved_logging_config(
     finally:
         sock.close()
 
-    [(cmd, kwargs)] = popen_calls
-    assert kwargs["env"]["VLLM_LOGGING_LEVEL"] == level
+    [(cmd, _)] = popen_calls
     args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["log_level"] == level
     if forwarded is None:
         assert "logging_config" not in args_json
     else:

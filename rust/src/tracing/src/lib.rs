@@ -5,6 +5,7 @@
 
 pub mod timing;
 
+use std::str::FromStr;
 use std::{env, fmt, process};
 
 use time::UtcOffset;
@@ -31,24 +32,98 @@ const RESET: &str = "\x1b[0m";
 const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[month]-[day] [hour]:[minute]:[second]");
 
-/// Install the process-wide vLLM-style tracing subscriber.
-pub fn init_tracing(process_label: &str) {
-    init_tracing_with_level(process_label, None);
+/// Python's logging level names, as `--log-level`, `--logging-config` and
+/// `VLLM_LOGGING_LEVEL` spell them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Critical,
+    Error,
+    Warning,
+    Info,
+    Debug,
+    Notset,
 }
 
-/// Install the process-wide vLLM-style tracing subscriber. A given `log_level`,
-/// a Python logging level name, takes the place of `VLLM_LOGGING_LEVEL`.
-pub fn init_tracing_with_level(process_label: &str, log_level: Option<&str>) {
+impl LogLevel {
+    /// The level from `VLLM_LOGGING_LEVEL`, `INFO` when it is unset or invalid.
+    pub fn from_env() -> Self {
+        Self::from_env_value(env::var("VLLM_LOGGING_LEVEL").ok().as_deref())
+    }
+
+    fn from_env_value(value: Option<&str>) -> Self {
+        value.and_then(|value| value.parse().ok()).unwrap_or(Self::Info)
+    }
+
+    /// The Python level name, which Python's `--log-level` choices accept.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "CRITICAL",
+            Self::Error => "ERROR",
+            Self::Warning => "WARNING",
+            Self::Info => "INFO",
+            Self::Debug => "DEBUG",
+            Self::Notset => "NOTSET",
+        }
+    }
+}
+
+/// Case-insensitive, with Python logging's `WARN` and `FATAL` aliases.
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_uppercase().as_str() {
+            "CRITICAL" | "FATAL" => Ok(Self::Critical),
+            "ERROR" => Ok(Self::Error),
+            "WARNING" | "WARN" => Ok(Self::Warning),
+            "INFO" => Ok(Self::Info),
+            "DEBUG" => Ok(Self::Debug),
+            "NOTSET" => Ok(Self::Notset),
+            _ => Err(format!(
+                "`{value}` is not a log level; expected one of CRITICAL, ERROR, WARNING, INFO, \
+                 DEBUG, NOTSET"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Critical | LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Warning => LevelFilter::WARN,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Notset => LevelFilter::TRACE,
+        }
+    }
+}
+
+/// Install the process-wide vLLM-style tracing subscriber at the
+/// `VLLM_LOGGING_LEVEL` level.
+pub fn init_tracing(process_label: &str) {
+    init_tracing_with_level(process_label, LogLevel::from_env());
+}
+
+/// Install the process-wide vLLM-style tracing subscriber at `log_level`.
+pub fn init_tracing_with_level(process_label: &str, log_level: LogLevel) {
     let _ = tracing_subscriber::registry()
         .with(vllm_fmt_layer(process_label, log_level))
         .try_init();
 }
 
-/// Install the vLLM-style tracing subscriber on the current thread until the
-/// guard drops, for events emitted before the process-wide level is known.
+/// Install the vLLM-style tracing subscriber at the `VLLM_LOGGING_LEVEL` level
+/// on the current thread until the guard drops, for events emitted before the
+/// process-wide level is known.
 pub fn set_default_tracing(process_label: &str) -> DefaultGuard {
     tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, None))
+        .with(vllm_fmt_layer(process_label, LogLevel::from_env()))
         .set_default()
 }
 
@@ -60,24 +135,19 @@ where
 {
     let _ = tracing_subscriber::registry()
         .with(layer)
-        .with(vllm_fmt_layer(process_label, None))
+        .with(vllm_fmt_layer(process_label, LogLevel::from_env()))
         .try_init();
 }
 
-/// The vLLM-style fmt layer filtered by `log_level` / `VLLM_LOGGING_LEVEL` /
-/// `RUST_LOG`.
+/// The vLLM-style fmt layer filtered by `log_level` / `RUST_LOG`.
 fn vllm_fmt_layer<S>(
     process_label: &str,
-    log_level: Option<&str>,
+    log_level: LogLevel,
 ) -> impl Layer<S> + Send + Sync + 'static + use<S>
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    let vllm_logging_level = env::var("VLLM_LOGGING_LEVEL").ok();
-    let filter = build_targets_filter(
-        log_level.or(vllm_logging_level.as_deref()),
-        env::var("RUST_LOG").ok().as_deref(),
-    );
+    let filter = build_targets_filter(log_level, env::var("RUST_LOG").ok().as_deref());
     let formatter = VllmEventFormatter::new(process_label);
 
     tracing_subscriber::fmt::layer()
@@ -90,14 +160,13 @@ where
 /// Rust-style target overrides.
 ///
 /// Precedence:
-/// - Start from `VLLM_LOGGING_LEVEL` as the default level for all targets.
-/// - If `RUST_LOG` contains a global default level such as `warn`, it overrides
-///   `VLLM_LOGGING_LEVEL`.
+/// - Start from `log_level` (by default `VLLM_LOGGING_LEVEL`) as the default level for all
+///   targets.
+/// - If `RUST_LOG` contains a global default level such as `warn`, it overrides `log_level`.
 /// - Any explicit target directives in `RUST_LOG`, such as `hyper=info`, override whichever default
 ///   level is active for those targets only.
-fn build_targets_filter(vllm_logging_level: Option<&str>, rust_log: Option<&str>) -> Targets {
-    let mut filter =
-        Targets::new().with_default(map_python_log_level(vllm_logging_level.unwrap_or("INFO")));
+fn build_targets_filter(log_level: LogLevel, rust_log: Option<&str>) -> Targets {
+    let mut filter = Targets::new().with_default(LevelFilter::from(log_level));
 
     if let Some(rust_log) = rust_log
         && !rust_log.is_empty()
@@ -319,19 +388,6 @@ fn write_colored(
     writer.write_str(text)
 }
 
-/// Map a Python logging level name to the corresponding Rust tracing level.
-fn map_python_log_level(level: &str) -> LevelFilter {
-    match level.to_ascii_uppercase().as_str() {
-        "CRITICAL" | "FATAL" => LevelFilter::ERROR,
-        "ERROR" => LevelFilter::ERROR,
-        "WARNING" | "WARN" => LevelFilter::WARN,
-        "INFO" => LevelFilter::INFO,
-        "DEBUG" => LevelFilter::DEBUG,
-        "NOTSET" => LevelFilter::TRACE,
-        _ => LevelFilter::INFO,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,23 +401,23 @@ mod tests {
 
     #[test]
     fn rust_log_target_overrides_are_merged_with_vllm_default_level() {
-        let filter = build_targets_filter(Some("DEBUG"), Some("hyper=warn,tower=error"));
+        let filter = build_targets_filter(LogLevel::Debug, Some("hyper=warn,tower=error"));
 
         assert_eq!(filter.to_string(), "tower=error,hyper=warn,debug");
     }
 
     #[test]
     fn rust_log_default_level_overrides_vllm_default_level() {
-        let filter = build_targets_filter(Some("DEBUG"), Some("warn,hyper=info"));
+        let filter = build_targets_filter(LogLevel::Debug, Some("warn,hyper=info"));
 
         assert_eq!(filter.to_string(), "hyper=info,warn");
     }
 
     #[test]
     fn invalid_vllm_level_falls_back_to_info() {
-        let filter = build_targets_filter(Some("bogus"), None);
-
-        assert_eq!(filter.to_string(), "info");
+        assert_eq!(LogLevel::from_env_value(Some("bogus")), LogLevel::Info);
+        assert_eq!(LogLevel::from_env_value(None), LogLevel::Info);
+        assert_eq!(LogLevel::from_env_value(Some("warn")), LogLevel::Warning);
     }
 
     #[test]
