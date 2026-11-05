@@ -19,7 +19,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
 };
 
-use super::tools::NamespacedToolNames;
+use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
     AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
     ResponsesResponse, TextPart,
@@ -177,7 +177,7 @@ pub(crate) struct OutputItemStreamer {
     /// Whether reasoning items appear in the stream and final output.
     include_reasoning: bool,
     /// Reports calls of flat namespaced tool names with their namespace.
-    tool_names: NamespacedToolNames,
+    tool_names: ResponsesToolNames,
     /// Items completed so far, in output order.
     completed_items: Vec<ResponseOutputItem>,
     /// Whether the last completed item still owes its `output_item.done`
@@ -206,7 +206,7 @@ enum OpenItem {
 }
 
 impl OutputItemStreamer {
-    pub(crate) fn new(include_reasoning: bool, tool_names: NamespacedToolNames) -> Self {
+    pub(crate) fn new(include_reasoning: bool, tool_names: ResponsesToolNames) -> Self {
         Self {
             current: None,
             include_reasoning,
@@ -381,7 +381,7 @@ impl OutputItemStreamer {
             called_name: name.to_string(),
             arguments: String::new(),
         });
-        let (name, namespace) = self.tool_names.resolve(name);
+        let ToolIdentity { namespace, name } = self.tool_names.decode(name);
         let item = ResponseOutputItem::FunctionCall {
             id: item_id,
             call_id,
@@ -515,7 +515,7 @@ impl OutputItemStreamer {
                     Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
                     None => (call_id, called_name, arguments),
                 };
-                let (name, namespace) = self.tool_names.resolve(&called_name);
+                let ToolIdentity { namespace, name } = self.tool_names.decode(&called_name);
                 let events = vec![ResponseStreamEvent::FunctionCallArgumentsDone {
                     item_id: item_id.clone(),
                     output_index,
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn empty_function_call_emits_arguments_done() {
-        let mut streamer = OutputItemStreamer::new(true, NamespacedToolNames::default());
+        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
         streamer.on_event(&ChatEvent::ToolCallStart {
             index: 0,
             id: "call_1".to_string(),
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn empty_reasoning_block_is_not_an_output_item() {
-        let mut streamer = OutputItemStreamer::new(true, NamespacedToolNames::default());
+        let mut streamer = OutputItemStreamer::new(true, ResponsesToolNames::default());
         for event in [
             ChatEvent::BlockStart {
                 index: 0,

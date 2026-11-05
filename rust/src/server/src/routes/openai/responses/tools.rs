@@ -8,8 +8,9 @@
 //! `_resolve_named_tool_choice` in `responses/protocol.py`): the model sees
 //! each namespaced function as one flat `<namespace>__<name>` function tool,
 //! and a call of that flat name is reported with the function name and its
-//! namespace.
+//! namespace. The flat spelling is defined only by [`ToolIdentity::flat_name`].
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use itertools::Itertools as _;
@@ -20,112 +21,131 @@ use crate::error::{ApiError, bail_invalid_request};
 
 const NAMESPACE_TOOL_SEPARATOR: &str = "__";
 
-/// The flat name the model sees for one namespaced function.
-pub(super) fn flat_tool_name(namespace: &str, name: &str) -> String {
-    format!("{namespace}{NAMESPACE_TOOL_SEPARATOR}{name}")
+/// A function tool as the client names it: a namespace tool's function
+/// carries its namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToolIdentity<'a> {
+    pub namespace: Option<&'a str>,
+    pub name: &'a str,
 }
 
-/// Return the function tools the model is shown, in request order.
-pub(super) fn function_tools(tools: &[ResponsesTool]) -> Vec<ChatTool> {
-    let mut function_tools = Vec::with_capacity(tools.len());
-    for tool in tools {
-        match tool {
-            ResponsesTool::Function(function) => {
-                function_tools.push(ChatTool::from(function.clone()));
-            }
-            ResponsesTool::Namespace(namespace) => {
-                function_tools.extend(namespace.tools.iter().map(
-                    |NamespacedTool::Function(function)| ChatTool {
-                        name: flat_tool_name(&namespace.name, &function.name),
-                        ..ChatTool::from(function.clone())
-                    },
-                ));
-            }
+impl<'a> ToolIdentity<'a> {
+    /// The name the model sees: `<namespace>__<name>`, or the bare name.
+    pub(super) fn flat_name(self) -> Cow<'a, str> {
+        match self.namespace {
+            Some(namespace) => Cow::Owned(format!(
+                "{namespace}{NAMESPACE_TOOL_SEPARATOR}{}",
+                self.name
+            )),
+            None => Cow::Borrowed(self.name),
         }
     }
-    function_tools
 }
 
-/// Resolve a named tool choice to the tool name the model sees.
-///
-/// An exact tool name (including a flat `<namespace>__<name>`) wins; otherwise
-/// a function name defined in exactly one namespace selects that function.
-pub(super) fn resolve_named_tool_choice(
-    name: String,
-    tools: &[ResponsesTool],
-) -> Result<String, ApiError> {
-    let mut candidates = Vec::new();
-    for tool in tools {
-        match tool {
-            ResponsesTool::Function(function) => {
-                if function.name == name {
-                    return Ok(name);
-                }
-            }
-            ResponsesTool::Namespace(namespace) => {
-                for NamespacedTool::Function(function) in &namespace.tools {
-                    let flat_name = flat_tool_name(&namespace.name, &function.name);
-                    if flat_name == name {
-                        return Ok(name);
-                    }
-                    if function.name == name {
-                        candidates.push(flat_name);
-                    }
-                }
-            }
-        }
-    }
-    match candidates.len() {
-        0 => bail_invalid_request!(
-            param = "tool_choice",
-            "Tool choice 'function' not found in 'tools' parameter."
-        ),
-        1 => Ok(candidates.pop().expect("one candidate")),
-        _ => bail_invalid_request!(
-            param = "tool_choice",
-            "Tool choice '{name}' is ambiguous: it is defined in more than one namespace ({}). \
-             Select it by its full '<namespace>__<name>' name.",
-            candidates.iter().join(", ")
-        ),
-    }
-}
-
-/// Namespaced functions keyed by the flat name the model calls them by.
+/// Request-local map from the flat names of namespaced functions back to
+/// their identities, for reporting calls and resolving `tool_choice`.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct NamespacedToolNames(HashMap<String, NamespacedName>);
-
-#[derive(Debug, Clone, PartialEq)]
-struct NamespacedName {
-    namespace: String,
-    name: String,
+pub(crate) struct ResponsesToolNames {
+    /// Flat name of each namespaced function -> byte length of its namespace.
+    /// Like Python, a later function with the same flat name wins.
+    namespaced: HashMap<String, usize>,
 }
 
-impl NamespacedToolNames {
-    pub(super) fn new(tools: &[ResponsesTool]) -> Self {
-        let mut names = HashMap::new();
+impl ResponsesToolNames {
+    /// Convert the request tools to the function tools the model is shown, in
+    /// request order, together with the names to map calls back.
+    pub(super) fn convert(tools: &[ResponsesTool]) -> (Vec<ChatTool>, Self) {
+        let mut chat_tools = Vec::with_capacity(tools.len());
+        let mut namespaced = HashMap::new();
         for tool in tools {
-            let ResponsesTool::Namespace(namespace) = tool else {
-                continue;
-            };
-            for NamespacedTool::Function(function) in &namespace.tools {
-                names.insert(
-                    flat_tool_name(&namespace.name, &function.name),
-                    NamespacedName {
-                        namespace: namespace.name.clone(),
-                        name: function.name.clone(),
-                    },
-                );
+            match tool {
+                ResponsesTool::Function(function) => {
+                    chat_tools.push(ChatTool::from(function.clone()));
+                }
+                ResponsesTool::Namespace(namespace) => {
+                    for NamespacedTool::Function(function) in &namespace.tools {
+                        let identity = ToolIdentity {
+                            namespace: Some(&namespace.name),
+                            name: &function.name,
+                        };
+                        let flat_name = identity.flat_name().into_owned();
+                        namespaced.insert(flat_name.clone(), namespace.name.len());
+                        chat_tools.push(ChatTool {
+                            name: flat_name,
+                            ..ChatTool::from(function.clone())
+                        });
+                    }
+                }
             }
         }
-        Self(names)
+        (chat_tools, Self { namespaced })
     }
 
-    /// Split a called tool name into the function name and its namespace.
-    /// Names of other tools pass through without a namespace.
-    pub(super) fn resolve<'a>(&'a self, called_name: &'a str) -> (&'a str, Option<&'a str>) {
-        match self.0.get(called_name) {
-            Some(NamespacedName { namespace, name }) => (name, Some(namespace)),
-            None => (called_name, None),
+    /// The identity of a called tool name. Names of other tools pass through
+    /// without a namespace.
+    pub(super) fn decode<'a>(&self, called_name: &'a str) -> ToolIdentity<'a> {
+        match self.namespaced.get(called_name) {
+            Some(&namespace_len) => ToolIdentity {
+                namespace: Some(&called_name[..namespace_len]),
+                name: &called_name[namespace_len + NAMESPACE_TOOL_SEPARATOR.len()..],
+            },
+            None => ToolIdentity {
+                namespace: None,
+                name: called_name,
+            },
+        }
+    }
+
+    /// Resolve a named tool choice to the name the model sees.
+    ///
+    /// An exact tool name (including a flat `<namespace>__<name>`) wins;
+    /// otherwise a function name defined in exactly one namespace selects
+    /// that function.
+    pub(super) fn resolve_choice(
+        &self,
+        name: String,
+        tools: &[ResponsesTool],
+    ) -> Result<String, ApiError> {
+        let is_exact = self.namespaced.contains_key(&name)
+            || tools.iter().any(
+                |tool| matches!(tool, ResponsesTool::Function(function) if function.name == name),
+            );
+        if is_exact {
+            return Ok(name);
+        }
+        let mut candidates = tools
+            .iter()
+            .filter_map(|tool| match tool {
+                ResponsesTool::Namespace(namespace) => Some(namespace),
+                ResponsesTool::Function(_) => None,
+            })
+            .flat_map(|namespace| {
+                namespace
+                    .tools
+                    .iter()
+                    .filter(|NamespacedTool::Function(function)| function.name == name)
+                    .map(|_| {
+                        ToolIdentity {
+                            namespace: Some(&namespace.name),
+                            name: &name,
+                        }
+                        .flat_name()
+                        .into_owned()
+                    })
+            })
+            .collect_vec();
+        match candidates.len() {
+            0 => bail_invalid_request!(
+                param = "tool_choice",
+                "Tool choice 'function' not found in 'tools' parameter."
+            ),
+            1 => Ok(candidates.pop().expect("one candidate")),
+            _ => bail_invalid_request!(
+                param = "tool_choice",
+                "Tool choice '{name}' is ambiguous: it is defined in more than one namespace ({}). \
+                 Select it by its full '<namespace>__<name>' name.",
+                candidates.iter().join(", ")
+            ),
         }
     }
 }
@@ -171,7 +191,7 @@ mod tests {
             }
         ]));
 
-        let shown = function_tools(&tools);
+        let (shown, _) = ResponsesToolNames::convert(&tools);
 
         let names = shown.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         assert_eq!(names, ["lookup", "crm__get_contact"]);
@@ -196,17 +216,24 @@ mod tests {
 
     #[test]
     fn called_flat_names_resolve_to_the_namespaced_function() {
-        let names = NamespacedToolNames::new(&request_tools(json!([
+        let (_, names) = ResponsesToolNames::convert(&request_tools(json!([
             {"type": "function", "name": "lookup"},
             namespace("mcp__computer_use", &["get_app_state"]),
         ])));
 
         assert_eq!(
-            names.resolve("mcp__computer_use__get_app_state"),
-            ("get_app_state", Some("mcp__computer_use"))
+            names.decode("mcp__computer_use__get_app_state"),
+            ToolIdentity {
+                namespace: Some("mcp__computer_use"),
+                name: "get_app_state",
+            }
         );
-        assert_eq!(names.resolve("lookup"), ("lookup", None));
-        assert_eq!(names.resolve("get_app_state"), ("get_app_state", None));
+        let bare = |name| ToolIdentity {
+            namespace: None,
+            name,
+        };
+        assert_eq!(names.decode("lookup"), bare("lookup"));
+        assert_eq!(names.decode("get_app_state"), bare("get_app_state"));
     }
 
     #[test]
@@ -216,7 +243,8 @@ mod tests {
             namespace("crm", &["get_contact", "lookup", "search"]),
             namespace("docs", &["search"]),
         ]));
-        let resolve = |name: &str| resolve_named_tool_choice(name.to_string(), &tools);
+        let (_, names) = ResponsesToolNames::convert(&tools);
+        let resolve = |name: &str| names.resolve_choice(name.to_string(), &tools);
 
         assert_eq!(resolve("lookup").unwrap(), "lookup");
         assert_eq!(resolve("crm__lookup").unwrap(), "crm__lookup");

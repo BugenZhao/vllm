@@ -22,7 +22,7 @@ use vllm_chat::{
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
-use super::tools::{self, NamespacedToolNames};
+use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
     InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
     ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
@@ -72,7 +72,7 @@ pub(crate) struct PreparedResponsesRequest {
     /// Whether reasoning items appear in the output.
     pub include_reasoning: bool,
     /// Maps called tool names back to namespaced functions in the output.
-    pub tool_names: NamespacedToolNames,
+    pub tool_names: ResponsesToolNames,
     pub chat_request: ChatRequest,
 }
 
@@ -151,9 +151,9 @@ pub(crate) fn prepare_responses_request(
         GenerationPromptMode::StartNewAssistant
     };
 
-    let converted_tools = tools::function_tools(&tools);
+    let (converted_tools, tool_names) = ResponsesToolNames::convert(&tools);
     let requested_tool_choice =
-        normalize_tool_choice(tool_choice, &tools, converted_tools.is_empty())?;
+        normalize_tool_choice(tool_choice, &tools, &tool_names, converted_tools.is_empty())?;
     let tool_context = ResolvedToolContext::new(
         &messages,
         converted_tools,
@@ -282,7 +282,6 @@ pub(crate) fn prepare_responses_request(
         return_prompt_text: false,
     };
 
-    let tool_names = NamespacedToolNames::new(&tools);
     let meta = ResponseMeta {
         model: response_model,
         instructions,
@@ -333,10 +332,11 @@ fn response_prompt_truncation(
 /// `check_tool_usage` validator: without tools, `auto` is normalized to
 /// `none` and named function choices are errors; with tools, named choices
 /// must exist and resolve to the name the model sees (see
-/// [`tools::resolve_named_tool_choice`]).
+/// [`ResponsesToolNames::resolve_choice`]).
 fn normalize_tool_choice(
     tool_choice: Option<ResponseToolChoice>,
     tools: &[ResponsesTool],
+    tool_names: &ResponsesToolNames,
     tools_empty: bool,
 ) -> Result<Option<ChatToolChoice>, ApiError> {
     let Some(tool_choice) = tool_choice else {
@@ -355,7 +355,7 @@ fn normalize_tool_choice(
                 );
             }
             ChatToolChoice::Function {
-                name: tools::resolve_named_tool_choice(name, tools)?,
+                name: tool_names.resolve_choice(name, tools)?,
             }
         }
         ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
@@ -437,7 +437,12 @@ fn convert_input(
             },
             ResponseInputItem::FunctionCall(call) => {
                 let name = match &call.namespace {
-                    Some(namespace) => tools::flat_tool_name(namespace, &call.name),
+                    Some(namespace) => ToolIdentity {
+                        namespace: Some(namespace),
+                        name: &call.name,
+                    }
+                    .flat_name()
+                    .into_owned(),
                     None => call.name,
                 };
                 assistant.push_block(AssistantContentBlock::ToolCall(AssistantToolCall {
@@ -797,7 +802,8 @@ mod tests {
         let tool_choice = serde_json::from_value(json!("auto")).unwrap();
 
         assert_eq!(
-            normalize_tool_choice(Some(tool_choice), &[], true).unwrap(),
+            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default(), true)
+                .unwrap(),
             Some(ChatToolChoice::None)
         );
     }
