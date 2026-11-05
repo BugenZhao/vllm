@@ -32,14 +32,16 @@ use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
-use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::cli::{
+    ManagedEngineArgs, parse_human_readable_int, repartition_managed_engine_args,
+};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption, Config,
+    CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -330,6 +332,19 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. When the limit is reached, new requests are rejected
+    /// with HTTP 503 so the client can retry on another instance. A request
+    /// with `n` choices counts `n` times.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_queued_reqs: Option<u64>,
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// When the limit is reached, new requests are rejected with HTTP 503.
+    /// Accepts human-readable integers such as `2k` or `2K`.
+    #[arg(long, value_parser = parse_human_readable_u64)]
+    #[serde(default)]
+    pub max_num_queued_tokens: Option<u64>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -837,6 +852,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let admission_limits = self.admission_limits();
         let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
@@ -889,6 +905,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -926,6 +943,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
+        let admission_limits = self.admission_limits();
         let fingerprint_mode = self.fingerprint_mode_config();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
@@ -977,6 +995,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -992,6 +1011,13 @@ impl SharedRuntimeArgs {
             manages_engine,
             keep_alive_timeout,
             profiler,
+        }
+    }
+
+    fn admission_limits(&self) -> AdmissionLimits {
+        AdmissionLimits {
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
         }
     }
 
@@ -1152,6 +1178,14 @@ impl FromStr for LogStatsInterval {
         }
         Ok(Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every))
     }
+}
+
+/// Parse a non-negative integer that may carry a human-readable suffix, like
+/// Python's `human_readable_int` with a `ge=0` field.
+fn parse_human_readable_u64(value: &str) -> Result<u64, String> {
+    parse_human_readable_int(value)
+        .and_then(|number| u64::try_from(number).ok())
+        .ok_or_else(|| format!("`{value}` is not a non-negative integer"))
 }
 
 /// Parse an integer environment variable as Python's `int(value)`, for

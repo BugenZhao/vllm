@@ -13,6 +13,7 @@ bytemuck.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 easy-ext.workspace = true
+educe.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
 half.workspace = true

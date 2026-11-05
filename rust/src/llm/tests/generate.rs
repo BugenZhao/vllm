@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
-    GenerateRequest, WeightVersionSpan,
+    AdmissionLimits, EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _,
+    GeneratePromptInfo, GenerateRequest, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -1306,6 +1306,97 @@ async fn generate_records_watermark_status_reported_by_engine() {
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_limits_follow_engine_outputs_not_stream_reads() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (first_outputs_tx, first_outputs_rx) = oneshot::channel::<()>();
+    let (finish_tx, finish_rx) = oneshot::channel::<()>();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-admission".to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let mut add_request = async || {
+                    let add = recv_engine_message(dealer).await;
+                    rmp_serde::from_slice::<EngineCoreRequest>(&add[1]).unwrap()
+                };
+                let barrier = add_request().await.request_id;
+                let first = add_request().await.request_id;
+                first_outputs_rx.await.unwrap();
+                let outputs = vec![
+                    request_output(&first, vec![1], None),
+                    request_output(&barrier, vec![1], None),
+                ];
+                let batch = RequestBatchOutputs {
+                    outputs,
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+
+                let second = add_request().await;
+                assert_eq!(second.external_req_id.as_deref(), Some("req-second"));
+                finish_rx.await.unwrap();
+                let outputs = vec![
+                    request_output(&first, vec![2], Some(EngineCoreFinishReason::Length)),
+                    request_output(&second.request_id, vec![1], None),
+                    request_output(&barrier, vec![2], None),
+                ];
+                let batch = RequestBatchOutputs {
+                    outputs,
+                    finished_requests: Some(BTreeSet::from([first])),
+                    ..Default::default()
+                };
+                send_outputs(push, batch.into()).await;
+
+                let third = add_request().await;
+                assert_eq!(third.external_req_id.as_deref(), Some("req-third"));
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc)
+        .await
+        .with_admission_limits(AdmissionLimits {
+            max_num_queued_reqs: Some(3),
+            max_num_queued_tokens: Some(2),
+        });
+    let rejection = |result: Result<_, Error>| match result {
+        Err(Error::Unavailable { message }) => message,
+        Err(error) => panic!("expected an unavailable error, got {error:?}"),
+        Ok(_) => panic!("expected an unavailable error"),
+    };
+
+    // Only the barrier stream is ever read: its outputs come last in each
+    // batch, so reading one shows the client handled the whole batch. The
+    // releases must not wait for anyone to read the other streams.
+    let mut barrier_request = sample_generate_request("req-barrier", 8);
+    barrier_request.prompt_token_ids = vec![11];
+    let mut barrier = llm.generate(barrier_request).await.unwrap();
+    // Two-token prompts from here on.
+    let first = llm.generate(sample_generate_request("req-first", 2)).await.unwrap();
+    let message = rejection(llm.generate(sample_generate_request("req-second", 2)).await);
+    assert!(message.starts_with("The engine has reached its prefill token backlog limit."));
+
+    // The first outputs of both requests end their prefill.
+    first_outputs_tx.send(()).unwrap();
+    assert_eq!(barrier.next().await.unwrap().unwrap().token_ids, vec![1]);
+    let second = llm.generate(sample_generate_request("req-second", 2)).await.unwrap();
+    let message = rejection(llm.generate(sample_generate_request("req-third", 2)).await);
+    assert!(message.starts_with("The engine is currently busy and cannot accept new requests."));
+
+    // The first request finishes, and the second leaves its prefill.
+    finish_tx.send(()).unwrap();
+    assert_eq!(barrier.next().await.unwrap().unwrap().token_ids, vec![2]);
+    let third = llm.generate(sample_generate_request("req-third", 2)).await.unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    drop((barrier, first, second, third));
     llm.shutdown().await.unwrap();
 }
 

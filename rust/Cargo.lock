@@ -5710,6 +5710,7 @@ dependencies = [
  "bytes",
  "clap",
  "easy-ext",
+ "educe",
  "enum-as-inner",
  "expect-test",
  "futures",

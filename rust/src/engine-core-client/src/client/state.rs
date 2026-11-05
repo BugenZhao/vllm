@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use educe::Educe;
 use tokio::sync::oneshot;
 use tracing::trace;
 
@@ -21,12 +22,24 @@ use crate::transport::ConnectedEngine;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
-#[derive(Debug)]
+/// Caller state tied to one request's lifecycle in the registry: it observes
+/// each output as the background dispatcher receives it, before delivery, and
+/// is dropped when the request leaves the registry (finished, aborted, or the
+/// client closed), independently of how fast the caller reads its stream.
+pub trait RequestLifecycle: Send + 'static {
+    /// Observe one output of the request.
+    fn observe_output(&mut self, output: &EngineCoreOutput);
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
     admission_stats_generation: Option<u64>,
+    #[educe(Debug(ignore))]
+    lifecycle: Option<Box<dyn RequestLifecycle>>,
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -165,6 +178,7 @@ impl RequestRegistry {
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
+        lifecycle: Option<Box<dyn RequestLifecycle>>,
     ) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
@@ -192,6 +206,7 @@ impl RequestRegistry {
                 engine_id: engine_id.clone(),
                 lora,
                 admission_stats_generation,
+                lifecycle,
             },
         );
 
@@ -249,6 +264,11 @@ impl RequestRegistry {
         output: EngineCoreStreamOutput,
     ) -> Option<EngineCoreStreamOutput> {
         self.apply_lora_events(&output.output);
+        if let Some(lifecycle) = (self.requests.get_mut(output.request_id.as_str()))
+            .and_then(|tracked| tracked.lifecycle.as_mut())
+        {
+            lifecycle.observe_output(&output.output);
+        }
         if output.finished() {
             match self.remove(output.request_id.as_str()) {
                 Some((mut sender, _)) => sender.send(output),
@@ -559,9 +579,12 @@ mod tests {
     #[test]
     fn registry_rejects_duplicate_request_ids() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        let error =
-            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap_err();
+        registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        let error = registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
@@ -571,7 +594,9 @@ mod tests {
     #[test]
     fn registry_removes_finished_request_on_output() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         let unrouted = registry.send_output(stream_output(EngineCoreOutput {
             request_id: "req-1".to_string(),
@@ -601,7 +626,13 @@ mod tests {
     fn registry_abort_delivers_held_back_outputs_before_terminal_output() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         let (_, mut receiver) = registry
-            .register("req-1".to_string(), None, None, NonZeroU32::new(4).unwrap())
+            .register(
+                "req-1".to_string(),
+                None,
+                None,
+                NonZeroU32::new(4).unwrap(),
+                None,
+            )
             .unwrap();
 
         for token_id in 1..=3 {
@@ -661,9 +692,12 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
-        registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry
+            .register("req-plain".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         // Registered but not yet scheduled: counted as waiting. The non-LoRA
         // request never shows up.
@@ -715,6 +749,7 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
         registry
@@ -723,6 +758,7 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
         registry
@@ -731,6 +767,7 @@ mod tests {
                 Some("adapter-b".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
 
@@ -754,7 +791,9 @@ mod tests {
     fn registry_counts_only_active_lora_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
 
-        registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry
+            .register("req-plain".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(registry.active_lora_requests(), 0);
         assert_eq!(
             registry.lora_adapter_states(),
@@ -767,6 +806,7 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
         registry
@@ -775,6 +815,7 @@ mod tests {
                 Some("adapter-b".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
         assert_eq!(registry.active_lora_requests(), 2);
@@ -802,6 +843,7 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
 
@@ -823,6 +865,7 @@ mod tests {
                 Some("adapter-a".to_string()),
                 None,
                 NonZeroU32::MIN,
+                None,
             )
             .unwrap();
 
@@ -837,8 +880,12 @@ mod tests {
     #[test]
     fn registry_closes_all_requests_on_failure() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        registry
+            .register("req-2".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         let senders = registry.close();
 
@@ -854,12 +901,15 @@ mod tests {
             connected_engine(engine_0.clone()),
             connected_engine(engine_1.clone()),
         ]);
-        let (chosen_0, _) =
-            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        let (chosen_1, _) =
-            registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        let (chosen_0_again, _) =
-            registry.register("req-3".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_0, _) = registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        let (chosen_1, _) = registry
+            .register("req-2".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        let (chosen_0_again, _) = registry
+            .register("req-3".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -886,12 +936,15 @@ mod tests {
             connected_engine(engine_1.clone()),
         ]);
 
-        let (chosen_0, _) =
-            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        let (chosen_1, _) =
-            registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
-        let (chosen_0_again, _) =
-            registry.register("req-3".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_0, _) = registry
+            .register("req-1".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        let (chosen_1, _) = registry
+            .register("req-2".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
+        let (chosen_0_again, _) = registry
+            .register("req-3".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -961,8 +1014,9 @@ mod tests {
             }
         ));
 
-        let (chosen, _) =
-            registry.register("req-stats".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-stats".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -978,7 +1032,13 @@ mod tests {
                 for index in 0..running {
                     let request_id = format!("old-{rank}-{index}");
                     registry
-                        .register(request_id.clone(), None, Some(rank as u32), NonZeroU32::MIN)
+                        .register(
+                            request_id.clone(),
+                            None,
+                            Some(rank as u32),
+                            NonZeroU32::MIN,
+                            None,
+                        )
                         .unwrap();
                     old_requests.push(request_id);
                 }
@@ -994,8 +1054,9 @@ mod tests {
 
             let mut distribution = [0; 2];
             for index in 0..14 {
-                let (engine, _) =
-                    registry.register(format!("new-{index}"), None, None, NonZeroU32::MIN).unwrap();
+                let (engine, _) = registry
+                    .register(format!("new-{index}"), None, None, NonZeroU32::MIN, None)
+                    .unwrap();
                 distribution[engine.engine_index().unwrap() as usize] += 1;
             }
             distributions.push(distribution);
@@ -1021,8 +1082,9 @@ mod tests {
                 );
             }
             let request_id = format!("req-{index}");
-            let (engine, _) =
-                registry.register(request_id.clone(), None, None, NonZeroU32::MIN).unwrap();
+            let (engine, _) = registry
+                .register(request_id.clone(), None, None, NonZeroU32::MIN, None)
+                .unwrap();
             chosen.push(engine.engine_index().unwrap());
             drop(registry.finish_many(&[request_id]));
         }
@@ -1048,14 +1110,21 @@ mod tests {
         );
         for index in 0..4 {
             registry
-                .register(format!("pinned-{index}"), None, Some(0), NonZeroU32::MIN)
+                .register(
+                    format!("pinned-{index}"),
+                    None,
+                    Some(0),
+                    NonZeroU32::MIN,
+                    None,
+                )
                 .unwrap();
         }
 
         // Even unchanged counts replace the optimistic estimate for that engine.
         registry.apply_scheduler_counts(0, snapshot);
-        let (after_refresh, _) =
-            registry.register("after-refresh".into(), None, None, NonZeroU32::MIN).unwrap();
+        let (after_refresh, _) = registry
+            .register("after-refresh".into(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
         // An older, empty snapshot must not erase the five admitted requests.
         for rank in [0, 1] {
             registry.apply_scheduler_counts(
@@ -1066,8 +1135,9 @@ mod tests {
                 },
             );
         }
-        let (after_empty, _) =
-            registry.register("after-empty".into(), None, None, NonZeroU32::MIN).unwrap();
+        let (after_empty, _) = registry
+            .register("after-empty".into(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
         expect_test::expect!["(Some(0), Some(1))"].assert_eq(&format!(
             "{:?}",
             (after_refresh.engine_index(), after_empty.engine_index())
@@ -1088,11 +1158,14 @@ mod tests {
                 },
             );
         }
-        registry.register("pinned".into(), None, Some(9), NonZeroU32::MIN).unwrap();
+        registry
+            .register("pinned".into(), None, Some(9), NonZeroU32::MIN, None)
+            .unwrap();
         let mut chosen = Vec::new();
         for index in 0..3 {
-            let (engine, _) =
-                registry.register(format!("auto-{index}"), None, None, NonZeroU32::MIN).unwrap();
+            let (engine, _) = registry
+                .register(format!("auto-{index}"), None, None, NonZeroU32::MIN, None)
+                .unwrap();
             chosen.push(engine.engine_index().unwrap());
         }
         expect_test::expect!["[2, 5, 2]"].assert_eq(&format!("{chosen:?}"));
@@ -1120,15 +1193,17 @@ mod tests {
 
         let mut finished_routes = Vec::new();
         for request_id in ["finished-1", "finished-2"].map(String::from) {
-            let (engine_id, _) =
-                registry.register(request_id.clone(), None, None, NonZeroU32::MIN).unwrap();
+            let (engine_id, _) = registry
+                .register(request_id.clone(), None, None, NonZeroU32::MIN, None)
+                .unwrap();
 
             finished_routes.push(engine_id.engine_index());
             drop(registry.finish_many([&request_id]));
         }
 
-        let (live_engine, _) =
-            registry.register("live-request".into(), None, None, NonZeroU32::MIN).unwrap();
+        let (live_engine, _) = registry
+            .register("live-request".into(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
         expect_test::expect!["([Some(0), Some(0)], Some(0))"].assert_eq(&format!(
             "{:?}",
             (finished_routes, live_engine.engine_index())
@@ -1148,7 +1223,7 @@ mod tests {
         );
 
         // `old` is admitted before the next snapshot, which already counts it.
-        registry.register("old".into(), None, None, NonZeroU32::MIN).unwrap();
+        registry.register("old".into(), None, None, NonZeroU32::MIN, None).unwrap();
         registry.apply_scheduler_counts(
             0,
             EngineLoadSnapshot {
@@ -1157,7 +1232,7 @@ mod tests {
             },
         );
         // `new` is admitted after that snapshot, so only it is counted on top.
-        registry.register("new".into(), None, None, NonZeroU32::MIN).unwrap();
+        registry.register("new".into(), None, None, NonZeroU32::MIN, None).unwrap();
 
         // Removing `old` must not take back the admission counted for `new`.
         drop(registry.remove("old"));
@@ -1184,18 +1259,21 @@ mod tests {
         ]);
 
         // Explicitly target rank 2 (third engine).
-        let (chosen, _) =
-            registry.register("req-1".to_string(), None, Some(2), NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-1".to_string(), None, Some(2), NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_2);
 
         // Explicitly target rank 0 (first engine).
-        let (chosen, _) =
-            registry.register("req-2".to_string(), None, Some(0), NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-2".to_string(), None, Some(0), NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_0);
 
         // Explicitly target rank 1.
-        let (chosen, _) =
-            registry.register("req-3".to_string(), None, Some(1), NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-3".to_string(), None, Some(1), NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -1209,12 +1287,15 @@ mod tests {
         ]);
 
         // Load-balance: first two go to engine_0 and engine_1.
-        registry.register("req-lb-0".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry
+            .register("req-lb-0".to_string(), None, None, NonZeroU32::MIN, None)
+            .unwrap();
 
         // Now engine_0 has 1 in-flight. Without dp_rank, next would go to engine_1.
         // But with dp_rank=0, it should still go to engine_0.
-        let (chosen, _) =
-            registry.register("req-dp".to_string(), None, Some(0), NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-dp".to_string(), None, Some(0), NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_0);
     }
 
@@ -1226,7 +1307,7 @@ mod tests {
         ]);
 
         let error = registry
-            .register("req-1".to_string(), None, Some(2), NonZeroU32::MIN)
+            .register("req-1".to_string(), None, Some(2), NonZeroU32::MIN, None)
             .unwrap_err();
         assert!(matches!(
             error,
@@ -1242,12 +1323,13 @@ mod tests {
         let engine_3 = EngineId::from_engine_index(3);
         let mut registry = RequestRegistry::new(&[connected_engine(engine_3.clone())]);
 
-        let (chosen, _) =
-            registry.register("req-ok".to_string(), None, Some(3), NonZeroU32::MIN).unwrap();
+        let (chosen, _) = registry
+            .register("req-ok".to_string(), None, Some(3), NonZeroU32::MIN, None)
+            .unwrap();
         assert_eq!(chosen, engine_3);
 
         let error = registry
-            .register("req-bad".to_string(), None, Some(0), NonZeroU32::MIN)
+            .register("req-bad".to_string(), None, Some(0), NonZeroU32::MIN, None)
             .unwrap_err();
         assert!(matches!(
             error,
