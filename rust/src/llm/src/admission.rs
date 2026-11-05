@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use vllm_engine_core_client::RequestLifecycle;
 use vllm_engine_core_client::protocol::output::EngineCoreOutput;
+use vllm_metrics::{AdmissionRejectionLabels, METRICS, U64Counter};
 
 use crate::error::{Error, Result};
 
@@ -36,17 +37,32 @@ struct Queued {
 }
 
 /// Tracks unfinished requests against [`AdmissionLimits`].
-#[derive(Default)]
 pub(crate) struct Admission {
     limits: AdmissionLimits,
     queued: Arc<Mutex<Queued>>,
+    /// `vllm:admission_rejections` for each limit.
+    queued_reqs_rejections: U64Counter,
+    queued_tokens_rejections: U64Counter,
 }
 
 impl Admission {
-    pub(crate) fn new(limits: AdmissionLimits) -> Self {
+    /// Create the tracker, and the rejection series of every limit even when
+    /// it is unset, like Python.
+    pub(crate) fn new(model_name: &str, limits: AdmissionLimits) -> Self {
+        let rejections = |reason| {
+            METRICS
+                .request
+                .admission_rejections
+                .get_or_create_owned(&AdmissionRejectionLabels {
+                    model_name: model_name.to_string(),
+                    reason,
+                })
+        };
         Self {
             limits,
             queued: Arc::default(),
+            queued_reqs_rejections: rejections("max_num_queued_reqs"),
+            queued_tokens_rejections: rejections("max_num_queued_tokens"),
         }
     }
 
@@ -64,6 +80,7 @@ impl Admission {
         if let Some(max) = self.limits.max_num_queued_reqs
             && queued.requests + u64::from(n) > max
         {
+            self.queued_reqs_rejections.inc();
             return Err(Error::Unavailable {
                 message: "The engine is currently busy and cannot accept new requests. \
                           Please try again later or on a different instance."
@@ -73,6 +90,7 @@ impl Admission {
         if let Some(max) = self.limits.max_num_queued_tokens
             && queued.prefill_tokens >= max
         {
+            self.queued_tokens_rejections.inc();
             return Err(Error::Unavailable {
                 message: "The engine has reached its prefill token backlog limit. \
                           Please try again later or on a different instance."
@@ -138,12 +156,29 @@ mod tests {
         matches!(result, Err(Error::Unavailable { .. }))
     }
 
+    /// `vllm:admission_rejections` of `model_name` for both limits.
+    fn rejections(model_name: &str) -> [u64; 2] {
+        ["max_num_queued_reqs", "max_num_queued_tokens"].map(|reason| {
+            METRICS
+                .request
+                .admission_rejections
+                .get_or_create_owned(&AdmissionRejectionLabels {
+                    model_name: model_name.to_string(),
+                    reason,
+                })
+                .get()
+        })
+    }
+
     #[test]
     fn request_limit_counts_samples_until_tickets_drop() {
-        let admission = Admission::new(AdmissionLimits {
-            max_num_queued_reqs: Some(3),
-            max_num_queued_tokens: None,
-        });
+        let admission = Admission::new(
+            "admission-request-limit",
+            AdmissionLimits {
+                max_num_queued_reqs: Some(3),
+                max_num_queued_tokens: None,
+            },
+        );
 
         let two = admission.admit(n(2), 10).unwrap();
         assert_eq!(two.len(), 2);
@@ -160,14 +195,18 @@ mod tests {
         let _again = admission.admit(n(1), 10).unwrap();
         drop(one);
         let _last = admission.admit(n(1), 10).unwrap();
+        assert_eq!(rejections("admission-request-limit"), [3, 0]);
     }
 
     #[test]
     fn token_limit_counts_prompts_until_first_output() {
-        let admission = Admission::new(AdmissionLimits {
-            max_num_queued_reqs: None,
-            max_num_queued_tokens: Some(100),
-        });
+        let admission = Admission::new(
+            "admission-token-limit",
+            AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: Some(100),
+            },
+        );
 
         // Below the limit, any prompt is admitted, even one that crosses it.
         let mut first = admission.admit(n(1), 60).unwrap();
@@ -186,13 +225,22 @@ mod tests {
         // Each of `n` samples counts the prompt: 40 + 2 * 30 reaches the limit.
         let _pair = admission.admit(n(2), 30).unwrap();
         assert!(is_unavailable(admission.admit(n(1), 1)));
+        assert_eq!(rejections("admission-token-limit"), [0, 3]);
     }
 
     #[test]
     fn no_limits_admit_everything() {
-        let admission = Admission::default();
+        let admission = Admission::new("admission-no-limits", AdmissionLimits::default());
         let tickets = admission.admit(n(4), u64::MAX / 8).unwrap();
         assert_eq!(tickets.len(), 4);
         assert!(admission.admit(n(1), 1).is_ok());
+        // Both series are exported before the first rejection.
+        let rendered = METRICS.render().unwrap();
+        for reason in ["max_num_queued_reqs", "max_num_queued_tokens"] {
+            let series = format!(
+                "vllm:admission_rejections_total{{model_name=\"admission-no-limits\",reason=\"{reason}\"}} 0"
+            );
+            assert!(rendered.contains(&series), "{series}");
+        }
     }
 }

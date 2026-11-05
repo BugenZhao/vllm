@@ -160,6 +160,7 @@ impl EngineCoreLlm {
             supports_lora: client.ready_response().supports_lora,
             vllm_version: client.vllm_version().to_string(),
         };
+        let admission = Admission::new(client.model_name(), AdmissionLimits::default());
         Self {
             client,
             info,
@@ -167,7 +168,7 @@ impl EngineCoreLlm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
-            admission: Admission::default(),
+            admission,
             request_metric_handles,
         }
     }
@@ -203,7 +204,7 @@ impl EngineCoreLlm {
     /// Reject requests over the given queue limits with
     /// [`Error::Unavailable`].
     pub fn with_admission_limits(mut self, limits: AdmissionLimits) -> Self {
-        self.admission = Admission::new(limits);
+        self.admission = Admission::new(self.client.model_name(), limits);
         self
     }
 
