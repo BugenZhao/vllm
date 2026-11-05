@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
@@ -647,6 +647,9 @@ pub struct ChatRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// W3C trace context headers from the client.
+    #[serde(default)]
+    pub trace_headers: Option<BTreeMap<String, String>>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -675,6 +678,7 @@ impl ChatRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
+            trace_headers: None,
             lora_request: None,
             return_prompt_text: false,
         }

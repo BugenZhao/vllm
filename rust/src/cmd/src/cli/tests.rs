@@ -304,6 +304,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        otlp_traces_endpoint: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -609,6 +610,72 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
             "profiler": "torch",
             "torch_profiler_dir": "/tmp/profile",
         })
+    );
+}
+
+/// The frontend consumes `--otlp-traces-endpoint` and the managed engine
+/// receives it too; the engine-owned `--collect-detailed-traces` passes
+/// through.
+#[test]
+fn serve_args_export_traces_and_forward_tracing_flags_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--otlp-traces-endpoint",
+        "localhost:4317",
+        "--collect-detailed-traces",
+        "model,worker",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--collect-detailed-traces",
+            "model,worker",
+            "--otlp-traces-endpoint",
+            "localhost:4317",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+    let frontend = args.to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args));
+    assert_eq!(
+        frontend.otlp_traces_endpoint.as_deref(),
+        Some("localhost:4317")
+    );
+}
+
+/// Under the Python supervisor, `collect_detailed_traces` (a list) belongs to
+/// the engine and is ignored.
+#[test]
+fn frontend_args_json_reads_otlp_traces_endpoint() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","otlp_traces_endpoint":"http://collector:4317","collect_detailed_traces":["model"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(
+        config.otlp_traces_endpoint.as_deref(),
+        Some("http://collector:4317")
     );
 }
 
@@ -1995,6 +2062,7 @@ fn frontend_args_accept_json() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        otlp_traces_endpoint: None,
                     },
                 },
             ),
@@ -2928,6 +2996,7 @@ fn serve_args_accept_handshake_aliases() {
                         },
                         root_path: None,
                         profiler_config: None,
+                        otlp_traces_endpoint: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
@@ -3232,6 +3301,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             manages_engine: true,
             keep_alive_timeout: 5s,
             profiler: None,
+            otlp_traces_endpoint: None,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -3364,6 +3434,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             manages_engine: true,
             keep_alive_timeout: 5s,
             profiler: None,
+            otlp_traces_endpoint: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -3609,6 +3680,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             manages_engine: false,
             keep_alive_timeout: 5s,
             profiler: None,
+            otlp_traces_endpoint: None,
         }
     "#]]
     .assert_debug_eq(&config);

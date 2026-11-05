@@ -42,8 +42,11 @@ pub struct GenerateRequest {
     pub arrival_time: Option<f64>,
     /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
-    /// Optional tracing headers to forward to engine-core and downstream
-    /// observability hooks.
+    /// W3C trace context headers (`traceparent`, `tracestate`) from the
+    /// client, the parent of this request's `llm_request` span.
+    ///
+    /// Not forwarded to engine-core: Python's engine only echoes them back to
+    /// its frontend, which builds the same span from them.
     pub trace_headers: Option<BTreeMap<String, String>>,
     /// Request scheduling priority. Lower values are scheduled earlier.
     pub priority: i32,
@@ -87,7 +90,7 @@ impl GenerateRequest {
             mm_features,
             arrival_time,
             cache_salt,
-            trace_headers,
+            trace_headers: _,
             priority,
             data_parallel_rank,
             session_id,
@@ -121,7 +124,7 @@ impl GenerateRequest {
                 client_index: 0,
                 current_wave: 0,
                 priority,
-                trace_headers,
+                trace_headers: None,
                 resumable: false,
                 session_id,
                 kv_hints,
@@ -187,8 +190,8 @@ mod tests {
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(
-                "x-trace-id".to_string(),
-                "abc".to_string(),
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
@@ -239,13 +242,7 @@ mod tests {
             request.kv_hints.as_ref().map(|hints| hints.message_id.as_str()),
             Some("msg-1")
         );
-        assert_eq!(
-            request.trace_headers,
-            Some(BTreeMap::from([(
-                "x-trace-id".to_string(),
-                "abc".to_string(),
-            )]))
-        );
+        assert_eq!(request.trace_headers, None);
         assert_eq!(request.reasoning_ended, None);
         assert_eq!(
             request

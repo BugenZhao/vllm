@@ -432,6 +432,9 @@ pub struct Config {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// OTLP endpoint that receives one `llm_request` span per finished
+    /// request, or `None` to export no traces.
+    pub otlp_traces_endpoint: Option<String>,
 }
 
 impl Config {

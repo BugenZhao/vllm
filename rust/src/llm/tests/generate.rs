@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use opentelemetry::trace::{SpanKind, TracerProvider as _};
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -30,7 +32,7 @@ use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
+use vllm_engine_core_client::{AbortCause, EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
     EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
     GenerateRequest, WeightVersionSpan,
@@ -1207,6 +1209,182 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
+}
+
+/// A finished request exports one `llm_request` server span under the
+/// client's trace context, with Python's attributes; the trace headers stay in
+/// the frontend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_exports_llm_request_span_under_client_trace_context() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(0);
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.trace_headers, None);
+
+                let events = vec![
+                    EngineCoreEvent {
+                        r#type: EngineCoreEventType::Queued,
+                        timestamp: 8.0,
+                    },
+                    EngineCoreEvent {
+                        r#type: EngineCoreEventType::Scheduled,
+                        timestamp: 9.0,
+                    },
+                ];
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        timestamp: 10.0,
+                        outputs: vec![request_output_with_events(
+                            &request.request_id,
+                            vec![1],
+                            None,
+                            Some(events),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        timestamp: 11.5,
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![2, 3],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([request.request_id])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "trace-model", &ipc)
+        .await
+        .with_tracer(Some(provider.tracer("test")));
+    let mut request = sample_generate_request("req-trace", 8);
+    request.sampling_params.temperature = 0.5;
+    request.trace_headers = Some(BTreeMap::from([(
+        "traceparent".to_string(),
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+    )]));
+    let output = llm.generate(request).await.unwrap().collect_output().await.unwrap();
+    assert_eq!(output.finish_reason, FinishReason::Length);
+
+    let spans = exporter.get_finished_spans().unwrap();
+    let [span] = spans.as_slice() else {
+        panic!("expected one span, got {spans:?}");
+    };
+    assert_eq!(span.name, "llm_request");
+    assert_eq!(span.span_kind, SpanKind::Server);
+    assert_eq!(
+        span.span_context.trace_id().to_string(),
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+    assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+    assert!(span.parent_span_is_remote);
+    assert_eq!(
+        span.start_time,
+        std::time::UNIX_EPOCH + Duration::from_secs_f64(42.5)
+    );
+    // Arrival and the wall-clock latencies are frontend-observed; the rest
+    // come from engine timestamps.
+    let mut attributes: BTreeMap<_, _> = span
+        .attributes
+        .iter()
+        .map(|kv| (kv.key.as_str(), kv.value.to_string()))
+        .collect();
+    for wall_clock in ["gen_ai.latency.e2e", "gen_ai.latency.time_to_first_token"] {
+        let latency: f64 = attributes.remove(wall_clock).unwrap().parse().unwrap();
+        assert!(latency > 0.0, "{wall_clock} = {latency}");
+    }
+    expect_test::expect![[r#"
+        {
+            "gen_ai.latency.time_in_model_decode": "1.5",
+            "gen_ai.latency.time_in_model_inference": "2.5",
+            "gen_ai.latency.time_in_model_prefill": "1",
+            "gen_ai.latency.time_in_queue": "1",
+            "gen_ai.request.id": "req-trace",
+            "gen_ai.request.max_tokens": "8",
+            "gen_ai.request.n": "1",
+            "gen_ai.request.temperature": "0.5",
+            "gen_ai.request.top_p": "1",
+            "gen_ai.usage.completion_tokens": "3",
+            "gen_ai.usage.prompt_tokens": "2",
+        }
+    "#]]
+    .assert_debug_eq(&attributes);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// A request the frontend ends at a stop-string match is traced like Python's
+/// output-processor finish; a client disconnect is not, as Python removes the
+/// aborted request untraced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_streams_export_spans_only_for_stop_string_matches() {
+    for (cause, expected_spans) in [
+        (AbortCause::StopStringMatched, 1),
+        (AbortCause::DroppedStream, 0),
+    ] {
+        let ipc = IpcNamespace::new().unwrap();
+        let handshake_address = ipc.handshake_endpoint();
+        let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(0),
+            |dealer, push| {
+                Box::pin(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output(&request.request_id, vec![1], None)],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                    let abort =
+                        timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                })
+            },
+        );
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
+        let llm = connect_async_llm_with_ipc(handshake_address, 0, "trace-drop-model", &ipc)
+            .await
+            .with_tracer(Some(provider.tracer("test")));
+        let mut stream = llm.generate(sample_generate_request("req-drop", 8)).await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
+        cause.drop_as(stream);
+
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+        llm.shutdown().await.unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), expected_spans, "{cause:?}: {spans:?}");
+    }
 }
 
 /// The engine reports `watermarking` on a request's first output only with a
