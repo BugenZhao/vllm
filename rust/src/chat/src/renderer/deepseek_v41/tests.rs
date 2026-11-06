@@ -15,7 +15,7 @@ use crate::renderer::test_utils::{
     FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
 };
 use crate::request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
+    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatToolChoice, GenerationPromptMode,
     ResolvedToolContext,
 };
 
@@ -303,6 +303,34 @@ fn rejects_requests_whose_tools_are_all_deferred() {
     let prompt = render(&request);
     assert!(prompt.contains("\"name\": \"tool_search\""), "{prompt}");
     assert!(!prompt.contains("get_time"), "{prompt}");
+
+    // Loaded tools were found already, and `tool_choice: none` calls none: with
+    // the request-level tools excluded, only deferred loaded tools are left.
+    let messages = vec![
+        ChatMessage::tool_response(vec![ChatContentPart::tool_reference("get_time")], "call_1"),
+        ChatMessage::user("question"),
+    ];
+    let mut tool_context = ResolvedToolContext::new_with_loaded_tools(
+        &messages,
+        vec![tool(
+            "tool_search",
+            "Search",
+            json!({"type": "object"}),
+            false,
+        )],
+        vec![tool("get_time", "Time", json!({"type": "object"}), true)],
+        Some(ChatToolChoice::None),
+        true,
+    )
+    .unwrap();
+    tool_context.exclude_initial_tools_if_none(&messages);
+    let request = ChatRequest {
+        tool_context,
+        messages,
+        ..ChatRequest::for_test()
+    };
+    let prompt = render(&request);
+    assert!(prompt.contains("### Updated Tool Schemas"), "{prompt}");
 }
 
 fn image_part(uuid: &str) -> ChatContentPart {

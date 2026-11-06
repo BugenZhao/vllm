@@ -549,8 +549,12 @@ impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
 pub struct ResolvedToolContext {
     /// Request-level tools rendered before the ordered chat history.
     pub initial_tools: Vec<ChatTool>,
-    /// Request-level and message-scoped tools available for this generation.
+    /// Request-level and message-scoped tools available for this generation,
+    /// then the loaded ones.
     pub effective_tools: Vec<ChatTool>,
+    /// Tools that tool search results in the history loaded, the tail of
+    /// `effective_tools`.
+    pub loaded_tools: Vec<ChatTool>,
     /// Resolved tool-choice behavior for this request.
     pub tool_choice: ChatToolChoice,
     /// Whether more than one parsed tool call may be surfaced northbound.
@@ -565,17 +569,40 @@ impl ResolvedToolContext {
         requested_tool_choice: Option<ChatToolChoice>,
         parallel_tool_calls: bool,
     ) -> Result<Self> {
+        Self::new_with_loaded_tools(
+            messages,
+            initial_tools,
+            Vec::new(),
+            requested_tool_choice,
+            parallel_tool_calls,
+        )
+    }
+
+    /// Like [`Self::new`], plus the tools that tool search results in the
+    /// history loaded (`loaded_tools`). Like message-scoped tools, they are
+    /// part of the history: available after the request-level and
+    /// message-scoped tools, and kept when `tool_choice: none` excludes the
+    /// request-level tools.
+    pub fn new_with_loaded_tools(
+        messages: &[ChatMessage],
+        initial_tools: Vec<ChatTool>,
+        loaded_tools: Vec<ChatTool>,
+        requested_tool_choice: Option<ChatToolChoice>,
+        parallel_tool_calls: bool,
+    ) -> Result<Self> {
         let dynamic_tool_count = messages
             .iter()
             .filter_map(ChatMessage::declared_tools)
             .map(<[ChatTool]>::len)
             .sum::<usize>();
-        let mut effective_tools = Vec::with_capacity(initial_tools.len() + dynamic_tool_count);
+        let mut effective_tools =
+            Vec::with_capacity(initial_tools.len() + dynamic_tool_count + loaded_tools.len());
         let mut names = HashSet::with_capacity(effective_tools.capacity());
 
         for tool in initial_tools
             .iter()
             .chain(messages.iter().filter_map(ChatMessage::declared_tools).flatten())
+            .chain(&loaded_tools)
         {
             if !names.insert(tool.name.clone()) {
                 return Err(Error::DuplicateToolName {
@@ -621,6 +648,7 @@ impl ResolvedToolContext {
         Ok(Self {
             initial_tools,
             effective_tools,
+            loaded_tools,
             tool_choice,
             parallel_tool_calls,
         })
@@ -632,14 +660,23 @@ impl ResolvedToolContext {
     }
 
     /// Drop request-level tools when `tool_choice` is `none`, so they are not
-    /// rendered into the prompt. Message-scoped tools stay, as they are part of
-    /// the chat history.
-    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
-        if matches!(self.tool_choice, ChatToolChoice::None) {
-            // `new` places request-level tools first in `effective_tools`.
-            self.effective_tools.drain(..self.initial_tools.len());
-            self.initial_tools.clear();
+    /// rendered into the prompt. Message-scoped and loaded tools stay, as they
+    /// are part of the chat history, and so do request-level tools a tool
+    /// reference in `messages` names, which rendering the reference needs.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self, messages: &[ChatMessage]) {
+        if !matches!(self.tool_choice, ChatToolChoice::None) {
+            return;
         }
+        let referenced =
+            messages.iter().flat_map(ChatMessage::tool_references).collect::<HashSet<_>>();
+        // `new` places request-level tools first in `effective_tools`.
+        let mut index = 0;
+        let initial_count = self.initial_tools.len();
+        self.effective_tools.retain(|tool| {
+            index += 1;
+            index > initial_count || referenced.contains(tool.name.as_str())
+        });
+        self.initial_tools.retain(|tool| referenced.contains(tool.name.as_str()));
     }
 }
 
@@ -648,6 +685,7 @@ impl Default for ResolvedToolContext {
         Self {
             initial_tools: Vec::new(),
             effective_tools: Vec::new(),
+            loaded_tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
             parallel_tool_calls: true,
         }
@@ -760,6 +798,11 @@ impl ChatRequest {
     /// Return every tool available for this generation.
     pub fn tools(&self) -> &[ChatTool] {
         &self.tool_context.effective_tools
+    }
+
+    /// Return the tools that tool search results in the history loaded.
+    pub fn loaded_tools(&self) -> &[ChatTool] {
+        &self.tool_context.loaded_tools
     }
 
     /// Return the available tool with this name, as a tool reference names it.
@@ -1021,6 +1064,40 @@ mod tests {
             vec!["first", "middle", "last"]
         );
         assert_eq!(context.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn loaded_tools_follow_message_tools_and_survive_none_exclusion() {
+        let messages = vec![
+            ChatMessage::developer("", Some(vec![chat_tool("scoped")])),
+            ChatMessage::tool_response(
+                vec![
+                    ChatContentPart::tool_reference("loaded"),
+                    ChatContentPart::tool_reference("referenced"),
+                ],
+                "call_0",
+            ),
+        ];
+
+        let mut context = ResolvedToolContext::new_with_loaded_tools(
+            &messages,
+            vec![chat_tool("request"), chat_tool("referenced")],
+            vec![chat_tool("loaded")],
+            Some(ChatToolChoice::None),
+            true,
+        )
+        .unwrap();
+        context.exclude_initial_tools_if_none(&messages);
+
+        // A referenced request-level tool stays: its reference needs it.
+        let names =
+            |tools: &[ChatTool]| tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&context.initial_tools), ["referenced"]);
+        assert_eq!(
+            names(&context.effective_tools),
+            ["referenced", "scoped", "loaded"]
+        );
+        assert_eq!(names(&context.loaded_tools), ["loaded"]);
     }
 
     #[test]

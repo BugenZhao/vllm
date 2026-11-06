@@ -22,7 +22,7 @@ use vllm_chat::{
 use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
     AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
-    ResponsesResponse, TextPart,
+    ResponsesResponse, TextPart, ToolSearchExecution,
 };
 
 /// One Responses API SSE event payload.
@@ -203,6 +203,13 @@ enum OpenItem {
         called_name: String,
         arguments: String,
     },
+    /// A call of the client-executed tool search. Like Python, it streams no
+    /// argument deltas (the SDK defines none); the done item carries them.
+    ToolSearchCall {
+        item_id: String,
+        call_id: String,
+        arguments: String,
+    },
 }
 
 impl OutputItemStreamer {
@@ -261,7 +268,7 @@ impl OutputItemStreamer {
                 if delta.is_empty() {
                     return vec![];
                 }
-                vec![self.function_call_delta(delta.clone())]
+                self.function_call_delta(delta.clone()).into_iter().collect()
             }
             ChatEvent::ToolCallEnd { call, .. } => self.close_current(Some(call)),
         };
@@ -372,9 +379,19 @@ impl OutputItemStreamer {
     }
 
     fn open_function_call(&mut self, id: &str, name: &str) -> ResponseStreamEvent {
-        let item_id = format!("fc_{}", Uuid::new_v4().simple());
         let call_id = id.to_string();
         let output_index = self.output_index();
+        if self.tool_names.is_tool_search(name) {
+            let item_id = format!("tsc_{}", Uuid::new_v4().simple());
+            self.current = Some(OpenItem::ToolSearchCall {
+                item_id: item_id.clone(),
+                call_id: call_id.clone(),
+                arguments: String::new(),
+            });
+            let item = tool_search_call_item(item_id, call_id, "", ResponseItemStatus::InProgress);
+            return ResponseStreamEvent::OutputItemAdded { output_index, item };
+        }
+        let item_id = format!("fc_{}", Uuid::new_v4().simple());
         self.current = Some(OpenItem::FunctionCall {
             item_id: item_id.clone(),
             call_id: call_id.clone(),
@@ -420,18 +437,23 @@ impl OutputItemStreamer {
         }
     }
 
-    fn function_call_delta(&mut self, delta: String) -> ResponseStreamEvent {
-        let Some(OpenItem::FunctionCall {
-            item_id, arguments, ..
-        }) = self.current.as_mut()
-        else {
-            unreachable!("function call delta requires an open function call item");
-        };
-        arguments.push_str(&delta);
-        ResponseStreamEvent::FunctionCallArgumentsDelta {
-            item_id: item_id.clone(),
-            output_index: self.output_index(),
-            delta,
+    fn function_call_delta(&mut self, delta: String) -> Option<ResponseStreamEvent> {
+        match self.current.as_mut() {
+            Some(OpenItem::FunctionCall {
+                item_id, arguments, ..
+            }) => {
+                arguments.push_str(&delta);
+                Some(ResponseStreamEvent::FunctionCallArgumentsDelta {
+                    item_id: item_id.clone(),
+                    output_index: self.output_index(),
+                    delta,
+                })
+            }
+            Some(OpenItem::ToolSearchCall { arguments, .. }) => {
+                arguments.push_str(&delta);
+                None
+            }
+            _ => unreachable!("function call delta requires an open function call item"),
         }
     }
 
@@ -532,6 +554,23 @@ impl OutputItemStreamer {
                 };
                 (events, item)
             }
+            OpenItem::ToolSearchCall {
+                item_id,
+                call_id,
+                arguments,
+            } => {
+                let (call_id, arguments) = match final_call {
+                    Some(call) => (call.id.clone(), call.arguments.clone()),
+                    None => (call_id, arguments),
+                };
+                let item = tool_search_call_item(
+                    item_id,
+                    call_id,
+                    &arguments,
+                    ResponseItemStatus::Completed,
+                );
+                (vec![], item)
+            }
         };
         self.completed_items.push(item);
         self.last_item_done_pending = true;
@@ -569,6 +608,29 @@ impl OutputItemStreamer {
     }
 }
 
+/// A `tool_search_call` output item, like Python's `make_tool_search_call`:
+/// the arguments are parsed as JSON, kept as a string when they are not JSON,
+/// and empty arguments are an empty object.
+fn tool_search_call_item(
+    item_id: String,
+    call_id: String,
+    arguments: &str,
+    status: ResponseItemStatus,
+) -> ResponseOutputItem {
+    let arguments = if arguments.is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()))
+    };
+    ResponseOutputItem::ToolSearchCall {
+        id: item_id,
+        call_id,
+        execution: ToolSearchExecution::Client,
+        status,
+        arguments,
+    }
+}
+
 /// Extract the text of one text/reasoning block.
 fn block_text(block: &AssistantContentBlock) -> Option<&str> {
     match block {
@@ -584,6 +646,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::routes::openai::responses::types::ResponsesTool;
 
     #[test]
     fn empty_function_call_emits_arguments_done() {
@@ -611,6 +674,79 @@ mod tests {
         assert_eq!(payloads[0]["type"], "response.function_call_arguments.done");
         assert_eq!(payloads[0]["arguments"], "");
         assert_eq!(payloads[1]["type"], "response.output_item.done");
+    }
+
+    /// Like Python: a client tool search call is one `tool_search_call` item,
+    /// added and done, without argument delta events; a length finish marks it
+    /// incomplete.
+    #[test]
+    fn tool_search_call_streams_as_one_tool_search_call_item() {
+        let tools = serde_json::from_value::<Vec<ResponsesTool>>(serde_json::json!([
+            {"type": "tool_search", "execution": "client"}
+        ]))
+        .unwrap();
+        for (finish_reason, status) in [
+            (FinishReason::Stop(None), "completed"),
+            (FinishReason::Length, "incomplete"),
+        ] {
+            let tool_names = ResponsesToolNames::convert(&tools, &[]).unwrap().names;
+            let mut streamer = OutputItemStreamer::new(true, tool_names);
+            let mut events = streamer.on_event(&ChatEvent::ToolCallStart {
+                index: 0,
+                id: "call_ts1".to_string(),
+                name: "tool_search".to_string(),
+            });
+            for delta in [r#"{"query":"#, r#""x"}"#] {
+                events.extend(streamer.on_event(&ChatEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    delta: delta.to_string(),
+                }));
+            }
+            events.extend(streamer.on_event(&ChatEvent::ToolCallEnd {
+                index: 0,
+                call: AssistantToolCall {
+                    id: "call_ts1".to_string(),
+                    name: "tool_search".to_string(),
+                    arguments: r#"{"query":"x"}"#.to_string(),
+                },
+            }));
+            events.extend(streamer.on_stream_end(Some(&finish_reason)));
+            let payloads: Vec<Value> = events
+                .iter()
+                .map(|event| serde_json::to_value(SequencedEvent::new(event, 0)).unwrap())
+                .collect();
+
+            let types = payloads
+                .iter()
+                .map(|payload| (payload["type"].clone(), payload["item"]["type"].clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                types,
+                [
+                    (
+                        "response.output_item.added".into(),
+                        "tool_search_call".into()
+                    ),
+                    (
+                        "response.output_item.done".into(),
+                        "tool_search_call".into()
+                    ),
+                ]
+            );
+            let added = &payloads[0]["item"];
+            assert_eq!(added["status"], "in_progress");
+            assert_eq!(added["arguments"], serde_json::json!({}));
+            let done = &payloads[1]["item"];
+            assert!(done["id"].as_str().unwrap().starts_with("tsc_"), "{done}");
+            assert_eq!(done["call_id"], "call_ts1");
+            assert_eq!(done["execution"], "client");
+            assert_eq!(done["status"], status);
+            assert_eq!(done["arguments"], serde_json::json!({"query": "x"}));
+            assert_eq!(
+                serde_json::to_value(streamer.into_output_items()).unwrap(),
+                serde_json::json!([done])
+            );
+        }
     }
 
     #[test]

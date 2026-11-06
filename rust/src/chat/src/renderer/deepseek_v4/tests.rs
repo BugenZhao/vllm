@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use expect_test::{ExpectFile, expect, expect_file};
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror_ext::AsReport as _;
 
 use super::DeepSeekV4ChatRenderer;
@@ -13,9 +13,11 @@ use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{
-    FixtureRequestOptions, fixture_chat_request, tool_search_request,
+    FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
 };
-use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
+};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::default()
@@ -843,6 +845,52 @@ fn custom_roles_are_rejected_as_request_errors() {
     assert!(error.is_request_validation_error());
     expect!["chat role `root` is not supported by this chat renderer"]
         .assert_eq(&error.to_report_string());
+}
+
+/// V4 has no turn to list tools later, so tools that tool search loaded are
+/// listed up front with the request's.
+#[test]
+fn loaded_tools_are_listed_up_front() {
+    let messages = vec![
+        ChatMessage::user("weather in Paris?"),
+        ChatMessage::tool_response(
+            vec![ChatContentPart::tool_reference("get_weather")],
+            "call_1",
+        ),
+    ];
+    let request = ChatRequest {
+        tool_context: ResolvedToolContext::new_with_loaded_tools(
+            &messages,
+            vec![tool(
+                "tool_search",
+                "Search tools",
+                json!({"type": "object"}),
+                false,
+            )],
+            vec![tool(
+                "get_weather",
+                "Weather",
+                json!({"type": "object"}),
+                true,
+            )],
+            None,
+            true,
+        )
+        .unwrap(),
+        messages,
+        ..ChatRequest::for_test()
+    };
+
+    let prompt = render_request(&request);
+    let (system, history) = prompt.split_once("<｜User｜>").unwrap();
+    assert!(
+        system.contains(r#"{"name": "get_weather", "description": "Weather""#),
+        "{prompt}"
+    );
+    assert!(
+        history.contains("<tool_result>get_weather</tool_result>"),
+        "{prompt}"
+    );
 }
 
 /// Like deepseek-recipe's Messages conversion: a tool reference is written as

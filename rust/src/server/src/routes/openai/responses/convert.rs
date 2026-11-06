@@ -12,24 +12,25 @@
 //! tool-response messages.
 
 use itertools::Itertools as _;
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatToolChoice, Error as ChatError, GenerationPromptMode,
+    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
     ResolvedToolContext,
 };
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
-use super::tools::{ResponsesToolNames, ToolIdentity};
+use super::tools::{ConvertedTools, ResponsesToolNames, TOOL_SEARCH_NAME, ToolIdentity};
 use super::types::{
-    InputTokensDetails, OutputTokensDetails, ResponseEchoFields, ResponseInputContentPart,
-    ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
-    ResponseMessageContent, ResponseObject, ResponseTextConfig, ResponseTextFormat,
-    ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation, ResponseUsage,
-    ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool,
-    ServiceTier,
+    InputTokensDetails, NamespacedTool, OutputTokensDetails, ResponseEchoFields,
+    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseInputRole,
+    ResponseItemStatus, ResponseMessageContent, ResponseObject, ResponseTextConfig,
+    ResponseTextFormat, ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation,
+    ResponseUsage, ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse,
+    ResponsesTool, ServiceTier, ToolSearchExecution,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -142,19 +143,29 @@ pub(crate) fn prepare_responses_request(
 
     let response_model = lora_resolution.response_model();
 
-    let (messages, continue_final) = convert_input(&instructions, input)?;
+    let ConvertedInput {
+        messages,
+        continue_final,
+        loaded_tools,
+    } = convert_input(&instructions, input)?;
     let generation_prompt_mode = if continue_final {
         GenerationPromptMode::ContinueFinalAssistant
     } else {
         GenerationPromptMode::StartNewAssistant
     };
 
-    let (converted_tools, tool_names) = ResponsesToolNames::convert(&tools);
-    let requested_tool_choice =
-        normalize_tool_choice(tool_choice, &tools, &tool_names, converted_tools.is_empty())?;
-    let tool_context = ResolvedToolContext::new(
+    let ConvertedTools {
+        request_tools,
+        loaded_tools: loaded_chat_tools,
+        names: tool_names,
+    } = ResponsesToolNames::convert(&tools, &loaded_tools)?;
+    // A named choice may select a loaded tool too.
+    let shown_tools = request_tools.iter().chain(&loaded_chat_tools).cloned().collect_vec();
+    let requested_tool_choice = normalize_tool_choice(tool_choice, &shown_tools, &tool_names)?;
+    let tool_context = ResolvedToolContext::new_with_loaded_tools(
         &messages,
-        converted_tools,
+        request_tools,
+        loaded_chat_tools,
         requested_tool_choice,
         parallel_tool_calls.unwrap_or(true),
     )
@@ -331,13 +342,13 @@ fn response_prompt_truncation(
 /// [`ResponsesToolNames::resolve_choice`]).
 fn normalize_tool_choice(
     tool_choice: Option<ResponseToolChoice>,
-    tools: &[ResponsesTool],
+    shown_tools: &[ChatTool],
     tool_names: &ResponsesToolNames,
-    tools_empty: bool,
 ) -> Result<Option<ChatToolChoice>, ApiError> {
     let Some(tool_choice) = tool_choice else {
         return Ok(None);
     };
+    let tools_empty = shown_tools.is_empty();
     Ok(Some(match tool_choice {
         ResponseToolChoice::Value(ToolChoiceValue::None) => ChatToolChoice::None,
         ResponseToolChoice::Value(ToolChoiceValue::Auto) if tools_empty => ChatToolChoice::None,
@@ -351,7 +362,7 @@ fn normalize_tool_choice(
                 );
             }
             ChatToolChoice::Function {
-                name: tool_names.resolve_choice(name, tools)?,
+                name: tool_names.resolve_choice(name, shown_tools)?,
             }
         }
         ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
@@ -379,15 +390,22 @@ fn echo_tool_choice(tool_context: &ResolvedToolContext) -> ResponseToolChoice {
     }
 }
 
+/// Request input lowered into chat messages.
+struct ConvertedInput {
+    messages: Vec<ChatMessage>,
+    /// Whether generation should continue the final assistant message
+    /// (Anthropic-style partial completion), mirroring
+    /// `should_continue_final_message` in the Python frontend.
+    continue_final: bool,
+    /// Tools loaded by `tool_search_output` items, in input order.
+    loaded_tools: Vec<ResponsesTool>,
+}
+
 /// Convert the request input into chat messages.
-///
-/// Returns the messages and whether generation should continue the final
-/// assistant message (Anthropic-style partial completion), mirroring
-/// `should_continue_final_message` in the Python frontend.
 fn convert_input(
     instructions: &Option<String>,
     input: ResponsesInput,
-) -> Result<(Vec<ChatMessage>, bool), ApiError> {
+) -> Result<ConvertedInput, ApiError> {
     let mut messages = Vec::new();
     if let Some(instructions) = instructions
         && !instructions.is_empty()
@@ -398,7 +416,11 @@ fn convert_input(
     let items = match input {
         ResponsesInput::Text(text) => {
             messages.push(ChatMessage::user(text));
-            return Ok((messages, false));
+            return Ok(ConvertedInput {
+                messages,
+                continue_final: false,
+                loaded_tools: Vec::new(),
+            });
         }
         ResponsesInput::Items(items) => items,
     };
@@ -406,6 +428,7 @@ fn convert_input(
     let continue_final = should_continue_final_message(&items);
 
     let mut assistant = AssistantTurn::default();
+    let mut loaded_tools = Vec::new();
     for item in items {
         match item {
             ResponseInputItem::Message(message) => match message.role {
@@ -447,6 +470,43 @@ fn convert_input(
                     output.call_id,
                 ));
             }
+            ResponseInputItem::ToolSearchCall(call) => {
+                reject_server_tool_search(call.execution)?;
+                assistant.push_block(AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: call.call_id,
+                    name: TOOL_SEARCH_NAME.to_string(),
+                    arguments: tool_search_arguments(call.arguments),
+                }));
+            }
+            ResponseInputItem::ToolSearchOutput(output) => {
+                reject_server_tool_search(output.execution)?;
+                assistant.flush(&mut messages);
+                // The result references the loaded tools by the names the
+                // model calls; the renderer lists their definitions.
+                let references = output
+                    .tools
+                    .iter()
+                    .flat_map(|tool| match tool {
+                        ResponsesTool::Function(function) => vec![function.name.clone()],
+                        ResponsesTool::Namespace(namespace) => namespace
+                            .tools
+                            .iter()
+                            .map(|NamespacedTool::Function(function)| {
+                                ToolIdentity {
+                                    namespace: Some(&namespace.name),
+                                    name: &function.name,
+                                }
+                                .flat_name()
+                                .into_owned()
+                            })
+                            .collect(),
+                        ResponsesTool::ToolSearch(_) => vec![],
+                    })
+                    .map(ChatContentPart::tool_reference)
+                    .collect::<Vec<_>>();
+                messages.push(ChatMessage::tool_response(references, output.call_id));
+                loaded_tools.extend(output.tools);
+            }
             ResponseInputItem::Reasoning(reasoning) => {
                 if reasoning.encrypted_content.is_some() {
                     bail_invalid_request!(
@@ -479,7 +539,33 @@ fn convert_input(
         );
     }
 
-    Ok((messages, continue_final))
+    Ok(ConvertedInput {
+        messages,
+        continue_final,
+        loaded_tools,
+    })
+}
+
+/// Reject a tool search item executed by the server: this frontend executes
+/// no tools, so only client-executed tool search is supported.
+fn reject_server_tool_search(execution: Option<ToolSearchExecution>) -> Result<(), ApiError> {
+    if execution == Some(ToolSearchExecution::Server) {
+        bail_invalid_request!(
+            param = "input",
+            "Server-executed tool search is not supported; only client-executed tool search is."
+        );
+    }
+    Ok(())
+}
+
+/// The `tool_search` call arguments as the JSON text of a tool call, like
+/// Python's `tool_search_call_arguments`: a string is kept as is.
+fn tool_search_arguments(arguments: Value) -> String {
+    match arguments {
+        Value::String(arguments) => arguments,
+        Value::Null => "{}".to_string(),
+        arguments => arguments.to_string(),
+    }
 }
 
 /// Convert message content into internal chat content.
@@ -794,6 +880,7 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{Value, json};
     use vllm_chat::{ChatTokenUsage, ChatTool};
     use vllm_llm::TokenUsage;
@@ -806,8 +893,7 @@ mod tests {
         let tool_choice = serde_json::from_value(json!("auto")).unwrap();
 
         assert_eq!(
-            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default(), true)
-                .unwrap(),
+            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default()).unwrap(),
             Some(ChatToolChoice::None)
         );
     }
@@ -880,6 +966,232 @@ mod tests {
         );
     }
 
+    /// A Codex-shaped client tool search turn (the shapes of Python's
+    /// `TestClientToolSearch`): the search tool is a `tool_search` function,
+    /// the call is an assistant tool call, and the output references the
+    /// loaded tools, which join the request tools as deferred ones.
+    #[test]
+    fn tool_search_items_lower_to_a_call_and_tool_references() {
+        let get_pr_diff = json!({
+            "type": "function",
+            "name": "get_pr_diff",
+            "description": "Fetch a pull request diff.",
+            "defer_loading": true,
+            "parameters": {"type": "object", "properties": {"pr_number": {"type": "integer"}}}
+        });
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": [
+                {"role": "user", "content": "diff of PR 1"},
+                {
+                    "type": "tool_search_call",
+                    "id": "tsc_1",
+                    "call_id": "call_ts1",
+                    "execution": "client",
+                    "status": "completed",
+                    "arguments": {"query": "pull request diff"}
+                },
+                {
+                    "type": "tool_search_output",
+                    "id": "tso_1",
+                    "call_id": "call_ts1",
+                    "execution": "client",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "mcp__github",
+                            "description": "GitHub.",
+                            "tools": [get_pr_diff]
+                        },
+                        {"type": "function", "name": "lookup"}
+                    ]
+                }
+            ],
+            "tools": [
+                {
+                    "type": "tool_search",
+                    "execution": "client",
+                    "description": "Search deferred tools.",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+                },
+                {"type": "function", "name": "lookup"}
+            ]
+        }))
+        .expect("deserialize request");
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+
+        let prepared = prepare_responses_request(request, &served, Default::default())
+            .expect("prepare request");
+
+        let tools = prepared
+            .chat_request
+            .tools()
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.defer_loading))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tools,
+            [
+                ("tool_search", None),
+                ("lookup", None),
+                ("mcp__github__get_pr_diff", Some(true)),
+            ]
+        );
+        assert_eq!(
+            prepared.chat_request.tool("tool_search").unwrap().description.as_deref(),
+            Some("Search deferred tools.")
+        );
+        assert_eq!(
+            prepared.chat_request.messages[1..],
+            [
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call_ts1".to_string(),
+                        name: "tool_search".to_string(),
+                        arguments: r#"{"query":"pull request diff"}"#.to_string(),
+                    }
+                )]),
+                ChatMessage::tool_response(
+                    vec![
+                        ChatContentPart::tool_reference("mcp__github__get_pr_diff"),
+                        ChatContentPart::tool_reference("lookup"),
+                    ],
+                    "call_ts1",
+                ),
+            ]
+        );
+        assert!(prepared.tool_names.is_tool_search("tool_search"));
+        assert_eq!(
+            prepared.tool_names.decode("mcp__github__get_pr_diff"),
+            ToolIdentity {
+                namespace: Some("mcp__github"),
+                name: "get_pr_diff",
+            }
+        );
+    }
+
+    /// Codex review regressions: a named choice may select a loaded tool, by
+    /// its name or its namespace-local name (a tool two searches returned is
+    /// one tool), and a loaded tool whose flat name repeats a request tool
+    /// keeps the request tool's identity.
+    #[test]
+    fn loaded_tools_are_choosable_and_keep_first_identities() {
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+        let request = |choice: &str| -> ResponsesRequest {
+            serde_json::from_value(json!({
+                "input": [
+                    {"role": "user", "content": "hi"},
+                    {"type": "tool_search_call", "call_id": "call_ts1", "execution": "client",
+                     "arguments": {}},
+                    {"type": "tool_search_output", "call_id": "call_ts1", "execution": "client",
+                     "tools": [
+                        {"type": "function", "name": "lookup"},
+                        {"type": "namespace", "name": "a", "description": "",
+                         "tools": [{"type": "function", "name": "b__c"}]},
+                        {"type": "namespace", "name": "mcp__github", "description": "",
+                         "tools": [{"type": "function", "name": "get_pr_diff"}]}
+                     ]},
+                    // A second search returning the same tool is no ambiguity.
+                    {"type": "tool_search_call", "call_id": "call_ts2", "execution": "client",
+                     "arguments": {}},
+                    {"type": "tool_search_output", "call_id": "call_ts2", "execution": "client",
+                     "tools": [
+                        {"type": "namespace", "name": "mcp__github", "description": "",
+                         "tools": [{"type": "function", "name": "get_pr_diff"}]}
+                     ]}
+                ],
+                "tools": [
+                    {"type": "tool_search", "execution": "client"},
+                    {"type": "function", "name": "a__b__c"}
+                ],
+                "tool_choice": {"type": "function", "name": choice}
+            }))
+            .expect("deserialize request")
+        };
+
+        for (choice, resolved) in [
+            ("lookup", "lookup"),
+            ("get_pr_diff", "mcp__github__get_pr_diff"),
+        ] {
+            let prepared = prepare_responses_request(request(choice), &served, Default::default())
+                .expect("prepare request");
+            assert_eq!(
+                prepared.chat_request.tool_context.tool_choice,
+                ChatToolChoice::Function {
+                    name: resolved.to_string()
+                }
+            );
+            assert_eq!(
+                prepared.tool_names.decode("a__b__c"),
+                ToolIdentity {
+                    namespace: None,
+                    name: "a__b__c",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn server_tool_search_is_rejected() {
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+        let call = json!({
+            "type": "tool_search_call", "call_id": "call_ts1", "execution": "server", "arguments": {}
+        });
+        let output = json!({
+            "type": "tool_search_output", "call_id": "call_ts1", "execution": "server", "tools": []
+        });
+        let nested_search = json!({
+            "type": "tool_search_output", "call_id": "call_ts1", "execution": "client",
+            "tools": [{"type": "tool_search", "execution": "client"}]
+        });
+        for (tools, item, expected) in [
+            (
+                json!([{"type": "tool_search"}]),
+                None,
+                expect![
+                    "Only client-executed tool search is supported; set `execution` to \"client\"."
+                ],
+            ),
+            (
+                json!([]),
+                Some(call),
+                expect![
+                    "Server-executed tool search is not supported; only client-executed tool search is."
+                ],
+            ),
+            (
+                json!([]),
+                Some(output),
+                expect![
+                    "Server-executed tool search is not supported; only client-executed tool search is."
+                ],
+            ),
+            (
+                json!([]),
+                Some(nested_search),
+                expect!["tool_search_output can load only function and namespace tools."],
+            ),
+        ] {
+            let mut input = vec![json!({"role": "user", "content": "hi"})];
+            input.extend(item);
+            let request = serde_json::from_value(json!({"input": input, "tools": tools}))
+                .expect("deserialize request");
+            let error =
+                prepare_responses_request(request, &served, Default::default()).unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+            expected.assert_eq(&error.to_error_response().error.message);
+        }
+    }
+
     #[test]
     fn usage_preserves_reasoning_and_prompt_cache_token_counts() {
         let usage = build_usage(&ChatTokenUsage {
@@ -941,7 +1253,8 @@ mod tests {
         ]))
         .expect("deserialize Responses input");
 
-        let (messages, _) = convert_input(&None, input).expect("convert Responses input");
+        let ConvertedInput { messages, .. } =
+            convert_input(&None, input).expect("convert Responses input");
         assert_eq!(
             messages[1..],
             [
