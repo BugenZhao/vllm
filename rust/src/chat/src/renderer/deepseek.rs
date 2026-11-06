@@ -20,7 +20,9 @@ use super::MediaPartSource;
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::reasoning::ReasoningControl;
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
+use crate::request::{
+    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
+};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
@@ -107,7 +109,16 @@ pub(super) fn render_request_with_media_order(
         ThinkingMode::Chat
     };
     let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
-    let request_tools = request.initial_tools();
+    // V4 has no turn to list tools later, so the tools that tool search loaded
+    // are listed up front with the request's; V4.1 lists them where they were
+    // loaded (`write_updated_tool_schemas`).
+    let request_tools: Cow<'_, [ChatTool]> = match dialect {
+        DsDialect::V4 if !request.loaded_tools().is_empty() => {
+            Cow::Owned([request.initial_tools(), request.loaded_tools()].concat())
+        }
+        _ => Cow::Borrowed(request.initial_tools()),
+    };
+    let request_tools = request_tools.as_ref();
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
@@ -115,9 +126,15 @@ pub(super) fn render_request_with_media_order(
     if dialect == DsDialect::V41 {
         reject_image_placeholder_text(&request.messages)?;
         // As deepseek-recipe: V4.1 lists deferred tools only once a tool
-        // search result references them, so at least one tool, request-level
-        // or message-scoped, must be listed.
-        if !request.tools().is_empty() && request.tools().iter().all(is_deferred) {
+        // search result references them, so at least one declared tool,
+        // request-level or message-scoped, must be listed to search with.
+        // Loaded tools were found already, and `tool_choice: none` calls none.
+        let tools = request.tools();
+        let declared = &tools[..tools.len() - request.loaded_tools().len()];
+        if !matches!(request.tool_choice(), ChatToolChoice::None)
+            && !declared.is_empty()
+            && declared.iter().all(is_deferred)
+        {
             return Err(Error::AllToolsDeferred);
         }
     }

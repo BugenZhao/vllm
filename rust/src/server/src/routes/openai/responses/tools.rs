@@ -9,17 +9,25 @@
 //! each namespaced function as one flat `<namespace>__<name>` function tool,
 //! and a call of that flat name is reported with the function name and its
 //! namespace. The flat spelling is defined only by [`ToolIdentity::flat_name`].
+//!
+//! A client-executed `tool_search` tool is shown as a `tool_search` function,
+//! and the tools a `tool_search_output` input item loaded join the request's
+//! tools as deferred ones (`defer_loading`), so renderers list them where the
+//! search result references them.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools as _;
 use vllm_chat::ChatTool;
 
-use super::types::{NamespacedTool, ResponsesTool};
+use super::types::{NamespacedTool, ResponsesTool, ToolSearchExecution, ToolSearchTool};
 use crate::error::{ApiError, bail_invalid_request};
 
 const NAMESPACE_TOOL_SEPARATOR: &str = "__";
+
+/// The function name the model calls a client-executed tool search by.
+pub(super) const TOOL_SEARCH_NAME: &str = "tool_search";
 
 /// A function tool as the client names it: a namespace tool's function
 /// carries its namespace.
@@ -49,36 +57,73 @@ pub(crate) struct ResponsesToolNames {
     /// Flat name of each namespaced function -> byte length of its namespace.
     /// Like Python, a later function with the same flat name wins.
     namespaced: HashMap<String, usize>,
+    /// Whether the request declares a client-executed `tool_search` tool,
+    /// whose calls are reported as `tool_search_call` items.
+    client_tool_search: bool,
 }
 
 impl ResponsesToolNames {
     /// Convert the request tools to the function tools the model is shown, in
-    /// request order, together with the names to map calls back.
-    pub(super) fn convert(tools: &[ResponsesTool]) -> (Vec<ChatTool>, Self) {
-        let mut chat_tools = Vec::with_capacity(tools.len());
-        let mut namespaced = HashMap::new();
+    /// request order, and the tools loaded by tool search (`loaded`, in input
+    /// order) to deferred ones, together with the names to map calls back. A
+    /// loaded tool whose name is already shown is skipped, keeping the first
+    /// definition and its identity, as Python merges repeated search results.
+    pub(super) fn convert(
+        tools: &[ResponsesTool],
+        loaded: &[ResponsesTool],
+    ) -> Result<ConvertedTools, ApiError> {
+        let mut names = Self::default();
+        let mut request_tools = Vec::with_capacity(tools.len());
         for tool in tools {
             match tool {
-                ResponsesTool::Function(function) => {
-                    chat_tools.push(ChatTool::from(function.clone()));
+                ResponsesTool::ToolSearch(tool_search) => {
+                    request_tools.push(tool_search_function(tool_search)?);
+                    names.client_tool_search = true;
                 }
-                ResponsesTool::Namespace(namespace) => {
-                    for NamespacedTool::Function(function) in &namespace.tools {
-                        let identity = ToolIdentity {
-                            namespace: Some(&namespace.name),
-                            name: &function.name,
-                        };
-                        let flat_name = identity.flat_name().into_owned();
-                        namespaced.insert(flat_name.clone(), namespace.name.len());
-                        chat_tools.push(ChatTool {
-                            name: flat_name,
-                            ..ChatTool::from(function.clone())
-                        });
+                tool => {
+                    for (chat_tool, namespace_len) in flatten(tool) {
+                        names.record(&chat_tool, namespace_len);
+                        request_tools.push(chat_tool);
                     }
                 }
             }
         }
-        (chat_tools, Self { namespaced })
+        let mut shown = request_tools.iter().map(|tool| tool.name.clone()).collect::<HashSet<_>>();
+        let mut loaded_tools = Vec::new();
+        for tool in loaded {
+            if matches!(tool, ResponsesTool::ToolSearch(_)) {
+                bail_invalid_request!(
+                    param = "input",
+                    "tool_search_output can load only function and namespace tools."
+                );
+            }
+            for (chat_tool, namespace_len) in flatten(tool) {
+                if shown.insert(chat_tool.name.clone()) {
+                    names.record(&chat_tool, namespace_len);
+                    loaded_tools.push(ChatTool {
+                        defer_loading: Some(true),
+                        ..chat_tool
+                    });
+                }
+            }
+        }
+        Ok(ConvertedTools {
+            request_tools,
+            loaded_tools,
+            names,
+        })
+    }
+
+    /// Record the namespace of a shown namespaced function.
+    fn record(&mut self, tool: &ChatTool, namespace_len: Option<usize>) {
+        if let Some(namespace_len) = namespace_len {
+            self.namespaced.insert(tool.name.clone(), namespace_len);
+        }
+    }
+
+    /// Whether a called tool name is the client-executed tool search.
+    pub(super) fn is_tool_search(&self, called_name: &str) -> bool {
+        self.client_tool_search && called_name == TOOL_SEARCH_NAME
     }
 
     /// The identity of a called tool name. Names of other tools pass through
@@ -96,7 +141,8 @@ impl ResponsesToolNames {
         }
     }
 
-    /// Resolve a named tool choice to the name the model sees.
+    /// Resolve a named tool choice to the name the model sees, among the
+    /// tools it is shown (`shown`, deduplicated).
     ///
     /// An exact tool name (including a flat `<namespace>__<name>`) wins;
     /// otherwise a function name defined in exactly one namespace selects
@@ -104,35 +150,18 @@ impl ResponsesToolNames {
     pub(super) fn resolve_choice(
         &self,
         name: String,
-        tools: &[ResponsesTool],
+        shown: &[ChatTool],
     ) -> Result<String, ApiError> {
-        let is_exact = self.namespaced.contains_key(&name)
-            || tools.iter().any(
-                |tool| matches!(tool, ResponsesTool::Function(function) if function.name == name),
-            );
-        if is_exact {
+        if shown.iter().any(|tool| tool.name == name) {
             return Ok(name);
         }
-        let mut candidates = tools
+        let mut candidates = shown
             .iter()
-            .filter_map(|tool| match tool {
-                ResponsesTool::Namespace(namespace) => Some(namespace),
-                ResponsesTool::Function(_) => None,
+            .filter(|tool| {
+                let identity = self.decode(&tool.name);
+                identity.namespace.is_some() && identity.name == name
             })
-            .flat_map(|namespace| {
-                namespace
-                    .tools
-                    .iter()
-                    .filter(|NamespacedTool::Function(function)| function.name == name)
-                    .map(|_| {
-                        ToolIdentity {
-                            namespace: Some(&namespace.name),
-                            name: &name,
-                        }
-                        .flat_name()
-                        .into_owned()
-                    })
-            })
+            .map(|tool| tool.name.clone())
             .collect_vec();
         match candidates.len() {
             0 => bail_invalid_request!(
@@ -148,6 +177,65 @@ impl ResponsesToolNames {
             ),
         }
     }
+}
+
+/// The function tools of a Responses request, as the model is shown them.
+pub(super) struct ConvertedTools {
+    /// The request's tools, in request order.
+    pub request_tools: Vec<ChatTool>,
+    /// The tools that tool search results in the input loaded, deferred.
+    pub loaded_tools: Vec<ChatTool>,
+    pub names: ResponsesToolNames,
+}
+
+/// The flat function tools of one function or namespace tool, each with the
+/// byte length of its namespace when it has one.
+fn flatten(tool: &ResponsesTool) -> Vec<(ChatTool, Option<usize>)> {
+    match tool {
+        ResponsesTool::Function(function) => vec![(ChatTool::from(function.clone()), None)],
+        ResponsesTool::Namespace(namespace) => namespace
+            .tools
+            .iter()
+            .map(|NamespacedTool::Function(function)| {
+                let flat_name = ToolIdentity {
+                    namespace: Some(&namespace.name),
+                    name: &function.name,
+                }
+                .flat_name()
+                .into_owned();
+                let tool = ChatTool {
+                    name: flat_name,
+                    ..ChatTool::from(function.clone())
+                };
+                (tool, Some(namespace.name.len()))
+            })
+            .collect(),
+        ResponsesTool::ToolSearch(_) => {
+            unreachable!("tool search tools are converted before flattening")
+        }
+    }
+}
+
+/// The function a client-executed tool search is shown to the model as, like
+/// Python's `build_model_tools`. Server-executed tool search is rejected: this
+/// frontend executes no tools.
+fn tool_search_function(tool_search: &ToolSearchTool) -> Result<ChatTool, ApiError> {
+    if tool_search.execution != Some(ToolSearchExecution::Client) {
+        bail_invalid_request!(
+            param = "tools",
+            "Only client-executed tool search is supported; set `execution` to \"client\"."
+        );
+    }
+    Ok(ChatTool {
+        name: TOOL_SEARCH_NAME.to_string(),
+        description: tool_search.description.clone(),
+        parameters: tool_search
+            .parameters
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+        strict: None,
+        defer_loading: None,
+    })
 }
 
 #[cfg(test)]
@@ -191,7 +279,7 @@ mod tests {
             }
         ]));
 
-        let (shown, _) = ResponsesToolNames::convert(&tools);
+        let shown = ResponsesToolNames::convert(&tools, &[]).unwrap().request_tools;
 
         let names = shown.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>();
         assert_eq!(names, ["lookup", "crm__get_contact"]);
@@ -216,10 +304,15 @@ mod tests {
 
     #[test]
     fn called_flat_names_resolve_to_the_namespaced_function() {
-        let (_, names) = ResponsesToolNames::convert(&request_tools(json!([
+        let names = ResponsesToolNames::convert(
+            &request_tools(json!([
             {"type": "function", "name": "lookup"},
             namespace("mcp__computer_use", &["get_app_state"]),
-        ])));
+            ])),
+            &[],
+        )
+        .unwrap()
+        .names;
 
         assert_eq!(
             names.decode("mcp__computer_use__get_app_state"),
@@ -243,8 +336,9 @@ mod tests {
             namespace("crm", &["get_contact", "lookup", "search"]),
             namespace("docs", &["search"]),
         ]));
-        let (_, names) = ResponsesToolNames::convert(&tools);
-        let resolve = |name: &str| names.resolve_choice(name.to_string(), &tools);
+        let converted = ResponsesToolNames::convert(&tools, &[]).unwrap();
+        let resolve =
+            |name: &str| converted.names.resolve_choice(name.to_string(), &converted.request_tools);
 
         assert_eq!(resolve("lookup").unwrap(), "lookup");
         assert_eq!(resolve("crm__lookup").unwrap(), "crm__lookup");

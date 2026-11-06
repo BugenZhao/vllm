@@ -1994,9 +1994,14 @@ async fn render_chat_accepts_assistant_turn_without_content() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
+/// A GLM-5 (`glm5_next`) chat backend over a fake tokenizer that knows the
+/// renderer's control tokens, for render-route tests. The returned directory
+/// holds the model files and must outlive the backend.
+async fn glm5_next_render_backend() -> (
+    tempfile::TempDir,
+    Arc<vllm_chat::HfChatBackend>,
+    TestTokenizer,
+) {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("config.json"),
@@ -2030,6 +2035,13 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
         )
         .unwrap(),
     );
+    (dir, backend, tokenizer)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
+    let (_dir, backend, tokenizer) = glm5_next_render_backend().await;
     for exclude in [false, true] {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),

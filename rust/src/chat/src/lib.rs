@@ -231,7 +231,7 @@ impl ChatRequestProcessor {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
         if self.exclude_tools_when_tool_choice_none {
-            request.tool_context.exclude_initial_tools_if_none();
+            request.tool_context.exclude_initial_tools_if_none(&request.messages);
         }
         let renderer = self.backend.chat_renderer();
         if request.chat_options.chat_template.is_some() && !renderer.renders_request_chat_template()
