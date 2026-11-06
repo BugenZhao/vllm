@@ -8,20 +8,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust `llm` facade.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("generate request `{request_id}` has an empty prompt_token_ids")]
-    EmptyPromptTokenIds { request_id: String },
+    #[error("generate request has an empty prompt_token_ids")]
+    EmptyPromptTokenIds,
     #[error("engine-core error")]
     EngineCoreClient(#[from] vllm_engine_core_client::Error),
-    #[error(
-        "sampling mask for request `{request_id}` has {row_count} rows for {token_count} generated tokens"
-    )]
+    #[error("sampling mask has {row_count} rows for {token_count} generated tokens")]
     SamplingMaskTokenCountMismatch {
-        request_id: String,
         token_count: usize,
         row_count: usize,
     },
-    #[error("routed experts for request `{request_id}` changed dtype or shape")]
-    RoutedExpertsShapeMismatch { request_id: String },
+    #[error("invalid auxiliary output rows")]
+    AuxOutputRows(#[from] vllm_engine_core_client::protocol::tensor::ArrayRowsError),
     /// The request uses a field this implementation does not carry out.
     #[error("`{field}` is not supported")]
     Unsupported { field: &'static str },
