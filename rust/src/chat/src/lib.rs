@@ -457,6 +457,11 @@ impl ChatLlm {
         self.text.model_id()
     }
 
+    /// Return the served model name that labels frontend metrics.
+    pub fn served_model_name(&self) -> &str {
+        self.text.served_model_name()
+    }
+
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
@@ -505,7 +510,7 @@ impl ChatLlm {
             prompt_text,
         } = self.processor.prepare(request, n, self.text.request_processor()).await?;
         METRICS.renderer.observe_request_render_duration(
-            self.text.served_model_name(),
+            self.served_model_name(),
             RenderRequestType::Chat,
             render_start.elapsed(),
         );
