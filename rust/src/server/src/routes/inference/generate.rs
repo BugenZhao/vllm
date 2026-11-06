@@ -97,7 +97,6 @@ pub async fn generate(
         engine_request_id = tracing::field::Empty,
     );
 
-    // Like Python, which would otherwise return empty text.
     if prepared.options.output_mode == GenerateOutputMode::Text
         && !state.chat.text().has_tokenizer()
     {
