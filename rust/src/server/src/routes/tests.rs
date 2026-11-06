@@ -50,7 +50,7 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{AdmissionLimits, EngineCoreLlm};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -5246,6 +5246,112 @@ async fn engine_request_errors_map_to_http_status() {
                 "{uri} {request}: {text}"
             );
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn admission_limits_reject_with_503_before_the_engine() {
+    // Like Python's `QueueOverflowError` and `MaxQueuedTokensError`, a request
+    // over a queue limit is a 503 on every generating route, streaming or not,
+    // and never reaches the engine.
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for (limits, message) in [
+        (
+            AdmissionLimits {
+                max_num_queued_reqs: Some(0),
+                ..Default::default()
+            },
+            "The engine is currently busy and cannot accept new requests.",
+        ),
+        (
+            AdmissionLimits {
+                max_num_queued_tokens: Some(0),
+                ..Default::default()
+            },
+            "The engine has reached its prefill token backlog limit.",
+        ),
+    ] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        // The engine only completes the handshake; an add request would fail
+        // the test by never being answered.
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-admission".to_vec(),
+            |_, _| boxed_test_future(async {}),
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(
+            test_llm(client).with_admission_limits(limits),
+            Arc::new(FakeChatBackend::new()),
+        );
+        let mut app = build_router_with_gates(
+            Arc::new(AppState::new(vec![model.to_string()], chat)),
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        );
+
+        for stream in [false, true] {
+            let cases = [
+                (
+                    "/v1/completions",
+                    json!({"model": model, "prompt": "hello", "stream": stream}),
+                ),
+                (
+                    "/v1/chat/completions",
+                    json!({"model": model, "stream": stream,
+                           "messages": [{"role": "user", "content": "hello"}]}),
+                ),
+                (
+                    "/inference/v1/generate",
+                    json!({"model": model, "token_ids": [11, 22], "stream": stream,
+                           "sampling_params": {"max_tokens": 2}}),
+                ),
+                (
+                    "/v1/responses",
+                    json!({"model": model, "input": "hello", "stream": stream}),
+                ),
+            ];
+            for (uri, request) in cases {
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from(request.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{uri} {request}"
+                );
+                let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+                let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+                assert!(
+                    text.contains("\"type\":\"ServiceUnavailableError\"")
+                        && text.contains("\"code\":503")
+                        && text.contains(message),
+                    "{uri} {request}: {text}"
+                );
+            }
+        }
+        engine_task.finish().await;
     }
 }
 

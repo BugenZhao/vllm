@@ -16,6 +16,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_metrics::METRICS;
 
+mod admission;
 mod error;
 mod inflight;
 mod log_stats;
@@ -23,6 +24,7 @@ mod output;
 mod request;
 mod request_metrics;
 
+pub use admission::AdmissionLimits;
 pub use error::{Error, Result};
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
@@ -32,6 +34,7 @@ pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
+use crate::admission::{Admission, AdmissionTicket};
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::{
@@ -127,6 +130,7 @@ pub struct EngineCoreLlm {
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    admission: Admission,
     /// Request metric handles per connected engine index, resolved at
     /// construction so the request families export zero-valued series before
     /// the first request.
@@ -156,6 +160,7 @@ impl EngineCoreLlm {
             supports_lora: client.ready_response().supports_lora,
             vllm_version: client.vllm_version().to_string(),
         };
+        let admission = Admission::new(client.model_name(), AdmissionLimits::default());
         Self {
             client,
             info,
@@ -163,6 +168,7 @@ impl EngineCoreLlm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            admission,
             request_metric_handles,
         }
     }
@@ -192,6 +198,13 @@ impl EngineCoreLlm {
     /// A request's own `stream_interval` can only raise it.
     pub fn with_stream_interval(mut self, stream_interval: NonZeroU32) -> Self {
         self.stream_interval = stream_interval;
+        self
+    }
+
+    /// Reject requests over the given queue limits with
+    /// [`Error::Unavailable`].
+    pub fn with_admission_limits(mut self, limits: AdmissionLimits) -> Self {
+        self.admission = Admission::new(self.client.model_name(), limits);
         self
     }
 
@@ -237,6 +250,8 @@ impl EngineCoreLlm {
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;
+        let mut admission_tickets =
+            self.admission.admit(n, prompt_token_ids.len() as u64)?.into_iter();
 
         if n == NonZeroU32::MIN {
             let stream = self
@@ -245,6 +260,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     None,
+                    admission_tickets.next().expect("one ticket per sample"),
                 )
                 .await?;
             return Ok(vec![stream]);
@@ -269,6 +285,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     Some(parallel_sampling.clone()),
+                    admission_tickets.next().expect("one ticket per sample"),
                 )
                 .await?,
             );
@@ -283,6 +300,7 @@ impl EngineCoreLlm {
         prompt_token_ids: &Arc<[u32]>,
         remote_prefill_cached_tokens: Option<usize>,
         parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+        admission_ticket: AdmissionTicket,
     ) -> Result<GenerateOutputStream> {
         let external_request_id = engine_request
             .external_req_id
@@ -299,7 +317,12 @@ impl EngineCoreLlm {
         let watermark_requested =
             (engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
-        let stream = self.client.call(engine_request).await?;
+        // The client's registry holds the ticket, so its counts follow engine
+        // outputs as they arrive, like Python's output processor, rather than
+        // how fast the caller reads the stream.
+        let stream = (self.client)
+            .call_with_lifecycle(engine_request, Some(Box::new(admission_ticket)))
+            .await?;
 
         let handles = (self.request_metric_handles.get(&stream.engine_index()))
             .expect("requests are routed only to connected engines")

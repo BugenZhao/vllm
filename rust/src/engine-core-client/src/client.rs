@@ -34,6 +34,7 @@ mod readiness;
 mod state;
 mod stream;
 
+pub use state::RequestLifecycle;
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
@@ -722,7 +723,18 @@ impl EngineCoreClient {
     /// tokens, and the terminal output is delivered immediately together with
     /// any held-back outputs. The stream still yields every raw output in
     /// order; batching only reduces how often the consuming task is woken.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+    pub async fn call(&self, req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+        self.call_with_lifecycle(req, None).await
+    }
+
+    /// Like [`Self::call`], tying `lifecycle` to the request's registration:
+    /// it observes each output as the client receives it and is dropped when
+    /// the request finishes or is aborted.
+    pub async fn call_with_lifecycle(
+        &self,
+        mut req: EngineCoreRequest,
+        lifecycle: Option<Box<dyn RequestLifecycle>>,
+    ) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         if req.block_hashes.is_none()
@@ -749,6 +761,7 @@ impl EngineCoreClient {
             lora_name,
             data_parallel_rank,
             stream_interval,
+            lifecycle,
         )?;
 
         // Construct the output stream first before actually sending the request to the engine.

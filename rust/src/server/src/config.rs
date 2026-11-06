@@ -19,6 +19,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_llm::AdmissionLimits;
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
@@ -389,6 +390,8 @@ pub struct Config {
     /// output after the first one. Requests can raise it with their own
     /// `stream_interval`.
     pub stream_interval: NonZeroU32,
+    /// Queue limits on unfinished requests; a request over one gets HTTP 503.
+    pub admission_limits: AdmissionLimits,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// What `system_fingerprint` reports on chat and completion responses.

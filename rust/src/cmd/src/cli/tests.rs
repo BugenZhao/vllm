@@ -8,8 +8,9 @@ use expect_test::expect;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
+    AdmissionLimits, Config, FingerprintMode, GenerationConfigMode, HttpListenerMode,
+    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
+    RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -244,6 +245,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
+                        max_num_queued_reqs: None,
+                        max_num_queued_tokens: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -730,6 +733,73 @@ fn serve_args_tool_strict_level_requires_xgrammar() {
     assert!(
         format!("{error:#}").contains("requires the xgrammar structured outputs backend"),
         "{error:#}"
+    );
+}
+
+#[test]
+fn queue_limits_reach_the_frontend_config() {
+    let limits = |queued_reqs: Option<u64>, queued_tokens: Option<u64>| AdmissionLimits {
+        max_num_queued_reqs: queued_reqs,
+        max_num_queued_tokens: queued_tokens,
+    };
+    let serve = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra))?;
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        Ok::<_, clap::Error>(
+            args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+                .admission_limits,
+        )
+    };
+
+    assert_eq!(serve(&[]).unwrap(), limits(None, None));
+    // Like Python, the token limit takes human-readable integers.
+    for (tokens, expected) in [("4096", 4096), ("2k", 2000), ("2K", 2048)] {
+        assert_eq!(
+            serve(&[
+                "--max-num-queued-reqs",
+                "8",
+                "--max-num-queued-tokens",
+                tokens
+            ])
+            .unwrap(),
+            limits(Some(8), Some(expected)),
+        );
+    }
+    for invalid in [
+        ["--max-num-queued-reqs", "-1"],
+        ["--max-num-queued-tokens", "-1"],
+        ["--max-num-queued-tokens", "lots"],
+    ] {
+        assert!(serve(&invalid).is_err(), "{invalid:?}");
+    }
+
+    // The Python supervisor sends the resolved integers.
+    let args_json = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-0.6B",
+        "max_num_queued_reqs": 8,
+        "max_num_queued_tokens": 2048,
+    });
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(
+        args.into_config().admission_limits,
+        limits(Some(8), Some(2048))
     );
 }
 
@@ -1935,6 +2005,8 @@ fn frontend_args_accept_json() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
+                        max_num_queued_reqs: None,
+                        max_num_queued_tokens: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -2868,6 +2940,8 @@ fn serve_args_accept_handshake_aliases() {
                         language_model_only: false,
                         max_logprobs: None,
                         stream_interval: 1,
+                        max_num_queued_reqs: None,
+                        max_num_queued_tokens: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -3181,6 +3255,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
+            admission_limits: AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: None,
+            },
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 log_outputs: OutputLogConfig {
@@ -3313,6 +3391,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
+            admission_limits: AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: None,
+            },
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 log_outputs: OutputLogConfig {
@@ -3558,6 +3640,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
+            admission_limits: AdmissionLimits {
+                max_num_queued_reqs: None,
+                max_num_queued_tokens: None,
+            },
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 log_outputs: OutputLogConfig {
