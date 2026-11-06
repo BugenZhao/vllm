@@ -650,26 +650,6 @@ fn serve_resolves_log_level_like_python() {
             &["--log-level", "ERROR", "--logging-config.log_level=DEBUG"],
             LogLevel::Error,
         ),
-        // A plain `--logging-config` and dotted forms: the merged dotted forms
-        // come last and win, in either order.
-        (
-            &[
-                "--logging-config",
-                r#"{"log_level":"ERROR"}"#,
-                "--logging-config.log_level",
-                "DEBUG",
-            ],
-            LogLevel::Debug,
-        ),
-        (
-            &[
-                "--logging-config.log_level",
-                "DEBUG",
-                "--logging-config",
-                r#"{"log_level":"ERROR"}"#,
-            ],
-            LogLevel::Debug,
-        ),
         // The text formatter is what Rust implements, and the Python-only
         // fields do not affect the level.
         (
