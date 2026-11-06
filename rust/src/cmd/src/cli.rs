@@ -24,7 +24,7 @@ use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_with::{DefaultOnNull, DisplayFromStr, OneOrMany, serde_as};
+use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
@@ -65,10 +65,20 @@ pub struct Cli {
 impl Cli {
     /// The level of the Rust frontend's own logs for this command.
     pub fn log_level(&self) -> LogLevel {
+        self.runtime()
+            .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
+    }
+
+    /// The `--logging-config` given to this command, if any.
+    pub fn logging_config(&self) -> Option<&LoggingConfig> {
+        self.runtime()?.logging_config.as_ref()
+    }
+
+    fn runtime(&self) -> Option<&SharedRuntimeArgs> {
         match &self.command {
-            Command::Serve(args) => args.runtime.effective_log_level(),
-            Command::Frontend(args) => args.runtime.effective_log_level(),
-            _ => LogLevel::from_env(),
+            Command::Serve(args) => Some(&args.runtime),
+            Command::Frontend(args) => Some(&args.runtime),
+            _ => None,
         }
     }
 
@@ -711,14 +721,13 @@ pub struct SharedRuntimeArgs {
     /// Python's level names (CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET; any
     /// case). Overrides `--logging-config.log_level` and `VLLM_LOGGING_LEVEL`.
     #[arg(long)]
-    #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
     pub log_level: Option<LogLevel>,
 
-    /// vLLM logging configuration as a JSON object. Only `log_level` is
-    /// implemented; a JSON formatter, a Python `dictConfig` file, or
-    /// `configure_logging: false` fail startup. The Python supervisor forwards
-    /// it only when a field other than the level is set.
+    /// vLLM logging configuration as a JSON object. The Rust frontend's own
+    /// logs honor `log_level` and the `text` formatter, and other formatters
+    /// fail startup; the remaining fields apply to Python logging only. The
+    /// Python supervisor sends the resolved `log_level` and `formatter`.
     ///
     /// The last occurrence wins, as in Python, where the merged dotted forms
     /// come after a plain `--logging-config`.
@@ -809,11 +818,18 @@ impl SharedRuntimeArgs {
             .unwrap_or_else(LogLevel::from_env)
     }
 
-    /// Return the logging config as JSON for managed Python engine forwarding.
+    /// Return the logging config as JSON for managed Python engine forwarding,
+    /// with the level resolved as for this frontend, or `None` when no logging
+    /// argument is given and the engine reads the env vars itself.
     pub fn logging_config_json(&self) -> Option<String> {
-        self.logging_config.as_ref().map(|config| {
-            serde_json::to_string(config).expect("logging config serialization should not fail")
-        })
+        if self.log_level.is_none() && self.logging_config.is_none() {
+            return None;
+        }
+        let config = LoggingConfig {
+            log_level: Some(self.effective_log_level()),
+            ..self.logging_config.clone().unwrap_or_default()
+        };
+        Some(serde_json::to_string(&config).expect("logging config serialization should not fail"))
     }
 
     /// Return the per-modality limits as JSON for managed Python engine
@@ -1417,11 +1433,6 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
-        }
-        if let Some(log_level) = self.runtime.log_level {
-            managed_engine
-                .python_args
-                .extend(["--log-level".to_string(), log_level.to_string()]);
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),

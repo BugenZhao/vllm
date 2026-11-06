@@ -9,7 +9,7 @@ import time
 import weakref
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -362,16 +362,22 @@ class RustFrontendProcessManager:
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
 
-        # The logging arguments default to argparse.SUPPRESS, so they are not
-        # among the non-default args. The Rust frontend takes the resolved level
-        # and rejects the rest, which it does not implement.
+        # `--log-level`, `--logging-config` and `--log-config-file` default to
+        # argparse.SUPPRESS, so get_non_default_args() never sees them;
+        # cli/main.py has already merged them into `args.logging_config`.
         if logging_config := getattr(args, "logging_config", None):
-            from vllm.config.logging import LoggingConfig
-
-            args_dict["log_level"] = logging_config.log_level
-            default = LoggingConfig()
-            if replace(logging_config, log_level=default.log_level) != default:
-                args_dict["logging_config"] = asdict(logging_config)
+            args_dict["logging_config"] = {
+                "log_level": logging_config.log_level,
+                "formatter": logging_config.formatter,
+            }
+            if (
+                not logging_config.configure_logging
+                or logging_config.pylogging_config_file
+            ):
+                logger.warning(
+                    "configure_logging and pylogging_config_file apply to "
+                    "Python logging only, not to the Rust frontend's logs."
+                )
 
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])

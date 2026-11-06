@@ -8,6 +8,7 @@ pub mod timing;
 use std::str::FromStr;
 use std::{env, fmt, process};
 
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 use time::UtcOffset;
 use time::macros::format_description;
 use tracing::level_filters::LevelFilter;
@@ -34,7 +35,7 @@ const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
 
 /// Python's logging level names, as `--log-level`, `--logging-config` and
 /// `VLLM_LOGGING_LEVEL` spell them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub enum LogLevel {
     Critical,
     Error,
@@ -100,42 +101,38 @@ impl From<LogLevel> for LevelFilter {
             LogLevel::Warning => LevelFilter::WARN,
             LogLevel::Info => LevelFilter::INFO,
             LogLevel::Debug => LevelFilter::DEBUG,
-            LogLevel::Notset => LevelFilter::TRACE,
+            // Python's `vllm` logger at NOTSET defers to the root logger,
+            // which is at WARNING unless something else configures it.
+            LogLevel::Notset => LevelFilter::WARN,
         }
     }
 }
 
-/// Install the process-wide vLLM-style tracing subscriber at the
-/// `VLLM_LOGGING_LEVEL` level.
-pub fn init_tracing(process_label: &str) {
-    init_tracing_with_level(process_label, LogLevel::from_env());
-}
-
 /// Install the process-wide vLLM-style tracing subscriber at `log_level`.
-pub fn init_tracing_with_level(process_label: &str, log_level: LogLevel) {
+pub fn init_tracing(process_label: &str, log_level: LogLevel) {
     let _ = tracing_subscriber::registry()
         .with(vllm_fmt_layer(process_label, log_level))
         .try_init();
 }
 
-/// Install the vLLM-style tracing subscriber at the `VLLM_LOGGING_LEVEL` level
-/// on the current thread until the guard drops, for events emitted before the
-/// process-wide level is known.
-pub fn set_default_tracing(process_label: &str) -> DefaultGuard {
+/// Install the vLLM-style tracing subscriber at `log_level` on the current
+/// thread until the guard drops, for events emitted before the process-wide
+/// level is known.
+pub fn set_default_tracing(process_label: &str, log_level: LogLevel) -> DefaultGuard {
     tracing_subscriber::registry()
-        .with(vllm_fmt_layer(process_label, LogLevel::from_env()))
+        .with(vllm_fmt_layer(process_label, log_level))
         .set_default()
 }
 
 /// Install the process-wide vLLM-style tracing subscriber, with an
 /// additional layer (e.g. the multimodal preprocessing timing collector).
-pub fn init_tracing_with<L>(process_label: &str, layer: L)
+pub fn init_tracing_with<L>(process_label: &str, log_level: LogLevel, layer: L)
 where
     L: Layer<Registry> + Send + Sync + 'static,
 {
     let _ = tracing_subscriber::registry()
         .with(layer)
-        .with(vllm_fmt_layer(process_label, LogLevel::from_env()))
+        .with(vllm_fmt_layer(process_label, log_level))
         .try_init();
 }
 
@@ -411,6 +408,13 @@ mod tests {
         let filter = build_targets_filter(LogLevel::Debug, Some("warn,hyper=info"));
 
         assert_eq!(filter.to_string(), "hyper=info,warn");
+    }
+
+    #[test]
+    fn notset_level_matches_python_root_logger_default() {
+        let filter = build_targets_filter(LogLevel::Notset, None);
+
+        assert_eq!(filter.to_string(), "warn");
     }
 
     #[test]

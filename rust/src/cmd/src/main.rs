@@ -12,6 +12,7 @@ use thiserror_ext::AsReport as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
+use vllm_tracing::LogLevel;
 
 use crate::cli::{BenchCommand, Cli, Command, frontend_ipc_handshake_address};
 
@@ -91,10 +92,20 @@ fn main() -> ExitCode {
         };
     // Parsing warns about no-op arguments before `--log-level` is known.
     let cli = {
-        let _guard = vllm_tracing::set_default_tracing(process_label);
+        let _guard = vllm_tracing::set_default_tracing(process_label, LogLevel::from_env());
         Cli::parse()
     };
-    vllm_tracing::init_tracing_with_level(process_label, cli.log_level());
+    vllm_tracing::init_tracing(process_label, cli.log_level());
+    let python_only = cli.logging_config().map(|config| config.python_only_fields());
+    if let Some(fields) = python_only
+        && !fields.is_empty()
+    {
+        warn!(
+            "--logging-config fields {} apply to Python logging only, not to the Rust frontend's \
+             logs",
+            fields.join(", ")
+        );
+    }
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

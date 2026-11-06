@@ -578,29 +578,37 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("cli_args", "level", "forwarded"),
+    ("cli_args", "level", "formatter", "warns"),
     [
-        ([], envs.VLLM_LOGGING_LEVEL, None),
-        (["--log-level", "DEBUG"], "DEBUG", None),
-        (["--logging-config.log_level", "WARNING"], "WARNING", None),
+        ([], envs.VLLM_LOGGING_LEVEL, "text", False),
+        (["--log-level", "DEBUG"], "DEBUG", "text", False),
+        (["--logging-config.log_level", "WARNING"], "WARNING", "text", False),
         (
             ["--log-level", "DEBUG", "--logging-config.formatter", "json"],
             "DEBUG",
-            {"formatter": "json"},
+            "json",
+            False,
         ),
         (
             ["--log-config-file", "/tmp/logging.json"],
             envs.VLLM_LOGGING_LEVEL,
-            {"pylogging_config_file": "/tmp/logging.json"},
+            "text",
+            True,
+        ),
+        (
+            ["--logging-config.configure_logging=false"],
+            envs.VLLM_LOGGING_LEVEL,
+            "text",
+            True,
         ),
     ],
 )
 def test_rust_frontend_receives_resolved_logging_config(
-    monkeypatch, cli_args, level, forwarded
+    monkeypatch, cli_args, level, formatter, warns
 ):
-    """Logging arguments are not among the non-default args. The resolved level
-    reaches --args-json as log_level, and whatever else is set as
-    logging_config, which the frontend rejects."""
+    """Logging arguments are not among the non-default args. The resolved
+    level and formatter reach --args-json as logging_config; the fields that
+    configure Python logging only are warned about."""
     import subprocess as subprocess_mod
 
     from vllm.entrypoints.common.cli_args import make_arg_parser
@@ -635,6 +643,7 @@ def test_rust_frontend_receives_resolved_logging_config(
     output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        warning = patch("vllm.v1.utils.logger.warning").start()
         RustFrontendProcessManager(
             binary_path="/nonexistent/vllm-rs",
             sock=sock,
@@ -646,15 +655,13 @@ def test_rust_frontend_receives_resolved_logging_config(
             data_parallel_size=1,
         )
     finally:
+        patch.stopall()
         sock.close()
 
     [(cmd, _)] = popen_calls
     args_json = json.loads(cmd[cmd.index("--args-json") + 1])
-    assert args_json["log_level"] == level
-    if forwarded is None:
-        assert "logging_config" not in args_json
-    else:
-        assert forwarded.items() <= args_json["logging_config"].items()
+    assert args_json["logging_config"] == {"log_level": level, "formatter": formatter}
+    assert warning.called == warns
 
 
 def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):

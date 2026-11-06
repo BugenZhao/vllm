@@ -576,12 +576,12 @@ fn serve_args_forward_log_level_to_managed_engine() {
         panic!("expected serve args");
     };
 
-    // Python's `--log-level` choices are upper case only.
+    // Python's level choices are upper case only.
     let config = args.to_managed_engine_config(5555, &topology(&args), None);
     expect![[r#"
         [
-            "--log-level",
-            "DEBUG",
+            "--logging-config",
+            "{\"log_level\":\"DEBUG\"}",
             "--reasoning-parser",
             "qwen3",
         ]
@@ -670,7 +670,8 @@ fn serve_resolves_log_level_like_python() {
             ],
             LogLevel::Debug,
         ),
-        // Explicit defaults of the other fields are what Rust does anyway.
+        // The text formatter is what Rust implements, and the Python-only
+        // fields do not affect the level.
         (
             &[
                 "--logging-config.log_level",
@@ -696,10 +697,10 @@ fn serve_resolves_log_level_like_python() {
     }
 }
 
-/// The managed engine gets the logging arguments as given and resolves them
-/// itself. Python's defaults for the other fields come from env vars
-/// (`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_CONFIG_PATH`), so explicit values
-/// still reach it, with `null` kept apart from omission.
+/// The managed engine gets the logging config with the level this frontend
+/// resolved. Python's defaults for the fields only Python logging reads come
+/// from env vars (`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_CONFIG_PATH`), so
+/// they are forwarded as given, with `null` kept apart from omission.
 #[test]
 fn serve_forwards_logging_config_to_managed_engine() {
     let cli = Cli::try_parse_from([
@@ -709,13 +710,17 @@ fn serve_forwards_logging_config_to_managed_engine() {
         "--logging-config.log_level",
         "debug",
         "--logging-config.configure_logging",
-        "true",
+        "false",
         "--logging-config.pylogging_config_file",
         "null",
         "--log-level",
         "ERROR",
     ])
     .unwrap();
+    assert_eq!(
+        cli.logging_config().unwrap().python_only_fields(),
+        ["configure_logging"]
+    );
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
@@ -724,9 +729,7 @@ fn serve_forwards_logging_config_to_managed_engine() {
     expect![[r#"
         [
             "--logging-config",
-            "{\"log_level\":\"DEBUG\",\"configure_logging\":true,\"pylogging_config_file\":null}",
-            "--log-level",
-            "ERROR",
+            "{\"log_level\":\"ERROR\",\"configure_logging\":false,\"pylogging_config_file\":null}",
             "--reasoning-parser",
             "qwen3",
         ]
@@ -734,39 +737,62 @@ fn serve_forwards_logging_config_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// The rest of the logging config fails startup, also in its dotted forms,
-/// instead of reaching only the managed engine.
+/// The fields the Rust frontend's own logs do not follow are warned about only
+/// when they change Python logging; explicit defaults are not.
 #[test]
-fn serve_rejects_logging_config() {
-    let cases: &[&[&str]] = &[
-        &["--logging-config", r#"{"formatter":"json"}"#],
-        &["--logging-config.formatter", "json"],
-        &["--logging-config.configure_logging=false"],
-        &[
-            "--logging-config.pylogging_config_file",
-            "/tmp/logging.json",
-        ],
-        &["--logging-config.handlers", "[]"],
-        // Every occurrence is parsed, so a superseded one fails as well.
-        &[
-            "--logging-config",
-            r#"{"formatter":"json"}"#,
-            "--logging-config.formatter",
-            "text",
-        ],
+fn serve_lists_python_only_logging_fields() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"{"configure_logging":true,"pylogging_config_file":null}"#,
+            &[],
+        ),
+        (r#"{"configure_logging":false}"#, &["configure_logging"]),
+        (
+            r#"{"pylogging_config_file":"/tmp/logging.json"}"#,
+            &["pylogging_config_file"],
+        ),
     ];
-    for &case in cases {
-        let error = Cli::try_parse_from(
-            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].into_iter().chain(case.iter().copied()),
-        )
-        .unwrap_err();
-
+    for &(config, expected) in cases {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--logging-config",
+            config,
+        ])
+        .unwrap();
         assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::ValueValidation,
-            "{case:?}"
+            cli.logging_config().unwrap().python_only_fields(),
+            expected,
+            "{config}"
         );
     }
+}
+
+/// The JSON formatter is not implemented and fails startup, also in its
+/// dotted form, instead of reaching only the managed engine. Unknown fields
+/// fail as well.
+#[test]
+fn serve_rejects_unimplemented_logging_config() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--logging-config.handlers",
+        "[]",
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--logging-config",
+        r#"{"formatter":"json"}"#,
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -774,21 +800,19 @@ fn serve_rejects_logging_config() {
         "Qwen/Qwen3-0.6B",
         "--logging-config.formatter",
         "json",
-        "--logging-config.log_level",
-        "DEBUG",
     ])
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"formatter":"json","log_level":"DEBUG"}' for '--logging-config <JSON>': invalid JSON object: formatter: "json" is not implemented in Rust frontend yet; only the default "text" is at line 1 column 19
+        error: invalid value '{"formatter":"json"}' for '--logging-config <JSON>': invalid JSON object: formatter: unknown variant `json`, expected `text` at line 1 column 19
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
 }
 
-/// The Python supervisor sends the resolved level as `log_level`, and
-/// `logging_config` only when it sets more than the level.
+/// The Python supervisor sends the resolved level and formatter as
+/// `logging_config`.
 #[test]
-fn frontend_args_json_resolves_logging_args() {
+fn frontend_args_json_resolves_logging_config() {
     let parse = |args_json: &str| {
         Cli::try_parse_from([
             "vllm-rs",
@@ -804,15 +828,28 @@ fn frontend_args_json_resolves_logging_args() {
         ])
     };
 
-    let cli = parse(r#"{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG"}"#).unwrap();
+    let cli = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"text"}}"#,
+    )
+    .unwrap();
     assert_eq!(cli.log_level(), LogLevel::Debug);
 
+    // Python-only fields are accepted, not rejected.
+    let cli = parse(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"text","configure_logging":false,"pylogging_config_file":"/tmp/logging.json"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        cli.logging_config().unwrap().python_only_fields(),
+        ["configure_logging", "pylogging_config_file"]
+    );
+
     let error = parse(
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","log_level":"DEBUG","logging_config":{"log_level":"DEBUG","formatter":"json","configure_logging":true,"pylogging_config_file":null}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: "json" is not implemented in Rust frontend yet; only the default "text" is at line 1 column 107
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `json`, expected `text` at line 1 column 87
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
