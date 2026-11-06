@@ -267,14 +267,6 @@ impl TextLlm {
         self.processor.backend.model_vocab_size()
     }
 
-    /// Tokenize if needed, lower to a generate request, and return the raw
-    /// token stream.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
-        let prepared = self.processor.prepare(request)?;
-        let mut streams = self.submit(prepared.generate_request, NonZeroU32::MIN).await?;
-        Ok(streams.pop().expect("one output stream per sample"))
-    }
-
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
