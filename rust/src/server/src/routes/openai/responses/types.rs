@@ -233,6 +233,31 @@ pub enum ResponsesTool {
     /// Function tools grouped under a namespace. The model sees each one as
     /// `<namespace>__<name>`; see `tools.rs`.
     Namespace(NamespaceTool),
+    /// Tool search over deferred tools. Only client execution is supported:
+    /// the model sees a `tool_search` function; see `tools.rs`.
+    ToolSearch(ToolSearchTool),
+}
+
+/// Responses API `tool_search` tool.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolSearchTool {
+    #[serde(default)]
+    pub execution: Option<ToolSearchExecution>,
+    /// Description shown to the model for a client-executed tool search.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Parameter schema for a client-executed tool search.
+    #[serde(default)]
+    pub parameters: Option<Value>,
+}
+
+/// Who executes a tool search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSearchExecution {
+    Server,
+    Client,
 }
 
 /// Responses API `namespace` tool.
@@ -430,6 +455,8 @@ pub enum ResponseInputItem {
     FunctionCall(ResponseInputFunctionCall),
     FunctionCallOutput(ResponseInputFunctionCallOutput),
     Reasoning(ResponseInputReasoning),
+    ToolSearchCall(ResponseInputToolSearchCall),
+    ToolSearchOutput(ResponseInputToolSearchOutput),
     ItemReference {},
 }
 
@@ -536,6 +563,38 @@ pub struct ResponseInputFunctionCall {
 pub struct ResponseInputFunctionCallOutput {
     pub call_id: String,
     pub output: ResponseMessageContent,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub status: Option<ResponseItemStatus>,
+}
+
+/// One `tool_search_call` input item (a tool search the model requested).
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseInputToolSearchCall {
+    pub call_id: String,
+    /// The search arguments, a JSON value (an object in the shapes clients
+    /// send).
+    #[serde(default)]
+    pub arguments: Value,
+    #[serde(default)]
+    pub execution: Option<ToolSearchExecution>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub status: Option<ResponseItemStatus>,
+}
+
+/// One `tool_search_output` input item: the tools a client-executed search
+/// loaded.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseInputToolSearchOutput {
+    pub call_id: String,
+    pub tools: Vec<ResponsesTool>,
+    #[serde(default)]
+    pub execution: Option<ToolSearchExecution>,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -651,13 +710,25 @@ pub enum ResponseOutputItem {
         #[serde(default)]
         status: Option<ResponseItemStatus>,
     },
+    /// A call of the client-executed `tool_search` tool, for the client to
+    /// run.
+    ToolSearchCall {
+        id: String,
+        call_id: String,
+        execution: ToolSearchExecution,
+        status: ResponseItemStatus,
+        /// The parsed arguments, or the raw text when it is not JSON.
+        arguments: Value,
+    },
 }
 
 impl ResponseOutputItem {
     /// Mark a truncated output item incomplete, matching Python.
     pub(super) fn mark_incomplete(&mut self) {
         match self {
-            Self::Message { status, .. } => *status = ResponseItemStatus::Incomplete,
+            Self::Message { status, .. } | Self::ToolSearchCall { status, .. } => {
+                *status = ResponseItemStatus::Incomplete
+            }
             Self::FunctionCall { status, .. } | Self::Reasoning { status, .. } => {
                 *status = Some(ResponseItemStatus::Incomplete)
             }
