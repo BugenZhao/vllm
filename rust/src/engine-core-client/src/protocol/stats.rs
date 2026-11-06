@@ -361,8 +361,13 @@ pub mod kv_connector {
 
     /// SimpleCPUOffload connector telemetry.
     ///
-    /// Python sends a self-describing `{"types": ..., "data": ...}` payload;
-    /// the type of each metric is fixed by its name, so only `data` is read.
+    /// Unlike the NIXL, Mooncake and UMBP payloads (one field per counter or
+    /// sample list), Python sends the offloading connectors' self-describing
+    /// envelope (also `OffloadingConnectorStats`): `{"types": {name: kind},
+    /// "data": {name: {label_values: value}}}`, keyed by Prometheus metric name
+    /// and then by the label values as a tuple (`()` when unlabeled). The kind
+    /// of each metric is fixed by its name, so only `data` is read, and the
+    /// fixed-size array keys check each metric's label count when decoding.
     ///
     /// Original Python definition: `SimpleCPUOffloadStats` in
     /// `vllm/v1/simple_kv_offload/metrics.py`.
