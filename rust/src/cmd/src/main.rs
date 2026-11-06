@@ -96,16 +96,6 @@ fn main() -> ExitCode {
         Cli::parse()
     };
     vllm_tracing::init_tracing(process_label, cli.log_level());
-    let python_only = cli.logging_config().map(|config| config.python_only_fields());
-    if let Some(fields) = python_only
-        && !fields.is_empty()
-    {
-        warn!(
-            "--logging-config fields {} apply to Python logging only, not to the Rust frontend's \
-             logs",
-            fields.join(", ")
-        );
-    }
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();

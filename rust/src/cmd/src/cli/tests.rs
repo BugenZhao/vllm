@@ -698,9 +698,8 @@ fn serve_resolves_log_level_like_python() {
 }
 
 /// The managed engine gets the logging config with the level this frontend
-/// resolved. Python's defaults for the fields only Python logging reads come
-/// from env vars (`VLLM_CONFIGURE_LOGGING`, `VLLM_LOGGING_CONFIG_PATH`), so
-/// they are forwarded as given, with `null` kept apart from omission.
+/// resolved. The fields only Python logging reads are forwarded as given, an
+/// explicit `null` included, and validated by the engine.
 #[test]
 fn serve_forwards_logging_config_to_managed_engine() {
     let cli = Cli::try_parse_from([
@@ -717,10 +716,6 @@ fn serve_forwards_logging_config_to_managed_engine() {
         "ERROR",
     ])
     .unwrap();
-    assert_eq!(
-        cli.logging_config().unwrap().python_only_fields(),
-        ["configure_logging"]
-    );
 
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
@@ -737,53 +732,10 @@ fn serve_forwards_logging_config_to_managed_engine() {
     .assert_debug_eq(&config.python_args);
 }
 
-/// The fields the Rust frontend's own logs do not follow are warned about only
-/// when they change Python logging; explicit defaults are not.
-#[test]
-fn serve_lists_python_only_logging_fields() {
-    let cases: &[(&str, &[&str])] = &[
-        (
-            r#"{"configure_logging":true,"pylogging_config_file":null}"#,
-            &[],
-        ),
-        (r#"{"configure_logging":false}"#, &["configure_logging"]),
-        (
-            r#"{"pylogging_config_file":"/tmp/logging.json"}"#,
-            &["pylogging_config_file"],
-        ),
-    ];
-    for &(config, expected) in cases {
-        let cli = Cli::try_parse_from([
-            "vllm-rs",
-            "serve",
-            "Qwen/Qwen3-0.6B",
-            "--logging-config",
-            config,
-        ])
-        .unwrap();
-        assert_eq!(
-            cli.logging_config().unwrap().python_only_fields(),
-            expected,
-            "{config}"
-        );
-    }
-}
-
 /// The JSON formatter is not implemented and fails startup, also in its
-/// dotted form, instead of reaching only the managed engine. Unknown fields
-/// fail as well.
+/// dotted form, instead of reaching only the managed engine.
 #[test]
 fn serve_rejects_unimplemented_logging_config() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--logging-config.handlers",
-        "[]",
-    ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
-
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
@@ -835,14 +787,10 @@ fn frontend_args_json_resolves_logging_config() {
     assert_eq!(cli.log_level(), LogLevel::Debug);
 
     // Python-only fields are accepted, not rejected.
-    let cli = parse(
+    parse(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"text","configure_logging":false,"pylogging_config_file":"/tmp/logging.json"}}"#,
     )
     .unwrap();
-    assert_eq!(
-        cli.logging_config().unwrap().python_only_fields(),
-        ["configure_logging", "pylogging_config_file"]
-    );
 
     let error = parse(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"json"}}"#,

@@ -69,11 +69,6 @@ impl Cli {
             .map_or_else(LogLevel::from_env, SharedRuntimeArgs::effective_log_level)
     }
 
-    /// The `--logging-config` given to this command, if any.
-    pub fn logging_config(&self) -> Option<&LoggingConfig> {
-        self.runtime()?.logging_config.as_ref()
-    }
-
     fn runtime(&self) -> Option<&SharedRuntimeArgs> {
         match &self.command {
             Command::Serve(args) => Some(&args.runtime),
@@ -729,8 +724,10 @@ pub struct SharedRuntimeArgs {
     /// fail startup; the remaining fields apply to Python logging only. The
     /// Python supervisor sends the resolved `log_level` and `formatter`.
     ///
-    /// The last occurrence wins, as in Python, where the merged dotted forms
-    /// come after a plain `--logging-config`.
+    /// A later occurrence replaces an earlier one, as with Python's argparse,
+    /// where clap would reject the second. The dotted forms are merged into a
+    /// trailing `--logging-config <JSON>`, so `--logging-config '{..}'
+    /// --logging-config.log_level DEBUG` arrives here as two occurrences.
     #[arg(
         long,
         value_parser = parse_json::<LoggingConfig>,
