@@ -419,7 +419,6 @@ impl GenerateOutputStream {
             && mask.rows.len() != raw.new_token_ids.len()
         {
             return Err(crate::Error::SamplingMaskTokenCountMismatch {
-                request_id: raw.request_id,
                 token_count: raw.new_token_ids.len(),
                 row_count: mask.rows.len(),
             });
@@ -613,7 +612,6 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         && mask.rows.len() != collected.token_ids.len()
                     {
                         return Err(crate::Error::SamplingMaskTokenCountMismatch {
-                            request_id: collected.request_id,
                             token_count: collected.token_ids.len(),
                             row_count: mask.rows.len(),
                         });

@@ -76,9 +76,7 @@ impl GenerateRequest {
     /// Validate and lower this request into the raw engine-core request format.
     pub(crate) fn prepare(self, randomize_request_id: bool) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
-            return Err(Error::EmptyPromptTokenIds {
-                request_id: self.request_id,
-            });
+            return Err(Error::EmptyPromptTokenIds);
         }
         let GenerateRequest {
             request_id,
@@ -264,10 +262,7 @@ mod tests {
         request.prompt_token_ids.clear();
 
         let error = request.prepare(true).unwrap_err();
-        assert!(matches!(
-            error,
-            Error::EmptyPromptTokenIds { request_id } if request_id == "req-1"
-        ));
+        assert!(matches!(error, Error::EmptyPromptTokenIds));
     }
 
     #[test]
