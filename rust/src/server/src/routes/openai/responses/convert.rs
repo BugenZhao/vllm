@@ -276,6 +276,7 @@ pub(crate) fn prepare_responses_request(
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
+        trace_headers: ctx.trace_headers.clone(),
         lora_request: lora_resolution.lora_request.clone(),
         return_prompt_text: false,
     };

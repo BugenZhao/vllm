@@ -4,11 +4,12 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
+use opentelemetry_sdk::trace::SdkTracer;
 use tokio::sync::watch;
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
@@ -22,6 +23,7 @@ mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
+mod request_trace;
 
 pub use error::{Error, Result};
 pub use output::{
@@ -38,6 +40,7 @@ use crate::request_metrics::{
     ParallelSamplingStats, RequestMetricHandles, RequestMetricsTracker,
     resolve_request_metric_handles,
 };
+use crate::request_trace::{RequestTrace, extract_trace_context};
 
 /// Boxed output stream returned by [`Llm::generate`].
 pub type BoxGenerateOutputStream = BoxStream<'static, Result<GenerateOutput>>;
@@ -131,6 +134,8 @@ pub struct EngineCoreLlm {
     /// construction so the request families export zero-valued series before
     /// the first request.
     request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
+    /// Exports one `llm_request` span per finished request when set.
+    tracer: Option<SdkTracer>,
 }
 
 impl EngineCoreLlm {
@@ -164,6 +169,7 @@ impl EngineCoreLlm {
             stats_logger: None,
             inflight: InflightRequests::new(),
             request_metric_handles,
+            tracer: None,
         }
     }
 
@@ -177,6 +183,13 @@ impl EngineCoreLlm {
                 interval,
             )
         });
+        self
+    }
+
+    /// Export an `llm_request` span for every finished request through
+    /// `tracer`, or export nothing with `None`.
+    pub fn with_tracer(mut self, tracer: Option<SdkTracer>) -> Self {
+        self.tracer = tracer;
         self
     }
 
@@ -233,14 +246,40 @@ impl EngineCoreLlm {
         req.sampling_params.stream_interval =
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
+        // The span parent when this frontend exports spans. Like Python, trace
+        // headers are dropped with a warning when tracing is disabled.
+        let trace_headers = req.trace_headers.take();
+        let trace_parent = match &self.tracer {
+            Some(tracer) => Some((
+                tracer,
+                trace_headers.as_ref().map(extract_trace_context).unwrap_or_default(),
+            )),
+            None => {
+                if trace_headers.is_some() {
+                    static WARN_ONCE: Once = Once::new();
+                    WARN_ONCE.call_once(|| {
+                        tracing::warn!(
+                            "Received a request with trace context but tracing is disabled"
+                        );
+                    });
+                }
+                None
+            }
+        };
         let prepared = req.prepare(self.randomize_request_id)?;
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;
+        let trace = |engine_request: &EngineCoreRequest| {
+            (trace_parent.as_ref()).map(|(tracer, parent)| {
+                RequestTrace::new((*tracer).clone(), parent.clone(), engine_request, n.get())
+            })
+        };
 
         if n == NonZeroU32::MIN {
             let stream = self
                 .submit(
+                    trace(&engine_request),
                     engine_request,
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
@@ -265,6 +304,7 @@ impl EngineCoreLlm {
             // A failed submission drops the earlier streams, which aborts them.
             streams.push(
                 self.submit(
+                    trace(&child),
                     child,
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
@@ -279,6 +319,7 @@ impl EngineCoreLlm {
     /// Submit one prepared engine request and track it until its stream drops.
     async fn submit(
         &self,
+        trace: Option<RequestTrace>,
         engine_request: EngineCoreRequest,
         prompt_token_ids: &Arc<[u32]>,
         remote_prefill_cached_tokens: Option<usize>,
@@ -319,6 +360,7 @@ impl EngineCoreLlm {
             remote_prefill_cached_tokens,
             stream,
             request_metrics,
+            trace,
             guard,
         ))
     }

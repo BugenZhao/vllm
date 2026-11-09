@@ -11,6 +11,7 @@ mod listener;
 mod lora;
 mod middleware;
 mod model_names;
+mod otel;
 mod render;
 mod routes;
 mod runtime;
@@ -42,6 +43,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
+use opentelemetry_sdk::trace::SdkTracer;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
 use thiserror_ext::AsReport as _;
@@ -84,7 +86,7 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 
 /// Build the shared application state for one configured model and one engine
 /// client, including any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+async fn build_state(config: &Config, tracer: Option<SdkTracer>) -> Result<Arc<AppState>> {
     // Fix the histogram buckets before the engine connection records metrics.
     METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
 
@@ -146,7 +148,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_stream_interval(config.stream_interval)
+        .with_tracer(tracer);
     let text = TextLlm::new(llm, text_backend)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
@@ -233,10 +236,15 @@ where
         .transpose()
         .context("invalid TLS configuration")?;
 
+    let tracing = (config.otlp_traces_endpoint.as_deref())
+        .map(otel::OtlpTracing::init)
+        .transpose()
+        .context("invalid --otlp-traces-endpoint")?;
+
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config) => result?,
+        result = build_state(&config, tracing.as_ref().map(otel::OtlpTracing::tracer)) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
@@ -410,7 +418,12 @@ where
         .get()
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
-    state.shutdown(shutdown_deadline).await
+    let result = state.shutdown(shutdown_deadline).await;
+    // After the requests have finished, so their spans are exported too.
+    if let Some(tracing) = tracing {
+        tracing.shutdown().await;
+    }
+    result
 }
 
 /// Per-connection timeouts applied while serving HTTP/HTTPS.

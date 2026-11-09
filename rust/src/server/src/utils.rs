@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::BoxError;
@@ -23,6 +23,8 @@ pub struct ResolvedRequestContext {
     pub data_parallel_rank: Option<u32>,
     pub priority: Option<i32>,
     pub session_id: Option<String>,
+    /// W3C trace context headers, when the client sent any.
+    pub trace_headers: Option<BTreeMap<String, String>>,
 }
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
@@ -164,8 +166,8 @@ pub fn convert_logit_bias(
 }
 
 /// Extract common request metadata from HTTP headers: the external request ID,
-/// session ID, priority, and the optional data-parallel rank used for engine
-/// routing.
+/// session ID, priority, W3C trace context, and the optional data-parallel rank
+/// used for engine routing.
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
@@ -189,11 +191,23 @@ pub fn resolve_request_context(
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
+    // Python's `TRACE_HEADERS`; a header that is not valid UTF-8 is skipped.
+    let trace_headers: BTreeMap<_, _> = ["traceparent", "tracestate"]
+        .into_iter()
+        .filter_map(|name| {
+            Some((
+                name.to_owned(),
+                headers.get(name)?.to_str().ok()?.to_owned(),
+            ))
+        })
+        .collect();
+
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
         priority,
         session_id,
+        trace_headers: (!trace_headers.is_empty()).then_some(trace_headers),
     }
 }
 
