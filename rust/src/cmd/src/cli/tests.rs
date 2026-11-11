@@ -254,6 +254,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        enable_tower_connector_lora: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -1431,6 +1432,48 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
 }
 
+/// `--enable-tower-connector-lora` reaches the frontend config on both
+/// startup paths, and `vllm-rs serve` forwards it to the managed engine.
+#[test]
+fn enable_tower_connector_lora_reaches_config_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "--enable-tower-connector-lora",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(config.enable_tower_connector_lora);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(engine.python_args.iter().any(|arg| arg == "--enable-tower-connector-lora"));
+
+    let args_json = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-VL-2B-Instruct",
+        "enable_tower_connector_lora": true,
+    });
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &args_json.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().enable_tower_connector_lora);
+}
+
 #[test]
 fn serve_passes_enable_request_id_headers_into_config() {
     let cli = Cli::try_parse_from([
@@ -2248,6 +2291,7 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        enable_tower_connector_lora: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -2895,14 +2939,7 @@ fn custom_histogram_buckets_reach_frontend_config() {
 /// fail startup on both the `vllm-rs serve` and the `--args-json` paths.
 #[test]
 fn unsupported_args_fail_startup() {
-    let cases = [
-        (
-            "--enable-tower-connector-lora",
-            "true",
-            "enable_tower_connector_lora",
-        ),
-        ("--enable-elastic-ep", "true", "enable_elastic_ep"),
-    ];
+    let cases = [("--enable-elastic-ep", "true", "enable_elastic_ep")];
     for (flag, value, key) in cases {
         let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
             .unwrap_err()
@@ -3206,6 +3243,7 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         lora_modules: [],
+                        enable_tower_connector_lora: false,
                         chat_template_content_format: Auto,
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
@@ -3510,6 +3548,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            enable_tower_connector_lora: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3643,6 +3682,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            enable_tower_connector_lora: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,
@@ -3889,6 +3929,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             lora_modules: [],
+            enable_tower_connector_lora: false,
             chat_template_content_format: Auto,
             max_logprobs: None,
             stream_interval: 1,

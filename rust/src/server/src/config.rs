@@ -384,6 +384,9 @@ pub struct Config {
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,
+    /// Whether the engine applies LoRA to the multimodal tower and connector,
+    /// so encoder-cache identifiers are scoped to each request's adapter.
+    pub enable_tower_connector_lora: bool,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the

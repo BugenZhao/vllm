@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -74,7 +75,15 @@ pub(crate) struct PreparedGenerateRequest {
 
 impl GenerateRequest {
     /// Validate and lower this request into the raw engine-core request format.
-    pub(crate) fn prepare(self, randomize_request_id: bool) -> Result<PreparedGenerateRequest> {
+    ///
+    /// With `tower_connector_lora`, the engine applies LoRA to the multimodal
+    /// encoder, so encoder-cache identifiers are scoped to the request's
+    /// adapter (see [`tower_connector_lora_scope`]).
+    pub(crate) fn prepare(
+        self,
+        randomize_request_id: bool,
+        tower_connector_lora: bool,
+    ) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
             return Err(Error::EmptyPromptTokenIds {
                 request_id: self.request_id,
@@ -84,7 +93,7 @@ impl GenerateRequest {
             request_id,
             prompt_token_ids,
             sampling_params,
-            mm_features,
+            mut mm_features,
             arrival_time,
             cache_salt,
             trace_headers,
@@ -96,6 +105,13 @@ impl GenerateRequest {
             reasoning_ended,
             lora_request,
         } = self;
+
+        if tower_connector_lora && let Some(features) = &mut mm_features {
+            let scope = tower_connector_lora_scope(lora_request.as_ref());
+            for feature in features {
+                feature.identifier.insert_str(0, &scope);
+            }
+        }
 
         let external_request_id = request_id;
         let engine_request_id = if randomize_request_id {
@@ -137,6 +153,24 @@ impl GenerateRequest {
     }
 }
 
+/// The prefix that scopes a request's multimodal encoder-cache identifiers to
+/// its LoRA adapter, or to the base model without one, when the engine applies
+/// LoRA to the multimodal tower and connector.
+///
+/// Python prefixes only adapter requests, with `{lora_name}:`. Tagging the base
+/// model too keeps a client `uuid` from spelling an adapter's identifier
+/// (vllm-project/vllm#66885), and the digest of the adapter's name and path
+/// keeps names with `:` unambiguous and starts a fresh scope when a name is
+/// reloaded from another path.
+fn tower_connector_lora_scope(lora_request: Option<&LoraRequest>) -> String {
+    let Some(lora) = lora_request else {
+        return "base:".to_owned();
+    };
+    let adapter = serde_json::to_vec(&(&lora.lora_name, &lora.lora_path))
+        .expect("a pair of strings serializes");
+    format!("lora:{}:", hex::encode(Sha256::digest(adapter)))
+}
+
 /// The remote-prefill fields of `kv_transfer_params` read by the frontend.
 ///
 /// The prefiller's scheduler fills `remote_prefill_cached_tokens` next to
@@ -169,8 +203,13 @@ impl PreparedGenerateRequest {
 mod tests {
     use std::collections::BTreeMap;
 
+    use expect_test::expect;
     use serde_json::json;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use vllm_engine_core_client::protocol::lora::LoraRequest;
+    use vllm_engine_core_client::protocol::multimodal::{
+        MmFeatureSpec, MmModality, PlaceholderRange,
+    };
     use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
     use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
     use vllm_engine_core_client::test_utils::decode_prompt_token_ids;
@@ -219,7 +258,7 @@ mod tests {
 
     #[test]
     fn prepare_builds_engine_core_request() {
-        let prepared = sample_request().prepare(true).unwrap();
+        let prepared = sample_request().prepare(true, false).unwrap();
 
         assert_eq!(&*prepared.prompt_token_ids, &[11, 22, 33]);
 
@@ -263,7 +302,7 @@ mod tests {
         let mut request = sample_request();
         request.prompt_token_ids.clear();
 
-        let error = request.prepare(true).unwrap_err();
+        let error = request.prepare(true, false).unwrap_err();
         assert!(matches!(
             error,
             Error::EmptyPromptTokenIds { request_id } if request_id == "req-1"
@@ -272,7 +311,7 @@ mod tests {
 
     #[test]
     fn prepare_can_preserve_external_request_id() {
-        let prepared = sample_request().prepare(false).unwrap();
+        let prepared = sample_request().prepare(false, false).unwrap();
 
         let request = prepared.engine_request;
         assert_eq!(request.external_req_id.as_deref(), Some("req-1"));
@@ -284,9 +323,106 @@ mod tests {
         let mut request = sample_request();
         request.mm_features = Some(Vec::new());
 
-        let prepared = request.prepare(false).unwrap();
+        let prepared = request.prepare(false, false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    /// Under tower and connector LoRA, encoder outputs depend on the adapter:
+    /// identifiers must differ between the base model and each adapter, and a
+    /// client `uuid` must not reproduce another scope's identifier.
+    #[test]
+    fn prepare_scopes_mm_identifiers_under_tower_connector_lora() {
+        fn identifier(
+            tower_connector_lora: bool,
+            lora: Option<(&str, &str)>,
+            uuid_or_hash: &str,
+        ) -> String {
+            let mut request = sample_request();
+            request.mm_features = Some(vec![MmFeatureSpec {
+                data: None,
+                modality: MmModality::Image,
+                identifier: uuid_or_hash.to_owned(),
+                mm_position: PlaceholderRange {
+                    offset: 0,
+                    length: 1,
+                    is_embed: None,
+                },
+                mm_hash: Some("image-hash".to_owned()),
+            }]);
+            request.lora_request = lora.map(|(lora_name, lora_path)| LoraRequest {
+                lora_name: lora_name.to_owned(),
+                lora_int_id: 1,
+                lora_path: lora_path.to_owned(),
+                base_model_name: None,
+                load_inplace: false,
+                is_3d_lora_weight: false,
+            });
+            let features = request
+                .prepare(false, tower_connector_lora)
+                .unwrap()
+                .engine_request
+                .mm_features
+                .unwrap();
+            assert_eq!(features[0].mm_hash.as_deref(), Some("image-hash"));
+            features[0].identifier.clone()
+        }
+
+        let adapter = Some(("adapter", "/loras/adapter"));
+        let adapter_identifier = identifier(true, adapter, "image-hash");
+        let cases = [
+            ("disabled, base", identifier(false, None, "image-hash")),
+            (
+                "disabled, adapter",
+                identifier(false, adapter, "image-hash"),
+            ),
+            ("base", identifier(true, None, "image-hash")),
+            ("adapter", adapter_identifier.clone()),
+            (
+                "adapter reloaded from another path",
+                identifier(true, Some(("adapter", "/loras/adapter-v2")), "image-hash"),
+            ),
+            (
+                "base with the adapter's identifier as uuid",
+                identifier(true, None, &adapter_identifier),
+            ),
+            (
+                "adapter name with `:`",
+                identifier(true, Some(("adapter:x", "/loras/adapter")), "image-hash"),
+            ),
+        ];
+        expect![[r#"
+            [
+                (
+                    "disabled, base",
+                    "image-hash",
+                ),
+                (
+                    "disabled, adapter",
+                    "image-hash",
+                ),
+                (
+                    "base",
+                    "base:image-hash",
+                ),
+                (
+                    "adapter",
+                    "lora:24c444a79b194a3edec30e58a828b7151838268589307ba39c8bcb04e0a3b2de:image-hash",
+                ),
+                (
+                    "adapter reloaded from another path",
+                    "lora:139742af0370888d090d45924e0efa6a4fa1da73254777f73f9e308c0d4591d8:image-hash",
+                ),
+                (
+                    "base with the adapter's identifier as uuid",
+                    "base:lora:24c444a79b194a3edec30e58a828b7151838268589307ba39c8bcb04e0a3b2de:image-hash",
+                ),
+                (
+                    "adapter name with `:`",
+                    "lora:825a94fcc81c6b0f77c3f101da09d7b1701d3191706e5c4d29baced549c2059f:image-hash",
+                ),
+            ]
+        "#]].assert_debug_eq(&cases);
     }
 
     #[test]
@@ -323,7 +459,7 @@ mod tests {
             let mut request = sample_request();
             request.sampling_params.extra_args = kv_transfer_params
                 .map(|params| [("kv_transfer_params".to_string(), params)].into());
-            let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            let actual = request.prepare(false, false).unwrap().remote_prefill_cached_tokens();
             assert_eq!(actual, expected, "{name}");
         }
     }
