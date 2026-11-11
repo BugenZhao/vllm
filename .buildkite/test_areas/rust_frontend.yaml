@@ -299,6 +299,7 @@ steps:
   - vllm/entrypoints/openai/
   - tests/utils.py
   - tests/entrypoints/openai/responses
+  - tests/entrypoints/multimodal/openai/responses/test_image.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -312,6 +313,9 @@ steps:
   - pytest -v -s entrypoints/openai/responses/test_namespace_tool_separator.py
   - pytest -v -s entrypoints/openai/responses/test_structured_output.py
   - pytest -v -s entrypoints/openai/responses/test_simple.py -k "not enable_response_messages and not streaming_logprobs"
+  # Image URLs in the other tests point at a local asset server, and the Rust frontend
+  # does not fetch media from loopback hosts; the base64 data-URL cases cover the path.
+  - pytest -v -s entrypoints/multimodal/openai/responses/test_image.py -k base64encoded
   mirror:
     amd:
       automatic_shard: true
@@ -326,6 +330,7 @@ steps:
       - vllm/entrypoints/openai/
       - tests/utils.py
       - tests/entrypoints/openai/responses
+      - tests/entrypoints/multimodal/openai/responses/test_image.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
