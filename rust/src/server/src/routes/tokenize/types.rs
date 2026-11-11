@@ -19,6 +19,7 @@ use crate::routes::openai::chat_completions::convert::{
 use crate::routes::openai::utils::types::{
     ChatMessage, Normalizable, Tool, default_true, validate_messages,
 };
+use crate::routes::openai::utils::validate_request_mm_kwargs;
 
 /// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
 /// chat variant; one with `prompt` parses as the completion variant.
@@ -86,6 +87,10 @@ pub struct TokenizeChatRequest {
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
     #[serde(default)]
+    pub media_io_kwargs: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub mm_processor_kwargs: Option<HashMap<String, Value>>,
+    #[serde(default)]
     pub tools: Option<Vec<Tool>>,
 }
 
@@ -98,6 +103,10 @@ impl TokenizeChatRequest {
     /// `sampling_params`, `decode_options`, etc. stay at default because
     /// tokenize never generates.
     pub fn into_chat_request(self, request_id: String) -> Result<ChatRequest, ApiError> {
+        validate_request_mm_kwargs(
+            self.mm_processor_kwargs.as_ref(),
+            self.media_io_kwargs.as_ref(),
+        )?;
         let messages: Vec<_> = self.messages.into_iter().map(convert_message).try_collect()?;
         let generation_prompt_mode = normalize_generation_prompt_mode(
             Some(self.add_generation_prompt),
@@ -265,6 +274,8 @@ mod tests {
             return_token_strs: false,
             chat_template: None,
             chat_template_kwargs: None,
+            media_io_kwargs: None,
+            mm_processor_kwargs: None,
             tools: None,
         };
 
