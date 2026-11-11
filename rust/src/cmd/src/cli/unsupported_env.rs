@@ -29,6 +29,33 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENABLE_RESPONSES_API_STORE", |value| {
         !value.trim().parse::<i64>().is_ok_and(|value| value == 0)
     }),
+    // Media fetching and decoding. The Rust frontend fetches and decodes media
+    // through llm-multimodal with its own settings.
+    //
+    // Cache downloaded media in this directory. `VLLM_MEDIA_CACHE_MAX_SIZE_MB`
+    // and `VLLM_MEDIA_CACHE_TTL_HOURS` only take effect with it.
+    ("VLLM_MEDIA_CACHE", |value| !value.is_empty()),
+    // Total fetch attempts per media URL, at least one. The Rust frontend makes
+    // a single attempt, so one or fewer matches it; the default of three is a
+    // known gap.
+    ("VLLM_MEDIA_FETCH_MAX_RETRIES", |value| {
+        !value.trim().parse::<i64>().is_ok_and(|value| value <= 1 || value == 3)
+    }),
+    // Disabling redirects for media URLs. Python reads it as `bool(int(value))`.
+    ("VLLM_MEDIA_URL_ALLOW_REDIRECTS", |value| {
+        !value.trim().parse::<i64>().is_ok_and(|value| value != 0)
+    }),
+    // Decoded size limits for images (and video frames) and audio.
+    ("VLLM_MAX_IMAGE_PIXELS", |value| !is_int(value, 178_956_970)),
+    ("VLLM_MAX_AUDIO_DECODE_DURATION_S", |value| {
+        !is_int(value, 600)
+    }),
+    ("VLLM_MAX_AUDIO_DECODE_BYTES", |value| {
+        !is_int(value, 268_435_456)
+    }),
+    // Python's video frame sampling and media connector plugins.
+    ("VLLM_VIDEO_LOADER_BACKEND", |value| value != "opencv"),
+    ("VLLM_MEDIA_CONNECTOR", |value| value != "http"),
 ];
 
 /// Unsupported environment variables that only take effect under
@@ -43,6 +70,12 @@ const UNSUPPORTED_LOG_REQUESTS_ENVS: &[(&str, IsNonDefault)] = &[
 /// Python parses these flags as `value.strip().lower() in ("1", "true")`.
 fn is_truthy(value: &str) -> bool {
     matches!(value.trim().to_lowercase().as_str(), "1" | "true")
+}
+
+/// Whether an integer variable equals `expected`, as Python's `int(value)`
+/// reads it.
+fn is_int(value: &str, expected: i64) -> bool {
+    value.trim().parse::<i64>().is_ok_and(|value| value == expected)
 }
 
 /// LoRA resolver variables that Python would act on. Its resolvers are Python
@@ -132,6 +165,20 @@ mod tests {
         check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
         check_with(&[("VLLM_REQUEST_BODY_LOG_LEVEL", "debug")]).unwrap();
         check_with(&[("VLLM_ENABLE_RESPONSES_API_STORE", "0")]).unwrap();
+        for (name, value) in [
+            ("VLLM_MEDIA_CACHE", ""),
+            ("VLLM_MEDIA_FETCH_MAX_RETRIES", "3"),
+            ("VLLM_MEDIA_FETCH_MAX_RETRIES", "1"),
+            ("VLLM_MEDIA_FETCH_MAX_RETRIES", "0"),
+            ("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"),
+            ("VLLM_MAX_IMAGE_PIXELS", "178956970"),
+            ("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600"),
+            ("VLLM_MAX_AUDIO_DECODE_BYTES", "268435456"),
+            ("VLLM_VIDEO_LOADER_BACKEND", "opencv"),
+            ("VLLM_MEDIA_CONNECTOR", "http"),
+        ] {
+            check_with(&[(name, value)]).unwrap_or_else(|error| panic!("{name}={value}: {error}"));
+        }
     }
 
     #[test]
@@ -141,6 +188,14 @@ mod tests {
             ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
             ("VLLM_REQUEST_BODY_LOG_LEVEL", "INFO"),
             ("VLLM_ENABLE_RESPONSES_API_STORE", "1"),
+            ("VLLM_MEDIA_CACHE", "/tmp/media"),
+            ("VLLM_MEDIA_FETCH_MAX_RETRIES", "5"),
+            ("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "0"),
+            ("VLLM_MAX_IMAGE_PIXELS", "1000000"),
+            ("VLLM_MAX_AUDIO_DECODE_DURATION_S", "60"),
+            ("VLLM_MAX_AUDIO_DECODE_BYTES", "1048576"),
+            ("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic"),
+            ("VLLM_MEDIA_CONNECTOR", "custom"),
         ];
         for (name, value) in cases {
             let error = check_with(&[(name, value)]).unwrap_err();
