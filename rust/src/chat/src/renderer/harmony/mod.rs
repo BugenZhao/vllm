@@ -32,6 +32,7 @@ const HARMONY_SYSTEM_INSTRUCTIONS_ENV: &str = "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTR
 /// GPT-OSS renderer backed by the official Harmony encoding.
 pub struct HarmonyChatRenderer {
     encoding: &'static HarmonyEncoding,
+    header_tokens: HeaderTokens,
     options: Options,
     default_template_kwargs: HashMap<String, Value>,
 }
@@ -39,6 +40,31 @@ pub struct HarmonyChatRenderer {
 struct Options {
     system_start_date: String,
     use_system_instructions: bool,
+}
+
+/// Harmony formatting tokens that delimit a message header.
+struct HeaderTokens {
+    start: u32,
+    channel: u32,
+    constrain: u32,
+    message: u32,
+}
+
+impl HeaderTokens {
+    fn new(encoding: &HarmonyEncoding) -> Self {
+        let token = |text: &str| {
+            let [token] = encoding.tokenizer().encode_with_special_tokens(text)[..] else {
+                unreachable!("{text} is one Harmony special token")
+            };
+            token
+        };
+        Self {
+            start: token("<|start|>"),
+            channel: token("<|channel|>"),
+            constrain: token("<|constrain|>"),
+            message: token("<|message|>"),
+        }
+    }
 }
 
 impl HarmonyChatRenderer {
@@ -68,8 +94,10 @@ impl HarmonyChatRenderer {
         system_start_date: impl Into<String>,
         use_system_instructions: bool,
     ) -> Result<Self> {
+        let encoding = harmony_encoding()?;
         Ok(Self {
-            encoding: harmony_encoding()?,
+            encoding,
+            header_tokens: HeaderTokens::new(encoding),
             default_template_kwargs,
             options: Options {
                 system_start_date: system_start_date.into(),
@@ -120,7 +148,82 @@ impl HarmonyChatRenderer {
             ))
         })?;
 
-        Ok(token_ids)
+        Ok(self.use_legacy_tool_call_headers(token_ids))
+    }
+
+    /// Keep prior assistant tool calls in the format expected by GPT-OSS.
+    ///
+    /// oss-harmony 0.0.10 changed a rendered tool-call header from:
+    ///
+    /// ```text
+    /// assistant to=python<|channel|>commentary code
+    /// ```
+    ///
+    /// to:
+    ///
+    /// ```text
+    /// assistant<|channel|>commentary to=python <|constrain|>code
+    /// ```
+    ///
+    /// GPT-OSS can echo the latter as a malformed header with the recipient in
+    /// both positions. Rewrite only that unambiguous token-level header shape,
+    /// while retaining oss-harmony's embedded vocabulary and parser.
+    ///
+    /// Ported from Python's `_use_legacy_tool_call_headers`
+    /// (`vllm/entrypoints/openai/parser/harmony_utils.py`).
+    fn use_legacy_tool_call_headers(&self, token_ids: Vec<u32>) -> Vec<u32> {
+        let HeaderTokens {
+            start,
+            channel,
+            constrain,
+            message,
+        } = self.header_tokens;
+        let tokenizer = self.encoding.tokenizer();
+        let decode = |tokens: &[u32]| tokenizer.decode_utf8(tokens).ok();
+        let position = |tokens: &[u32], token: u32| tokens.iter().position(|&t| t == token);
+
+        let mut result = Vec::with_capacity(token_ids.len());
+        let mut rest = token_ids.as_slice();
+        while let Some(index) = position(rest, start) {
+            result.extend_from_slice(&rest[..index]);
+            rest = &rest[index..];
+
+            // The header lies between `<|start|>` and the next `<|message|>`.
+            let Some(header_end) = position(&rest[1..], message).map(|i| i + 1) else {
+                break;
+            };
+            let header = &rest[1..header_end];
+            let legacy_header = position(header, channel).and_then(|channel_index| {
+                let constrain_index =
+                    position(&header[channel_index + 1..], constrain)? + channel_index + 1;
+                let author = decode(&header[..channel_index])?;
+                let channel_and_recipient = decode(&header[channel_index + 1..constrain_index])?;
+                let content_type = decode(&header[constrain_index + 1..])?;
+                if author != "assistant" {
+                    return None;
+                }
+                let (channel_name, recipient) =
+                    channel_and_recipient.strip_suffix(' ')?.split_once(" to=")?;
+                if channel_name.is_empty() || recipient.is_empty() || content_type.is_empty() {
+                    return None;
+                }
+
+                let mut legacy = vec![start];
+                legacy.extend(tokenizer.encode_ordinary(&format!("assistant to={recipient}")));
+                legacy.push(channel);
+                legacy.extend(tokenizer.encode_ordinary(&format!("{channel_name} {content_type}")));
+                legacy.push(message);
+                Some(legacy)
+            });
+
+            match legacy_header {
+                Some(legacy) => result.extend(legacy),
+                None => result.extend_from_slice(&rest[..=header_end]),
+            }
+            rest = &rest[header_end + 1..];
+        }
+        result.extend_from_slice(rest);
+        result
     }
 }
 
