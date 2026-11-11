@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import RemoteOpenAIServer
+from vllm import envs
 from vllm.multimodal.utils import encode_image_url
 
 # Use a small vision model for testing
@@ -34,7 +35,13 @@ def image_server(default_image_server_args):
     with RemoteOpenAIServer(
         MODEL_NAME,
         default_image_server_args,
-        env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
+        # The Rust frontend serves the stateless Responses API only and fails startup
+        # when the response store is enabled; these tests do not use the store.
+        env_dict=(
+            {}
+            if envs.VLLM_USE_RUST_FRONTEND
+            else {"VLLM_ENABLE_RESPONSES_API_STORE": "1"}
+        ),
     ) as remote_server:
         yield remote_server
 
