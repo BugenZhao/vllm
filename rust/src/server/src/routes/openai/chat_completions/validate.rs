@@ -5,7 +5,9 @@ use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
+use crate::routes::openai::utils::{
+    validate_generation_prompt_truncation, validate_request_mm_kwargs,
+};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -82,15 +84,9 @@ pub(super) fn validate_request_compat(
         "length_penalty is not supported.",
     )?;
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
-    reject_non_default(
-        request.media_io_kwargs.as_ref(),
-        "media_io_kwargs",
-        "media_io_kwargs is not supported.",
-    )?;
-    reject_non_default(
+    validate_request_mm_kwargs(
         request.mm_processor_kwargs.as_ref(),
-        "mm_processor_kwargs",
-        "mm_processor_kwargs is not supported.",
+        request.media_io_kwargs.as_ref(),
     )?;
 
     Ok(())
@@ -293,6 +289,26 @@ mod tests {
 
         let request = ChatCompletionRequest {
             length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_empty_mm_kwargs_only() {
+        let request = ChatCompletionRequest {
+            mm_processor_kwargs: Some(HashMap::new()),
+            media_io_kwargs: Some(HashMap::new()),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("empty mm kwargs override nothing and should be accepted");
+
+        let request = ChatCompletionRequest {
+            media_io_kwargs: Some(HashMap::from([(
+                "video".to_string(),
+                json!({"num_frames": 8}),
+            )])),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());

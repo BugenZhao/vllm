@@ -9,8 +9,10 @@ pub mod types;
 pub mod usage;
 pub mod validated_json;
 
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+use serde_json::Value;
 use vllm_text::{PromptTruncation, TruncationSide};
 
 use crate::error::{ApiError, bail_invalid_request};
@@ -22,6 +24,32 @@ pub(crate) fn validate_generation_prompt_truncation(limit: Option<i64>) -> Resul
         bail_invalid_request!(
             param = "truncate_prompt_tokens",
             "truncate_prompt_tokens must be >= -1."
+        );
+    }
+    Ok(())
+}
+
+/// Reject per-request multimodal kwargs overrides, like Python's
+/// `validate_request_mm_kwargs` without `--trust-request-mm-kwargs`, which the
+/// Rust frontend does not support. An empty map overrides nothing and passes.
+pub(crate) fn validate_request_mm_kwargs(
+    mm_processor_kwargs: Option<&HashMap<String, Value>>,
+    media_io_kwargs: Option<&HashMap<String, Value>>,
+) -> Result<(), ApiError> {
+    if mm_processor_kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+        bail_invalid_request!(
+            param = "mm_processor_kwargs",
+            "Per-request mm_processor_kwargs are disabled by default because they can change \
+             multimodal preprocessing resource usage. Start the server with \
+             --trust-request-mm-kwargs only when clients are trusted."
+        );
+    }
+    if media_io_kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+        bail_invalid_request!(
+            param = "media_io_kwargs",
+            "Per-request media_io_kwargs are disabled by default because they can change \
+             multimodal media loading resource usage. Start the server with \
+             --trust-request-mm-kwargs only when clients are trusted."
         );
     }
     Ok(())
@@ -78,4 +106,45 @@ pub(crate) fn resolve_generation_prompt_truncation(
     limit
         .map(|limit| PromptTruncation::from_wire(limit, side.unwrap_or(TruncationSide::Left)))
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use expect_test::expect;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn validate_request_mm_kwargs_rejects_only_non_empty_overrides() {
+        let empty = HashMap::new();
+        let processor = HashMap::from([("num_crops".to_string(), json!(4))]);
+        let media = HashMap::from([("video".to_string(), json!({"num_frames": 8}))]);
+
+        let results = [
+            (None, None),
+            (Some(&empty), Some(&empty)),
+            (None, Some(&media)),
+            (Some(&processor), None),
+            // Python checks `mm_processor_kwargs` first.
+            (Some(&processor), Some(&media)),
+        ]
+        .map(
+            |(processor, media)| match validate_request_mm_kwargs(processor, media) {
+                Ok(()) => "ok".to_string(),
+                Err(ApiError::InvalidRequest { message, param }) => format!("{param:?}: {message}"),
+                Err(error) => panic!("unexpected error: {error:?}"),
+            },
+        );
+
+        expect![[r#"
+            [
+                "ok",
+                "ok",
+                "Some(\"media_io_kwargs\"): Per-request media_io_kwargs are disabled by default because they can change multimodal media loading resource usage. Start the server with --trust-request-mm-kwargs only when clients are trusted.",
+                "Some(\"mm_processor_kwargs\"): Per-request mm_processor_kwargs are disabled by default because they can change multimodal preprocessing resource usage. Start the server with --trust-request-mm-kwargs only when clients are trusted.",
+                "Some(\"mm_processor_kwargs\"): Per-request mm_processor_kwargs are disabled by default because they can change multimodal preprocessing resource usage. Start the server with --trust-request-mm-kwargs only when clients are trusted.",
+            ]
+        "#]].assert_debug_eq(&results);
+    }
 }

@@ -10593,6 +10593,41 @@ async fn tokenize_chat_empty_messages_returns_400() {
     assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_accepts_only_empty_mm_kwargs() {
+    let mut app = test_app().await;
+
+    for (kwargs, expected_status) in [
+        (
+            json!({"mm_processor_kwargs": {}, "media_io_kwargs": {}}),
+            StatusCode::OK,
+        ),
+        (
+            json!({"mm_processor_kwargs": null, "media_io_kwargs": null}),
+            StatusCode::OK,
+        ),
+        (
+            json!({"mm_processor_kwargs": {"num_crops": 4}}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"media_io_kwargs": {"video": {"num_frames": 8}}}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        body.as_object_mut().unwrap().extend(kwargs.as_object().unwrap().clone());
+
+        let (status, json) = post_json(&mut app, "/tokenize", body).await;
+
+        assert_eq!(status, expected_status, "{kwargs}: {json}");
+    }
+}
+
 /// Python renders an empty user turn, so empty content is accepted here too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
