@@ -1388,3 +1388,230 @@ async fn responses_store_dependent_features_are_rejected() {
     engine_task.await.expect("mock engine task");
     assert_eq!(json["status"], "completed");
 }
+
+fn client_tool_search_tool() -> serde_json::Value {
+    json!({
+        "type": "tool_search",
+        "execution": "client",
+        "description": "Search deferred tools.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+    })
+}
+
+/// Input items of a finished client tool search that loaded one namespaced
+/// GitHub tool, in the shapes Codex sends.
+fn tool_search_history() -> Vec<serde_json::Value> {
+    vec![
+        json!({"role": "user", "content": "diff of PR 1"}),
+        json!({
+            "type": "tool_search_call",
+            "call_id": "call_ts1",
+            "execution": "client",
+            "status": "completed",
+            "arguments": {"query": "pull request diff"}
+        }),
+        json!({
+            "type": "tool_search_output",
+            "call_id": "call_ts1",
+            "execution": "client",
+            "status": "completed",
+            "tools": [{
+                "type": "namespace",
+                "name": "mcp__github",
+                "description": "GitHub.",
+                "tools": [{
+                    "type": "function",
+                    "name": "get_pr_diff",
+                    "description": "Fetch a pull request diff.",
+                    "defer_loading": true,
+                    "parameters": {"type": "object", "properties": {"pr_number": {"type": "integer"}}}
+                }]
+            }]
+        }),
+    ]
+}
+
+/// Run one request with the given engine output, returning the response
+/// object and, when streaming, the SSE payloads.
+async fn responses_with_tool_call_output(
+    output: &[u8],
+    request: serde_json::Value,
+    stream: bool,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        vec![(
+            bytes_to_token_ids(output),
+            Some(EngineCoreFinishReason::Stop),
+        )],
+    )
+    .await;
+    let mut request = request;
+    request["stream"] = json!(stream);
+    let response = responses_call(&app, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    if stream {
+        let payloads = sse_json_payloads(&text);
+        let response = payloads.last().expect("terminal event")["response"].clone();
+        (response, payloads)
+    } else {
+        (serde_json::from_str(&text).expect("decode json"), vec![])
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_client_tool_search_call_is_a_tool_search_call_item() {
+    for stream in [false, true] {
+        let (json, payloads) = responses_with_tool_call_output(
+            b"<tool_call>\n{\"name\":\"tool_search\", \"arguments\":{\"query\":\"pr diff\"}}\n</tool_call>",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "input": "diff of PR 1",
+                "tools": [client_tool_search_tool()],
+            }),
+            stream,
+        )
+        .await;
+
+        let output = json["output"].as_array().expect("output items");
+        let call = output
+            .iter()
+            .find(|item| item["type"] == "tool_search_call")
+            .unwrap_or_else(|| panic!("tool search call item: {json}"));
+        assert!(call["id"].as_str().unwrap().starts_with("tsc_"), "{json}");
+        assert!(
+            call["call_id"].as_str().unwrap().starts_with("call_"),
+            "{json}"
+        );
+        assert_eq!(call["execution"], "client", "{json}");
+        assert_eq!(call["status"], "completed", "{json}");
+        assert_eq!(call["arguments"], json!({"query": "pr diff"}), "{json}");
+        assert!(
+            !output.iter().any(|item| item["type"] == "function_call"),
+            "{json}"
+        );
+        assert_eq!(json["tools"], json!([client_tool_search_tool()]));
+        if stream {
+            let item_events = payloads
+                .iter()
+                .filter(|payload| payload["item"]["type"] == "tool_search_call")
+                .map(|payload| payload["type"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                item_events,
+                ["response.output_item.added", "response.output_item.done"]
+            );
+            assert!(
+                !payloads.iter().any(|payload| payload["type"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("response.function_call_arguments")),
+                "{payloads:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_tools_loaded_by_tool_search_are_callable_by_namespace() {
+    for stream in [false, true] {
+        let (json, _) = responses_with_tool_call_output(
+            b"<tool_call>\n{\"name\":\"mcp__github__get_pr_diff\", \"arguments\":{\"pr_number\":1}}\n</tool_call>",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "input": tool_search_history(),
+                "tools": [client_tool_search_tool()],
+            }),
+            stream,
+        )
+        .await;
+
+        let call = json["output"]
+            .as_array()
+            .expect("output items")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("function call item: {json}"));
+        assert_eq!(call["name"], "get_pr_diff", "{json}");
+        assert_eq!(call["namespace"], "mcp__github", "{json}");
+        assert_eq!(call["arguments"], "{\"pr_number\":1}", "{json}");
+        // The echoed tools are the request's own, without the loaded ones.
+        assert_eq!(json["tools"], json!([client_tool_search_tool()]));
+    }
+}
+
+/// End to end through a renderer that lists deferred tools where a search
+/// result references them: GLM-5 shows `tool_search` up front and expands the
+/// loaded tool in the tool response, as its checkpoint template does. The
+/// loaded tool belongs to the history, so it stays when
+/// `--exclude-tools-when-tool-choice-none` drops the request's tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_glm_prompt_lists_loaded_tools_where_the_search_result_is() {
+    // The loaded tool may also be a deferred request tool; its definition must
+    // survive the exclusion too, since the result references it.
+    let declared_github = json!({
+        "type": "namespace",
+        "name": "mcp__github",
+        "description": "GitHub.",
+        "tools": [{"type": "function", "name": "get_pr_diff", "defer_loading": true}]
+    });
+    for (exclude, extra_tools) in [
+        (false, vec![]),
+        (true, vec![]),
+        (true, vec![declared_github]),
+    ] {
+        let mut tools = vec![client_tool_search_tool()];
+        tools.extend(extra_tools);
+        let (_dir, backend, tokenizer) = glm5_next_render_backend().await;
+        let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
+        // GLM-5 renders token IDs with its own tokenizer; the fake text backend
+        // only carries them to the engine.
+        let (app, engine_task) = test_app_with_chat_and_engine_request_check(
+            |llm| {
+                ChatLlm::new(TextLlm::new(llm, Arc::new(FakeChatBackend::new())), backend)
+                    .with_exclude_tools_when_tool_choice_none(exclude)
+            },
+            move |request| {
+                let ids = decode_prompt_token_ids(request).expect("prompt token ids");
+                prompt_tx.send(tokenizer.decode(&ids, false).unwrap()).unwrap();
+            },
+        )
+        .await;
+
+        let response = responses_call(
+            &app,
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "input": tool_search_history(),
+                "tools": tools,
+                // The test backend has no GLM tool parser; only the prompt
+                // matters.
+                "tool_choice": "none",
+            }),
+        )
+        .await;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        engine_task.await.expect("mock engine task");
+
+        let prompt = prompt_rx.recv().expect("engine request");
+        let (system, history) = prompt.split_once("<|user|>").expect("user turn");
+        assert_eq!(
+            system.contains("\"name\": \"tool_search\""),
+            !exclude,
+            "exclude={exclude}: {prompt}"
+        );
+        assert!(!system.contains("get_pr_diff"), "{prompt}");
+        assert!(
+            history.contains("<tool_response><tools>\n{\"name\": \"mcp__github__get_pr_diff\""),
+            "exclude={exclude}: {prompt}"
+        );
+    }
+}
