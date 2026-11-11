@@ -128,6 +128,8 @@ pub struct EngineCoreLlm {
     /// Facts from the engine-core startup handshake.
     info: LlmInfo,
     randomize_request_id: bool,
+    /// Whether the engine applies LoRA to the multimodal tower and connector.
+    tower_connector_lora: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
@@ -164,6 +166,7 @@ impl EngineCoreLlm {
             client,
             info,
             randomize_request_id: true,
+            tower_connector_lora: false,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
@@ -188,6 +191,14 @@ impl EngineCoreLlm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Scope multimodal encoder-cache identifiers to each request's LoRA
+    /// adapter, for an engine started with `--enable-tower-connector-lora`,
+    /// whose encoder outputs then depend on the adapter.
+    pub fn with_tower_connector_lora(mut self, enabled: bool) -> Self {
+        self.tower_connector_lora = enabled;
         self
     }
 
@@ -237,7 +248,7 @@ impl EngineCoreLlm {
         req.sampling_params.stream_interval =
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
-        let prepared = req.prepare(self.randomize_request_id)?;
+        let prepared = req.prepare(self.randomize_request_id, self.tower_connector_lora)?;
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;
