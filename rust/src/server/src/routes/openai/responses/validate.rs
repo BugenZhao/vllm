@@ -3,6 +3,7 @@
 
 use super::types::ResponsesRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_request_mm_kwargs;
 
 /// Enforce the compatibility contract of the Rust Responses API frontend.
 ///
@@ -74,19 +75,10 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
-    if request.media_io_kwargs.is_some() {
-        bail_invalid_request!(
-            param = "media_io_kwargs",
-            "media_io_kwargs is not supported."
-        );
-    }
-
-    if request.mm_processor_kwargs.is_some() {
-        bail_invalid_request!(
-            param = "mm_processor_kwargs",
-            "mm_processor_kwargs is not supported."
-        );
-    }
+    validate_request_mm_kwargs(
+        request.mm_processor_kwargs.as_ref(),
+        request.media_io_kwargs.as_ref(),
+    )?;
 
     if request.enable_response_messages {
         bail_invalid_request!(
@@ -149,6 +141,15 @@ mod tests {
             validate_request_compat(&request),
             Err(ApiError::InvalidRequest { .. })
         ));
+    }
+
+    #[test]
+    fn empty_mm_kwargs_are_accepted() {
+        let request = serde_json::from_value(
+            json!({"input": "hello", "mm_processor_kwargs": {}, "media_io_kwargs": {}}),
+        )
+        .unwrap();
+        assert!(validate_request_compat(&request).is_ok());
     }
 
     #[test]

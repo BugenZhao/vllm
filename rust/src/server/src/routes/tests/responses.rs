@@ -158,7 +158,7 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
         ("media_io_kwargs", json!({"image": {}})),
-        ("mm_processor_kwargs", json!({})),
+        ("mm_processor_kwargs", json!({"num_crops": 4})),
         ("enable_response_messages", json!(true)),
         ("prompt_cache_retention", json!("1w")),
         ("prompt_cache_options", json!({"ttl": "1h"})),
