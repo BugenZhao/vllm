@@ -68,6 +68,9 @@ struct RoundtripCase {
     /// suffix); the variant answered with calls needs a tool grammar, which
     /// holds the calls next to the schema.
     with_schema: &'static [ToolCallMixVariant],
+    /// Whether a tool call ends the generation, as Harmony's `<|call|>` stop
+    /// token does. The tool-call fixture then completes only the first call.
+    calls_end_generation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -228,6 +231,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -242,6 +246,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -256,6 +261,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -270,6 +276,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -289,6 +296,7 @@ impl RoundtripCase {
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+            calls_end_generation: false,
         }
     }
 
@@ -303,6 +311,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -317,6 +326,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -331,6 +341,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -350,6 +361,7 @@ impl RoundtripCase {
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+            calls_end_generation: false,
         }
     }
 
@@ -364,6 +376,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -378,6 +391,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -392,6 +406,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: true,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
+            calls_end_generation: false,
         }
     }
 
@@ -416,6 +431,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
+            calls_end_generation: false,
         }
     }
 
@@ -434,6 +450,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Compact,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -459,6 +476,7 @@ impl RoundtripCase {
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+            calls_end_generation: false,
         }
     }
 
@@ -481,6 +499,7 @@ impl RoundtripCase {
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+            calls_end_generation: false,
         }
     }
 
@@ -499,6 +518,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
+            calls_end_generation: false,
         }
     }
 
@@ -518,6 +538,7 @@ impl RoundtripCase {
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+            calls_end_generation: false,
         }
     }
 
@@ -532,6 +553,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -546,6 +568,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -560,6 +583,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 
@@ -567,13 +591,14 @@ impl RoundtripCase {
     fn gpt_oss() -> Self {
         Self {
             model_id: "openai/gpt-oss-20b",
-            assistant_stop_suffix: "",
+            assistant_stop_suffix: "<|call|>",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Compact,
             sort_json_keys: false,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
+            calls_end_generation: true,
         }
     }
 
@@ -588,6 +613,7 @@ impl RoundtripCase {
             json_style: JsonStyle::Compact,
             sort_json_keys: true,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
+            calls_end_generation: false,
         }
     }
 }
@@ -735,7 +761,10 @@ async fn run_roundtrip_tool_call_mix_inner(
     );
     request.sampling_params.structured_outputs = variant.structured_outputs();
     let expected_reasoning = "Need call the weather and add tools.";
-    let (expected_text, tool_call_count) = variant.expected();
+    let (expected_text, mut tool_call_count) = variant.expected();
+    if case.calls_end_generation {
+        tool_call_count = tool_call_count.min(1);
+    }
 
     let mut content = vec![AssistantContentBlock::Reasoning {
         text: expected_reasoning.to_string(),

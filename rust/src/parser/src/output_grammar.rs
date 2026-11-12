@@ -227,7 +227,7 @@ pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<
 /// Normalize the request tools the way `build_structural_tag` does before
 /// calling a crate builder, for model-owned grammar builders. Returns `None`
 /// when the request asks for no tool grammar.
-pub(crate) fn normalize_tool_choice(
+pub fn normalize_tool_choice(
     ctx: &OutputGrammarContext<'_>,
 ) -> Result<Option<NormalizedToolChoice>> {
     if !tool_grammar_applies(ctx) {

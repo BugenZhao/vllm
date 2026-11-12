@@ -8,12 +8,56 @@ use serde_json::{Value, json};
 use vllm_engine_core_client::protocol::structured_outputs::{
     StructuredOutputConstraint, StructuredOutputsParams,
 };
-use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage};
+use vllm_parser::output_grammar::{BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext};
 use vllm_text::TextRequest;
-use xgrammar_structural_tag::StructuralTag;
 use xgrammar_structural_tag::format::{Format, GrammarFormat, TagFormat};
+use xgrammar_structural_tag::{StructuralTag, ToolChoice};
 
+use crate::parser::ToolStrictLevel;
+use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result};
+
+/// Request-scoped inputs for [`ChatOutputProcessor::build_output_grammar`],
+/// captured at construction because the chat request is consumed before the
+/// prompt is tokenized.
+///
+/// [`ChatOutputProcessor::build_output_grammar`]: super::ChatOutputProcessor::build_output_grammar
+#[derive(Debug)]
+pub(crate) struct GrammarInputs {
+    tools: Vec<ChatTool>,
+    tool_choice: ToolChoice,
+    tool_strict_level: ToolStrictLevel,
+    parallel_tool_calls: bool,
+    /// The request's structured-output constraint, normalized for composition
+    /// into the output grammar. The original stays on the request until an
+    /// output grammar replaces it.
+    answer: Option<Format>,
+}
+
+impl GrammarInputs {
+    /// Capture the grammar inputs of `request` under the effective
+    /// `tool_strict_level`.
+    pub(crate) fn new(request: &ChatRequest, tool_strict_level: ToolStrictLevel) -> Self {
+        Self {
+            tools: request.tools().to_vec(),
+            tool_choice: request.tool_choice().into(),
+            tool_strict_level,
+            parallel_tool_calls: request.parallel_tool_calls(),
+            answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
+        }
+    }
+
+    /// The grammar-building context over these inputs.
+    pub(crate) fn context(&self) -> OutputGrammarContext<'_> {
+        OutputGrammarContext {
+            tools: &self.tools,
+            tool_choice: &self.tool_choice,
+            tool_strict_level: self.tool_strict_level,
+            parallel_tool_calls: self.parallel_tool_calls,
+            answer: self.answer.as_ref(),
+        }
+    }
+}
 
 /// Normalize the user's structured-output constraint to the answer format a
 /// parser may compose into its output grammar.
