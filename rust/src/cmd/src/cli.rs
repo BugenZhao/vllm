@@ -11,6 +11,7 @@ mod logging;
 mod model;
 mod ssl;
 mod unsupported;
+pub mod unsupported_env;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
