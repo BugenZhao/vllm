@@ -485,6 +485,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub lora_modules: Vec<LoraModulePath>,
 
+    /// If `True`, LoRA support for the tower (vision encoder) and connector
+    /// of multimodal models will be enabled. This is an experimental feature
+    /// and currently only supports some MM models such as the Qwen VL series.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_tower_connector_lora: bool,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -1044,6 +1051,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            enable_tower_connector_lora: self.enable_tower_connector_lora,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1133,6 +1141,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
+            enable_tower_connector_lora: self.enable_tower_connector_lora,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
@@ -1525,6 +1534,9 @@ impl ServeArgs {
             managed_engine
                 .python_args
                 .extend(["--logging-config".to_string(), logging_config]);
+        }
+        if self.runtime.enable_tower_connector_lora {
+            managed_engine.python_args.push("--enable-tower-connector-lora".to_string());
         }
         managed_engine.into_config(
             self.runtime.model.id.clone(),
