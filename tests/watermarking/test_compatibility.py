@@ -399,6 +399,7 @@ def _preprocess_in_engine_core(
     core = object.__new__(EngineCore)
     core.vllm_config = VllmConfig()
     core.vllm_config.watermark_config = watermark_config
+    core.vllm_config.model_config = SimpleNamespace(return_sampling_mask=False)
     core.mm_receiver_cache = None
     core.request_block_hasher = None
     core.prefix_hash_config = None

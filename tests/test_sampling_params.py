@@ -105,7 +105,8 @@ def test_diffusion_canvas_width_is_accepted_with_either_scheduler(
     processor = SimpleNamespace(
         model_config=MockModelConfig(is_diffusion=True),
         vllm_config=SimpleNamespace(
-            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
+            scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+            reasoning_config=None,
         ),
         speculative_config=None,
         structured_outputs_config=None,
