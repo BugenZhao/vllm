@@ -260,10 +260,6 @@ async def test_generate_explicit_null_max_tokens_respects_server_cap(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="parallel sampling (n > 1) is not supported by the Rust frontend",
-)
 async def test_generate_returns_all_choices_when_n_greater_than_one(client):
     """Regression: `n > 1` must return `n` choices.
 
@@ -808,10 +804,6 @@ def _text_mode_payload(token_ids, **sampling_params) -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
-)
 async def test_text_mode_matches_chat_completions(client, tokenizer, messages):
     token_ids = _chat_prompt_token_ids(tokenizer, messages)
 
@@ -836,10 +828,6 @@ async def test_text_mode_matches_chat_completions(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
-)
 async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
     token_ids = _chat_prompt_token_ids(tokenizer, messages)
     payload = _text_mode_payload(token_ids)
@@ -863,10 +851,6 @@ async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
-)
 @pytest.mark.parametrize(
     "overrides, expected",
     [
