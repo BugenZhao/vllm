@@ -38,6 +38,9 @@ pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
 pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
 
+/// Default role of chat completion responses (`--response-role`).
+pub const DEFAULT_RESPONSE_ROLE: &str = "assistant";
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -386,6 +389,9 @@ pub struct Config {
     pub lora_modules: Vec<LoraModulePath>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
+    /// Role of a chat completion response that starts a new turn
+    /// (`--response-role`).
+    pub response_role: String,
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,

@@ -292,6 +292,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        response_role: "assistant",
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_log_outputs: false,
@@ -2031,6 +2032,41 @@ fn frontend_args_json_passes_reasoning_effort_map_into_config() {
 }
 
 #[test]
+fn response_role_reaches_config_on_both_launch_paths() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"bot"}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.into_config().response_role, "bot");
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--response-role",
+        "bot",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert_eq!(config.response_role, "bot");
+}
+
+#[test]
 fn serve_rejects_unknown_reasoning_effort_map_key() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -2297,6 +2333,7 @@ fn frontend_args_accept_json() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        response_role: "assistant",
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_log_outputs: false,
@@ -2830,15 +2867,15 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","middleware":["x.y"],"uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","middleware":["x.y"],"uvicorn_log_level":"debug"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
-        - response_role
+        - middleware
         - uvicorn_log_level
 
         Remove these arguments to continue.
@@ -3256,6 +3293,7 @@ fn serve_args_accept_handshake_aliases() {
                         limit_mm_per_prompt: {},
                         lora_modules: [],
                         chat_template_content_format: Auto,
+                        response_role: "assistant",
                         return_tokens_as_token_ids: false,
                         enable_log_requests: false,
                         enable_log_outputs: false,
@@ -3561,6 +3599,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
+            response_role: "assistant",
             max_logprobs: None,
             stream_interval: 1,
             api_server_options: ApiServerOptions {
@@ -3695,6 +3734,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
+            response_role: "assistant",
             max_logprobs: None,
             stream_interval: 1,
             api_server_options: ApiServerOptions {
@@ -3942,6 +3982,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             limit_mm_per_prompt: {},
             lora_modules: [],
             chat_template_content_format: Auto,
+            response_role: "assistant",
             max_logprobs: None,
             stream_interval: 1,
             api_server_options: ApiServerOptions {

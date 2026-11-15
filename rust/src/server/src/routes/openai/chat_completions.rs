@@ -27,11 +27,11 @@ use vllm_llm::WeightVersionSpan;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
-use crate::config::{ApiServerOptions, OutputLogConfig};
+use crate::config::{ApiServerOptions, DEFAULT_RESPONSE_ROLE, OutputLogConfig};
 use crate::error::{ApiError, bail_server_error, chat_submit_error, engine_error, server_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
+    ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
@@ -60,7 +60,9 @@ pub(crate) fn lower_chat_request(
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<ChatRequest, ApiError> {
-    prepare_chat_request(request, lora_resolution, ctx).map(|prepared| prepared.chat_request)
+    // Only the chat request is used, so the response role does not matter.
+    prepare_chat_request(request, lora_resolution, ctx, DEFAULT_RESPONSE_ROLE)
+        .map(|prepared| prepared.chat_request)
 }
 
 /// Validate one chat completion request and proxy it into the shared
@@ -75,7 +77,12 @@ pub async fn chat_completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+    let prepared = match prepare_chat_request(
+        body,
+        &lora_resolution,
+        request_context,
+        &state.response_role,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -220,6 +227,7 @@ async fn collect_chat_completion(
         output_top_logprobs,
         include_prompt_logprobs,
         include_reasoning,
+        role,
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
@@ -346,7 +354,7 @@ async fn collect_chat_completion(
         choices: vec![ChatCompletionChoice {
             index: 0,
             message: ChatCompletionMessage {
-                role: AssistantRole,
+                role,
                 content,
                 refusal: None,
                 annotations: None,
@@ -401,6 +409,7 @@ async fn chat_completion_chunk_stream(
         // Ignored: chat streaming prompt logprobs are rejected for Python parity.
         include_prompt_logprobs: _,
         include_reasoning,
+        role,
         echo,
         return_token_ids,
         return_tokens_as_token_ids,
@@ -453,13 +462,13 @@ async fn chat_completion_chunk_stream(
                 prompt_token_ids, ..
             }) => {
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
-                let mut chunk = start_chunk(&envelope);
+                let mut chunk = start_chunk(&envelope, &role);
                 chunk.prompt = Some(ChatCompletionStreamPrompt {
                     prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
                     prompt_text: prompt_text.take(),
                 });
                 yield_chunk!(chunk);
-                // When echo=true, emit the last assistant message content as a delta chunk.
+                // When echo=true, emit the last message content as a delta chunk.
                 if let Some(echo_text) = &echo {
                     yield_chunk!(block_delta_chunk(
                         &envelope,
@@ -925,13 +934,12 @@ fn append_delta_text(slot: &mut Option<String>, delta: String) {
     }
 }
 
-/// Build the initial assistant-role SSE chunk required by the OpenAI streaming
-/// protocol.
-fn start_chunk(envelope: &Arc<StreamResponseEnvelope>) -> ChatCompletionStreamResponse {
+/// Build the initial role SSE chunk required by the OpenAI streaming protocol.
+fn start_chunk(envelope: &Arc<StreamResponseEnvelope>, role: &str) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(envelope);
     chunk.choices.push(ChatCompletionStreamChoice {
         delta: ChatMessageDelta {
-            role: Some(AssistantRole),
+            role: Some(role.to_owned()),
             ..Default::default()
         },
         ..Default::default()

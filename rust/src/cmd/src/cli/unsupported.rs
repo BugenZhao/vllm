@@ -364,10 +364,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub trust_request_mm_kwargs: Option<Unsupported>,
 
-    /// The role name to return if `request.add_generation_prompt=true`.
-    #[arg(long)]
-    pub response_role: Option<Unsupported>,
-
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
     #[arg(

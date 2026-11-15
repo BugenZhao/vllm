@@ -553,6 +553,21 @@ pub enum ChatMessage {
     },
 }
 
+impl ChatMessage {
+    /// The message's `role` on the wire.
+    pub fn role(&self) -> &str {
+        match self {
+            Self::System { .. } => "system",
+            Self::User { .. } => "user",
+            Self::Assistant { .. } => "assistant",
+            Self::Tool { .. } => "tool",
+            Self::Function { .. } => "function",
+            Self::Developer { .. } => "developer",
+            Self::Custom { role, .. } => role,
+        }
+    }
+}
+
 /// Role tags of the standard [`ChatMessage`] variants.
 const STANDARD_CHAT_ROLES: &[&str] = &[
     "system",

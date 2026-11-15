@@ -34,8 +34,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DEFAULT_RESPONSE_ROLE, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -197,6 +197,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_system_fingerprint(system_fingerprint)
+            .with_response_role(config.response_role.clone())
             .with_server_info(server_info)
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())

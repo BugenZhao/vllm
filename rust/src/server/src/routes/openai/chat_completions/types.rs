@@ -2,13 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
-use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_with::{DefaultOnNull, SerializeDisplay};
+use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
@@ -423,21 +422,12 @@ pub(super) struct ChatCompletionChoice {
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
-/// A literal type for the "assistant" role, since the API only allows that
-/// specific value in responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay)]
-pub(super) struct AssistantRole;
-
-impl fmt::Display for AssistantRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("assistant")
-    }
-}
-
 /// Mirrors the Python vLLM response `ChatMessage` class.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionMessage {
-    pub role: AssistantRole,
+    /// The `--response-role` for a new turn, or the role of the continued last
+    /// message.
+    pub role: String,
     pub content: Option<String>,
     // OpenAI fields the Rust frontend never produces; always `None`.
     pub refusal: Option<String>,
@@ -513,7 +503,7 @@ pub(super) struct ChatCompletionStreamChoice {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct ChatMessageDelta {
-    pub role: Option<AssistantRole>,
+    pub role: Option<String>,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,

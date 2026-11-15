@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, FingerprintMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DEFAULT_RESPONSE_ROLE,
+    FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -494,6 +494,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,
+
+    /// The role name to return if `request.add_generation_prompt=true`.
+    #[arg(long, default_value = DEFAULT_RESPONSE_ROLE)]
+    #[serde(default = "default_response_role")]
+    pub response_role: String,
 
     /// When `--max-logprobs` is specified, represents single tokens as
     /// strings of the form 'token_id:{token_id}' so that tokens that are not
@@ -1045,6 +1050,7 @@ impl SharedRuntimeArgs {
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
+            response_role: self.response_role,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
@@ -1134,6 +1140,7 @@ impl SharedRuntimeArgs {
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
+            response_role: self.response_role,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
             api_server_options,
@@ -1237,6 +1244,10 @@ fn default_engine_ready_timeout_secs() -> u64 {
 
 fn default_enable_log_deltas() -> bool {
     true
+}
+
+fn default_response_role() -> String {
+    DEFAULT_RESPONSE_ROLE.to_owned()
 }
 
 fn default_stream_interval() -> NonZeroU32 {

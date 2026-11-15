@@ -15,7 +15,9 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 use vllm_llm::{EngineCoreLlm, Llm};
 
-use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_RESPONSE_ROLE, LoraModulePath,
+};
 use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
@@ -43,6 +45,9 @@ pub struct AppState {
     /// `system_fingerprint` of chat and completion responses, fixed at
     /// startup.
     pub system_fingerprint: Option<String>,
+    /// Role of a chat completion response that starts a new turn
+    /// (`--response-role`).
+    pub response_role: String,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
@@ -83,6 +88,7 @@ impl AppState {
             chat,
             api_server_options: ApiServerOptions::default(),
             system_fingerprint: None,
+            response_role: DEFAULT_RESPONSE_ROLE.to_owned(),
             cors: CorsConfig::default(),
             access_log: AccessLogConfig::default(),
             server_info: None,
@@ -104,6 +110,12 @@ impl AppState {
     /// Set the `system_fingerprint` of chat and completion responses.
     pub fn with_system_fingerprint(mut self, system_fingerprint: Option<String>) -> Self {
         self.system_fingerprint = system_fingerprint;
+        self
+    }
+
+    /// Set the role of chat completion responses that start a new turn.
+    pub fn with_response_role(mut self, response_role: String) -> Self {
+        self.response_role = response_role;
         self
     }
 

@@ -54,7 +54,10 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether to include reasoning content in OpenAI responses.
     pub include_reasoning: bool,
-    /// Last assistant-role message content to echo back when `echo=true`.
+    /// Role of the response message.
+    pub role: String,
+    /// Content of the last message to echo back when `echo=true`, if it has
+    /// the response role.
     pub echo: Option<String>,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
@@ -72,10 +75,12 @@ pub(super) struct ResponseOptions {
 ///
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
+/// `response_role` is the server's `--response-role`.
 pub(super) fn prepare_chat_request(
     request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    response_role: &str,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
     let n = resolve_n(request.n)?;
@@ -89,16 +94,26 @@ pub(super) fn prepare_chat_request(
     let request_id = format!("chatcmpl-{}", ctx.request_id);
     let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
-    let echo = request
-        .echo
-        .then(|| extract_last_assistant_content(&request.messages))
-        .flatten();
+    let last_message = request.messages.last();
+    let last_message_role = last_message.map(|message| message.role().to_owned());
+    let echo_content = request.echo.then(|| last_message.and_then(message_text)).flatten();
     let messages: Vec<_> = request.messages.into_iter().map(convert_message).try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
         request.add_generation_prompt,
         request.continue_final_message,
         &messages,
     )?;
+    // Like Python's `get_chat_response_role`: a new turn takes the server's
+    // role, and a continued last message keeps its own. `echo` repeats the
+    // last message only under the role the response takes.
+    let role = match generation_prompt_mode {
+        GenerationPromptMode::StartNewAssistant => response_role,
+        GenerationPromptMode::ContinueFinalAssistant | GenerationPromptMode::NoGenerationPrompt => {
+            last_message_role.as_deref().unwrap_or(response_role)
+        }
+    };
+    let echo = echo_content.filter(|_| last_message_role.as_deref() == Some(role));
+    let role = role.to_owned();
 
     let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
     let response_format =
@@ -231,6 +246,7 @@ pub(super) fn prepare_chat_request(
             output_top_logprobs,
             include_prompt_logprobs,
             include_reasoning,
+            role,
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
@@ -267,12 +283,20 @@ pub(crate) fn normalize_generation_prompt_mode(
     }
 }
 
-/// Extract the text content of the last message if it has the assistant role.
-fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
-    let ChatMessage::Assistant { content, .. } = messages.last()? else {
-        return None;
+/// Extract the text content of one message for `echo`, like Python's
+/// `get_echo_content`.
+fn message_text(message: &ChatMessage) -> Option<String> {
+    let content = match message {
+        ChatMessage::System { content, .. }
+        | ChatMessage::User { content, .. }
+        | ChatMessage::Tool { content, .. }
+        | ChatMessage::Developer { content, .. }
+        | ChatMessage::Custom { content, .. } => content,
+        ChatMessage::Assistant { content, .. } => content.as_ref()?,
+        // Rejected when the message is lowered.
+        ChatMessage::Function { .. } => return None,
     };
-    let text = match content.as_ref()? {
+    let text = match content {
         MessageContent::Text(text) => text.clone(),
         MessageContent::Parts(parts) => parts
             .iter()
@@ -483,11 +507,13 @@ mod tests {
     };
     use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
 
-    use super::prepare_chat_request;
+    use super::PreparedRequest;
+    use crate::config::DEFAULT_RESPONSE_ROLE;
+    use crate::error::ApiError;
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
-        AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
+        ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::structured_outputs::{JsonSchemaFormat, ResponseFormat};
     use crate::routes::openai::utils::types::{
@@ -495,6 +521,15 @@ mod tests {
         MessageContent, StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
+
+    /// [`super::prepare_chat_request`] under the default `--response-role`.
+    fn prepare_chat_request(
+        request: ChatCompletionRequest,
+        lora_resolution: &LoraModelResolution,
+        ctx: ResolvedRequestContext,
+    ) -> Result<PreparedRequest, ApiError> {
+        super::prepare_chat_request(request, lora_resolution, ctx, DEFAULT_RESPONSE_ROLE)
+    }
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
         resolve_request_context(headers, request_id)
@@ -1421,6 +1456,60 @@ mod tests {
         );
     }
 
+    /// Like Python's `get_chat_response_role` and `get_echo_content`: a new
+    /// turn takes `--response-role`, a request without a generation prompt
+    /// takes the last message's role, and `echo` repeats the last message only
+    /// when its role is the response role.
+    #[test]
+    fn prepare_chat_request_resolves_response_role_and_echo() {
+        let cases = [
+            // A new turn after an assistant message under a custom server role.
+            (json!({}), "assistant", "bot", None),
+            // A new turn after a message in the server role.
+            (json!({}), "bot", "bot", Some("history")),
+            // A continued assistant message keeps its role.
+            (
+                json!({"add_generation_prompt": false, "continue_final_message": true}),
+                "assistant",
+                "assistant",
+                Some("history"),
+            ),
+            // Without a generation prompt, the last message's role is kept.
+            (
+                json!({"add_generation_prompt": false}),
+                "user",
+                "user",
+                Some("history"),
+            ),
+        ];
+        for (fields, last_role, role, echo) in cases {
+            let mut body = json!({
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": last_role, "content": [{"type": "text", "text": "history"}]},
+                ],
+                "echo": true,
+            });
+            body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            let request: ChatCompletionRequest = serde_json::from_value(body).unwrap();
+
+            let prepared = super::prepare_chat_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                "bot",
+            )
+            .expect("request is valid");
+
+            assert_eq!(prepared.options.role, role, "{fields} after {last_role}");
+            assert_eq!(
+                prepared.options.echo.as_deref(),
+                echo,
+                "{fields} after {last_role}"
+            );
+        }
+    }
+
     #[test]
     fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
@@ -1491,7 +1580,7 @@ mod tests {
     #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
         let message = ChatCompletionMessage {
-            role: AssistantRole,
+            role: "assistant".to_string(),
             content: Some("answer".to_string()),
             refusal: None,
             annotations: None,
