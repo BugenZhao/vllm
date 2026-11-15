@@ -115,6 +115,38 @@ fn gemma4_template() -> Value {
     })
 }
 
+/// Identical to the template shipped in the Beam checkpoints: a closer ending
+/// with the next message's start (`<|end|><|start|>assistant`).
+fn beam_template() -> Value {
+    json!({
+        "defaults": {"role": "assistant"},
+        "start_anchor_pattern": r"<\|start\|>assistant",
+        "fields": {
+            "thinking": {
+                "open": "<|channel|>analysis<|message|>",
+                "close": "<|end|><|start|>assistant",
+                "content": "text",
+            },
+            "content": {
+                "open": "<|channel|>final<|message|>",
+                "close": ["<|return|>", "<|end|>", "<|call|>"],
+                "content": "text",
+            },
+            "tool_calls": {
+                "open_pattern": r" to=(?P<name>[^\s<]+)<\|channel\|>analysis <\|constrain\|>xml<\|message\|>",
+                "close": ["<|end|><|start|>assistant", "<|call|>"],
+                "repeats": true,
+                "content": "xml-inline",
+                "content_args": {
+                    "tag_pattern": "<rfl:parameter name=\"(?P<key>[^\"]+)\">\n(?P<value>.*?)\n(?:</rfl:parameter>|(?=<rfl:parameter name=\"))",
+                    "value_parser": {"name": "text", "args": {"strip": false}},
+                },
+                "transform": {"type": "function", "function": {"name": "{name}", "arguments": "{content}"}},
+            },
+        },
+    })
+}
+
 /// A routed-message protocol with XML-style invocations: no implicit field
 /// (text outside regions is discarded), Unicode word boundaries and lazy
 /// quantifiers in the opener, `xml-inline` arguments, and joined content.
@@ -590,6 +622,58 @@ fn literal_boundaries() {
     assert_eq!(
         parse(template, "<resp>hello world"),
         json!({"content": "hello world"})
+    );
+}
+
+/// Output that stops after `<|end|>`, such as at `max_tokens`, has ended its
+/// reasoning or call and lacks only (part of) the next message's start.
+#[test]
+fn output_cut_before_the_next_message_start_ends_its_region() {
+    let template = compile(beam_template());
+    let reasoning = "<|channel|>analysis<|message|>plan";
+    let call = "<|end|><|start|>assistant to=get_weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">\nParis\n</rfl:parameter>";
+    let weather = json!([{"name": "get_weather", "arguments": {"city": "Paris"}}]);
+    for end in ["<|end|>", "<|end|><|start|>", "<|end|><|start|>assistan"] {
+        for (text, expected) in [
+            (format!("{reasoning}{end}"), json!({"reasoning": "plan"})),
+            (
+                format!("{reasoning}{call}{end}"),
+                json!({"reasoning": "plan", "tool_calls": weather}),
+            ),
+        ] {
+            for step in [1, 2, 5, text.len()] {
+                let chunks = split_by_chars(&text, step);
+                let actual = message(&parse_events(&template, &[], "", &chunks).unwrap());
+                assert_eq!(actual, expected, "{chunks:?}");
+            }
+        }
+    }
+
+    // Only the next message's start may be missing: a closer cut before it is
+    // not completed.
+    assert_eq!(
+        parse(beam_template(), &format!("{reasoning}<|end")),
+        json!({"reasoning": "plan<|end"})
+    );
+
+    // A content parser that reads the whole body never sees the cut closer.
+    let template = json!({
+        "start_anchor": "<|start|>assistant",
+        "fields": {
+            "tool_calls": {
+                "open": "<tool_call>",
+                "close": "<|end|><|start|>assistant",
+                "content": "json",
+                "transform": {"type": "function", "function": "{content}"},
+            },
+        },
+    });
+    assert_eq!(
+        parse(
+            template,
+            r#"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}<|end|>"#
+        ),
+        json!({"tool_calls": weather})
     );
 }
 
