@@ -33,14 +33,18 @@ inline int ensure_parent_dirs(const std::string& path) {
   return ec ? ec.value() : 0;
 }
 
+// Returned by _store_block when dest_path already exists and nothing is
+// written.
+constexpr int kAlreadyPresent = -1;
+
 // Core single-block store: src/size are raw pointer + byte count. Returns 0
-// on success, or the errno of the failing step on failure -- captured
-// before any subsequent cleanup call can overwrite it. On failure, the temp
-// file is removed.
+// on success, kAlreadyPresent if dest_path exists, or the errno of the
+// failing step on failure -- captured before any subsequent cleanup call can
+// overwrite it. On failure, the temp file is removed.
 inline int _store_block(const char* tmp_path, const char* dest_path,
                         const char* src, size_t size, bool use_o_direct) {
   if (access(dest_path, F_OK) == 0) {
-    return 0;  // Already present.
+    return kAlreadyPresent;
   }
 
   if (const int err = ensure_parent_dirs(dest_path); err != 0) {
@@ -71,39 +75,49 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
   if (rename(tmp_path, dest_path) != 0) {
     const int err = errno;
     unlink(tmp_path);
-    return err;
+    // Another writer published this block after the access() above; some
+    // shared filesystems fail rename(2) with EEXIST instead of replacing.
+    // File names are content hashes, so the file already in place holds this
+    // block and the store is done. The bytes were written, so for bandwidth
+    // accounting the block still counts as transferred.
+    return err == EEXIST ? 0 : err;
   }
 
   return 0;
 }
 
 // Core single-block load: dst/size are raw pointer + byte count. Returns 0
-// on success, or the errno of the failing step on failure. On failure,
-// the source file is removed since a partially-read block should not be reused.
+// on success, or the errno of the failing step on failure. Removes the source
+// file ONLY on a provable short read (the read completed but returned fewer
+// bytes than requested): stores are atomic, so a too-short file is genuine
+// corruption. Open failures and read errors (bytes_read < 0) are
+// transient/ambiguous and leave the file untouched; a close failure after a
+// full read is harmless and does not fail the load.
 inline int _load_block(const char* source_path, char* dst, size_t size,
                        bool use_o_direct) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
-    const int err = errno;
-    unlink(source_path);
-    return err;
+    return errno;
   }
 
   const ssize_t bytes_read = read(fd, dst, size);
-  if (bytes_read < 0 || static_cast<size_t>(bytes_read) != size) {
-    const int err = bytes_read < 0 ? errno : EIO;
+  if (bytes_read < 0) {
+    // Transient read error: leave the file untouched.
+    const int err = errno;
+    close(fd);
+    return err;
+  }
+  if (static_cast<size_t>(bytes_read) < size) {
+    // Provable short read: the block is genuinely corrupt, so remove it.
     close(fd);
     unlink(source_path);
-    return err;
+    return EIO;
   }
 
-  if (close(fd) != 0) {
-    const int err = errno;
-    unlink(source_path);
-    return err;
-  }
-
+  // A close error after a successful full read is harmless: the data is
+  // already in the destination buffer, so the load succeeds.
+  close(fd);
   return 0;
 }
 
@@ -194,6 +208,8 @@ static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
+/// @return int – number of blocks transferred; blocks already on disk at the
+///                pre-check are skipped.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* tmp_paths_obj = nullptr;
@@ -228,6 +244,7 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 
   Py_ssize_t failed_index = -1;
   int failure_errno = 0;
+  Py_ssize_t num_written = 0;
 
   {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
@@ -235,11 +252,15 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
       const int err =
           _store_block(tmp_paths[i], dest_paths[i], buf,
                        static_cast<size_t>(buffers[i].len), use_o_direct);
+      if (err == kAlreadyPresent) {
+        continue;
+      }
       if (err != 0) {
         failed_index = i;
         failure_errno = err;
         break;
       }
+      num_written++;
     }
     Py_END_ALLOW_THREADS
   }
@@ -253,7 +274,7 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
                                           dest_paths[failed_index]);
   }
 
-  Py_RETURN_NONE;
+  return PyLong_FromSsize_t(num_written);
 }
 
 /// @brief Load a batch of blocks from disk, each into its own buffer.
@@ -312,8 +333,21 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   if (failed_index >= 0) {
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
     errno = failure_errno;
-    return PyErr_SetFromErrnoWithFilename(PyExc_OSError,
-                                          source_paths[failed_index]);
+    PyErr_SetFromErrnoWithFilename(PyExc_OSError, source_paths[failed_index]);
+    // Attach the number of blocks that loaded before the failure so the tier
+    // can keep them (partial success). failed_index == count of blocks read OK.
+    PyObject *etype, *evalue, *etb;
+    PyErr_Fetch(&etype, &evalue, &etb);
+    PyErr_NormalizeException(&etype, &evalue, &etb);
+    if (evalue != nullptr) {
+      PyObject* num = PyLong_FromSsize_t(failed_index);
+      if (num != nullptr) {
+        PyObject_SetAttrString(evalue, "num_succeeded", num);
+        Py_DECREF(num);
+      }
+    }
+    PyErr_Restore(etype, evalue, etb);
+    return nullptr;
   }
 
   Py_RETURN_NONE;
@@ -327,10 +361,11 @@ static PyMethodDef fs_io_C_methods[] = {
     {"batch_store_block", batch_store_block, METH_VARARGS,
      "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
      "                  buffers: list[bytes-like],\n"
-     "                  use_o_direct: bool = True) -> None\n"
+     "                  use_o_direct: bool = True) -> int\n"
      "\n"
-     "Store a batch of blocks, each from its own buffer, to disk. Raises on "
-     "first error."},
+     "Store a batch of blocks, each from its own buffer, to disk. Returns the "
+     "number transferred; blocks already on disk are skipped. Raises on first "
+     "error."},
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
      "                 buffers: list[writable bytes-like],\n"
