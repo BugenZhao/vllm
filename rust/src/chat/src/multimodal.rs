@@ -18,16 +18,18 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use itertools::{Either, izip};
+use llm_multimodal::media::{audio_max_input_bytes, image_max_input_bytes, video_max_input_bytes};
 use llm_multimodal::registry::ModelRegistryError;
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
-    FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart,
-    MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec, PreProcessorConfig,
-    PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver, TrackedMedia,
-    TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
+    FrameSampling, ImageFrame, MediaConnector, MediaConnectorConfig, MediaConnectorError,
+    MediaContentPart, MediaItemInfo, Modality, ModelMetadata, ModelProcessorSpec,
+    PreProcessorConfig, PreprocessedEncoderInputs, PromptReplacement, Tokenizer as TokenResolver,
+    TrackedMedia, TransparencyPolicy, VideoClip, VisionPreProcessor, VisionPreprocessingContext,
 };
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
+use tokio::io::AsyncReadExt as _;
 use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
@@ -551,10 +553,10 @@ impl MultimodalModelInfo {
     /// Replace a `file:` URL with the file's bytes as a `data:` URL, once the
     /// file is checked to lie under `--allowed-local-media-path`.
     async fn inline_local_file(&self, mut part: MediaContentPart) -> Result<MediaContentPart> {
-        let (url, kind) = match &mut part {
-            MediaContentPart::ImageUrl { url, .. } => (url, "image"),
-            MediaContentPart::VideoUrl { url, .. } => (url, "video"),
-            MediaContentPart::AudioUrl { url, .. } => (url, "audio"),
+        let (url, kind, limit) = match &mut part {
+            MediaContentPart::ImageUrl { url, .. } => (url, "image", image_max_input_bytes()),
+            MediaContentPart::VideoUrl { url, .. } => (url, "video", video_max_input_bytes()),
+            MediaContentPart::AudioUrl { url, .. } => (url, "audio", audio_max_input_bytes()),
             _ => return Ok(part),
         };
         let Some(path) = file_url_path(url) else {
@@ -577,9 +579,22 @@ impl MultimodalModelInfo {
         if canonical == *root || !canonical.starts_with(root) {
             return Err(outside());
         }
-        let bytes = tokio::fs::read(&canonical).await.map_err(|error| {
+        let read_error = |error: std::io::Error| {
             Error::LocalMedia(format!("failed to read {}: {error}", path.display()))
-        })?;
+        };
+        // Read at most one byte past the connector's input cap, so an
+        // oversized file is refused without being loaded and encoded whole.
+        let mut bytes = Vec::new();
+        tokio::fs::File::open(&canonical)
+            .await
+            .map_err(read_error)?
+            .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(read_error)?;
+        if bytes.len() > limit {
+            return Err(MediaConnectorError::PayloadTooLarge { media: kind, limit }.into());
+        }
         *url = format!(
             "data:{kind}/octet-stream;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(bytes)
