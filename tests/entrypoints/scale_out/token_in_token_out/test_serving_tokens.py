@@ -577,10 +577,6 @@ async def test_stop_strings_rejected_without_tokenizer(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend has no --tokens-only and words this error differently",
-)
 @pytest.mark.parametrize(
     "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
 )
@@ -596,7 +592,8 @@ async def test_bad_words_rejected_without_tokenizer(client):
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
     assert resp.status_code == 400
-    assert "bad_words" in resp.json()["error"]["message"]
+    # Python names the field; the Rust frontend names the missing tokenizer.
+    assert "tokenizer" in resp.json()["error"]["message"]
 
     sampling_params["bad_words"] = None
     resp = await client.post(GEN_ENDPOINT, json=payload)
