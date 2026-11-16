@@ -182,48 +182,16 @@ pub fn append_openai_logprobs(mut prefix: LogProbs, suffix: LogProbs) -> LogProb
     prefix
 }
 
-/// Build the non-stream completions `logprobs` payload from collected text
-/// output.
-///
-/// When `echoed_prompt` is true, the returned payload matches Python vLLM's
-/// echoed completions behavior by concatenating prompt and completion logprobs
-/// into one OpenAI `LogProbs` object.
+/// Build the non-stream completions `logprobs` payload of the generated tokens
+/// from collected text output.
 pub fn collected_logprobs_to_openai(
     collected: &CollectedTextOutput,
-    echoed_prompt: bool,
-    initial_completion_offset: u32,
     return_tokens_as_token_ids: bool,
 ) -> Result<LogProbs, ApiError> {
-    if echoed_prompt {
-        let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
-            server_error!(
-                "echoed completion logprobs require prompt logprobs but generation returned none"
-            )
-        })?;
-        let prompt_logprobs =
-            decoded_prompt_logprobs_to_openai(prompt_logprobs, 0, return_tokens_as_token_ids)?;
-        let completion_start = text_end_offset(&prompt_logprobs).unwrap_or(0);
-        return match collected.logprobs.as_ref() {
-            Some(completion_logprobs) => Ok(append_openai_logprobs(
-                prompt_logprobs,
-                decoded_logprobs_to_openai(
-                    completion_logprobs,
-                    completion_start,
-                    return_tokens_as_token_ids,
-                )?,
-            )),
-            None => Ok(prompt_logprobs),
-        };
-    }
-
     let completion_logprobs = collected.logprobs.as_ref().ok_or_else(|| {
         server_error!("completion response requested logprobs but generation returned none")
     })?;
-    decoded_logprobs_to_openai(
-        completion_logprobs,
-        initial_completion_offset,
-        return_tokens_as_token_ids,
-    )
+    decoded_logprobs_to_openai(completion_logprobs, 0, return_tokens_as_token_ids)
 }
 
 /// Format a token entry as either its decoded string or `token_id:{id}`.

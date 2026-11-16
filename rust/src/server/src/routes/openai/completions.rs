@@ -359,7 +359,6 @@ async fn collect_completion(
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
-    let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some()
         && let Some(prompt) = echo.as_deref()
     {
@@ -371,12 +370,7 @@ async fn collect_completion(
         )?;
         Some(
             if !prompt_only && let Some(completion_logprobs) = collected.logprobs.as_ref() {
-                let completion_offset = prompt_logprobs
-                    .text_offset
-                    .last()
-                    .zip(prompt_logprobs.tokens.last())
-                    .map(|(&offset, token)| offset.saturating_add(text_len(token)))
-                    .unwrap_or_default();
+                let completion_offset = text_end_offset(&prompt_logprobs).unwrap_or(0);
                 append_openai_logprobs(
                     prompt_logprobs,
                     decoded_logprobs_to_openai(
@@ -392,8 +386,6 @@ async fn collect_completion(
     } else if requested_logprobs.is_some() {
         Some(collected_logprobs_to_openai(
             &collected,
-            echo.is_some(),
-            prompt_char_count,
             return_tokens_as_token_ids,
         )?)
     } else {
