@@ -2310,6 +2310,26 @@ async fn render_chat_uses_processor_owned_parser_selections() {
 }
 
 #[tokio::test]
+async fn render_completion_rejects_batch_prompts() {
+    let mut app = test_render_app();
+    for prompt in [json!(["hello", "world"]), json!([[1, 2], [3]])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/completions/render",
+            json!({"model": "render-model", "prompt": prompt}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["error"]["param"], "prompt", "{json}");
+        assert_eq!(
+            json["error"]["message"],
+            "Batch prompts are not supported by the Rust render route yet.",
+            "{json}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn render_completion_returns_generate_request_with_body_request_id() {
     let mut app = test_render_app();
     let response = app

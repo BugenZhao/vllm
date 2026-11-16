@@ -250,7 +250,7 @@ pub enum CompletionPrompt {
 }
 
 impl CompletionPrompt {
-    pub(super) fn is_batch(&self) -> bool {
+    pub(crate) fn is_batch(&self) -> bool {
         matches!(self, Self::TextBatch(_) | Self::TokenIdsBatch(_))
     }
 

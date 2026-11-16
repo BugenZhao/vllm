@@ -17,7 +17,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
@@ -224,6 +224,13 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    // TODO: render one `GenerateRequest` per prompt like Python.
+    if body.prompt.is_batch() {
+        bail_invalid_request!(
+            param = "prompt",
+            "Batch prompts are not supported by the Rust render route yet."
+        );
+    }
     let model = response_model(&state, body.model.as_deref());
     let n = body.n;
     let stream = body.stream;

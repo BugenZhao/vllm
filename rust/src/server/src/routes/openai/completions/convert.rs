@@ -7,7 +7,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
 
 use super::types::{CompletionPrompt, CompletionRequest};
-use crate::error::{ApiError, text_submit_error};
+use crate::error::{ApiError, bail_server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
@@ -120,10 +120,7 @@ pub(super) fn prepare_completion_request(
             CompletionPrompt::Text(prompt) => Prompt::Text(prompt),
             CompletionPrompt::TokenIds(token_ids) => Prompt::TokenIds(token_ids),
             CompletionPrompt::TextBatch(_) | CompletionPrompt::TokenIdsBatch(_) => {
-                return Err(ApiError::invalid_request(
-                    "batch prompts must be split before request conversion",
-                    Some("prompt"),
-                ));
+                bail_server_error!("batch prompts must be split before request conversion");
             }
         },
         mm_features: None,
