@@ -2300,12 +2300,12 @@ fn serve_args_reject_unsupported_no_flag_alias() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--no-enable-ssl-refresh",
+        "--no-enable-elastic-ep",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--enable-ssl-refresh [<ENABLE_SSL_REFRESH>]': argument is not implemented in Rust frontend yet
+        error: invalid value 'true' for '--enable-elastic-ep [<ENABLE_ELASTIC_EP>]': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
