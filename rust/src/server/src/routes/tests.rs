@@ -6,7 +6,7 @@
 // response body is fully drained, which closes the mock engine connection too
 // early and causes flaky `closed unexpectedly` failures.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1954,18 +1954,22 @@ async fn test_app_with_batch_engine(
                     );
                     requests.push(request);
                 }
+                // The `k`-th engine request answers `h{k}`, so a choice's text
+                // shows which request, and so which prompt and sample, it came from.
                 send_outputs(
                     push,
                     RequestBatchOutputs {
                         outputs: requests
                             .iter()
-                            .map(|request| {
+                            .enumerate()
+                            .map(|(k, request)| {
+                                let output = [b'h', b'0' + k as u8, b'!'];
                                 request_output_with_logprobs(
                                     &request.request_id,
-                                    bytes_to_token_ids(b"hi!"),
+                                    bytes_to_token_ids(&output),
                                     Some(EngineCoreFinishReason::Stop),
                                     None,
-                                    Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi!"))),
+                                    Some(sample_logprobs_for_tokens(&bytes_to_token_ids(&output))),
                                     decode_prompt_token_ids(request)
                                         .as_deref()
                                         .filter(|tokens| tokens.len() > 1)
@@ -7196,8 +7200,8 @@ async fn non_stream_completions_accept_batch_text_prompts() {
 
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][1]["index"], 1);
-    assert_eq!(json["choices"][0]["text"], "hellohi");
-    assert_eq!(json["choices"][1]["text"], "world!hi");
+    assert_eq!(json["choices"][0]["text"], "helloh0");
+    assert_eq!(json["choices"][1]["text"], "world!h1");
     assert_eq!(
         json["choices"][0]["logprobs"]["tokens"].as_array().unwrap().len(),
         8
@@ -7541,7 +7545,10 @@ async fn completions_batch_late_lowering_error_aborts_submitted_prompt() {
             .await
             .expect("call app");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        engine_task.await.expect("cleanup before consuming the error response");
+        tokio::time::timeout(Duration::from_secs(5), engine_task)
+            .await
+            .expect("the first prompt was never submitted")
+            .expect("cleanup before consuming the error response");
     }
 }
 
@@ -9200,8 +9207,8 @@ async fn completions_happy_path_returns_sse_stream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn completions_batch_stream_uses_prompt_indices_and_one_total_usage() {
-    for n in [1, 2] {
+async fn completions_batch_uses_prompt_major_indices_and_one_total_usage() {
+    for (n, stream) in [(1, false), (2, false), (1, true), (2, true)] {
         let prompts = [bytes_to_token_ids(b"hello"), bytes_to_token_ids(b"world!")];
         let expected =
             prompts.into_iter().flat_map(|prompt| std::iter::repeat_n(prompt, n)).collect();
@@ -9218,8 +9225,8 @@ async fn completions_batch_stream_uses_prompt_indices_and_one_total_usage() {
                             "model": "Qwen/Qwen1.5-0.5B-Chat",
                             "prompt": ["hello", "world!"],
                             "n": n,
-                            "stream": true,
-                            "stream_options": {"include_usage": true},
+                            "stream": stream,
+                            "stream_options": stream.then_some(json!({"include_usage": true})),
                             "add_special_tokens": false
                         })
                         .to_string(),
@@ -9233,22 +9240,45 @@ async fn completions_batch_stream_uses_prompt_indices_and_one_total_usage() {
         let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
         engine_task.await.expect("mock engine task");
         let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-        let payloads = sse_data_payloads(&text);
-        let json_payloads = sse_json_payloads(&text);
-        assert_eq!(
-            payloads.iter().filter(|payload| **payload == "[DONE]").count(),
-            1
-        );
-        let indices: BTreeSet<_> = json_payloads
-            .iter()
-            .filter_map(|payload| payload["choices"][0]["index"].as_u64())
-            .collect();
-        assert_eq!(indices, (0..(2 * n) as u64).collect());
-        let usage_chunks: Vec<_> =
-            json_payloads.iter().filter(|payload| payload["choices"] == json!([])).collect();
-        assert_eq!(usage_chunks.len(), 1, "{text}");
-        assert_eq!(usage_chunks[0]["usage"]["prompt_tokens"], 11);
-        assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 6 * n);
+        let (texts, usage) = if stream {
+            let payloads = sse_data_payloads(&text);
+            assert_eq!(
+                payloads.iter().filter(|payload| **payload == "[DONE]").count(),
+                1
+            );
+            let json_payloads = sse_json_payloads(&text);
+            let mut texts = BTreeMap::<u64, String>::new();
+            for choice in json_payloads
+                .iter()
+                .flat_map(|payload| payload["choices"].as_array().expect("choices").iter())
+            {
+                let index = choice["index"].as_u64().expect("index");
+                texts.entry(index).or_default().push_str(choice["text"].as_str().expect("text"));
+            }
+            let usage_chunks: Vec<_> =
+                json_payloads.iter().filter(|payload| payload["choices"] == json!([])).collect();
+            assert_eq!(usage_chunks.len(), 1, "{text}");
+            (texts, usage_chunks[0]["usage"].clone())
+        } else {
+            let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
+            let texts = json["choices"]
+                .as_array()
+                .expect("choices")
+                .iter()
+                .map(|choice| {
+                    let index = choice["index"].as_u64().expect("index");
+                    (index, choice["text"].as_str().expect("text").to_string())
+                })
+                .collect();
+            (texts, json["usage"].clone())
+        };
+        // Prompt-major: index `prompt * n + sample` holds the `index`-th
+        // engine request's output.
+        let expected_texts: BTreeMap<u64, String> =
+            (0..(2 * n) as u64).map(|index| (index, format!("h{index}"))).collect();
+        assert_eq!(texts, expected_texts, "{text}");
+        assert_eq!(usage["prompt_tokens"], 11);
+        assert_eq!(usage["completion_tokens"], 6 * n);
     }
 }
 
