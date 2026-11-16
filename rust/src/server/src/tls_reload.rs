@@ -43,6 +43,12 @@ impl ReloadableTls {
     fn store(&self, context: SslContext) {
         self.0.store(Arc::new(context));
     }
+
+    /// The context new handshakes use.
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Arc<SslContext> {
+        self.0.load_full()
+    }
 }
 
 /// Delegate to the crate's own `SslContext` acceptor. `accept` snapshots the
@@ -104,8 +110,12 @@ fn spawn_cert_reloader(
     // Watch the parent directories: a symlink-swap rotation changes
     // the leaf inode, which a file watch would stop following.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let watcher = match notify::recommended_watcher(move |event| {
-        let _ = tx.send(event);
+    let watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // A reload reads the files, which inotify reports as access events;
+        // only creates, writes and removes are changes (as in watchfiles).
+        if !matches!(&event, Ok(event) if event.kind.is_access()) {
+            let _ = tx.send(event);
+        }
     }) {
         Ok(mut watcher) => {
             let mut watching = false;

@@ -7,6 +7,7 @@
 
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -826,6 +827,15 @@ async fn watcher_reloads_the_certificate_when_files_change() {
     assert!(
         reloaded,
         "watcher did not reload the rotated certificate in time"
+    );
+
+    // Rebuilding reads the files; those reads must not trigger another reload.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let settled = server_tls.http.current();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        Arc::ptr_eq(&settled, &server_tls.http.current()),
+        "watcher kept reloading after the rotation"
     );
     http_shutdown.cancel();
     grpc_shutdown.cancel();
