@@ -346,6 +346,12 @@ pub struct SchedulerMetrics {
     pub simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
     pub simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
 
+    // HF3FS connector telemetry. Mirrors `HF3FSPromMetrics`.
+    pub hf3fs_save_duration_seconds: HistogramFamily,
+    pub hf3fs_load_duration_seconds: HistogramFamily,
+    pub hf3fs_num_failed_save: Family<EngineLabels, U64Counter>,
+    pub hf3fs_num_failed_load: Family<EngineLabels, U64Counter>,
+
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
@@ -781,6 +787,38 @@ impl SchedulerMetrics {
             simple_kv_offload_info.clone(),
         );
 
+        // HF3FS connector telemetry. Python's `HF3FSPromMetrics` uses the same
+        // bucket edges as the NIXL post time.
+        let hf3fs_save_duration_seconds =
+            Family::new_with_constructor(nixl_post_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:hf3fs_save_duration_seconds",
+            "Histogram of save duration for HF3FSKVConnector",
+            hf3fs_save_duration_seconds.clone(),
+        );
+
+        let hf3fs_load_duration_seconds =
+            Family::new_with_constructor(nixl_post_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:hf3fs_load_duration_seconds",
+            "Histogram of load duration for HF3FSKVConnector",
+            hf3fs_load_duration_seconds.clone(),
+        );
+
+        let hf3fs_num_failed_save = Family::default();
+        registry.register(
+            "vllm:hf3fs_num_failed_save",
+            "Number of failed HF3FS KV save",
+            hf3fs_num_failed_save.clone(),
+        );
+
+        let hf3fs_num_failed_load = Family::default();
+        registry.register(
+            "vllm:hf3fs_num_failed_load",
+            "Number of failed HF3FS KV load",
+            hf3fs_num_failed_load.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -835,6 +873,10 @@ impl SchedulerMetrics {
             simple_kv_offload_used_blocks,
             simple_kv_offload_pending_store_blocks,
             simple_kv_offload_info,
+            hf3fs_save_duration_seconds,
+            hf3fs_load_duration_seconds,
+            hf3fs_num_failed_save,
+            hf3fs_num_failed_load,
             log_stats: Family::default(),
         }
     }

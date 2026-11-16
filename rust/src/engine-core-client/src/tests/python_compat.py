@@ -668,12 +668,21 @@ kv_offload_stats = {
     "types": {"vllm:kv_offload_load_bytes": "counter"},
     "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
 }
+# `HF3FSKVConnectorStats.data`.
+hf3fs_stats = {
+    "save_duration": [0.01],
+    "load_duration": [0.02, 0.03],
+    "num_failed_save": 0,
+    "num_failed_load": 1,
+    "num_transfer_task": 4,
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UMBPStoreConnector": umbp_stats,
     "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
+    "HF3FSKVConnector": hf3fs_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 
