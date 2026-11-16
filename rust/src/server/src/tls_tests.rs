@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
 use crate::listener::{Listener, MaybeTlsListener};
-use crate::tls_reload::{self, ReloadableTls};
+use crate::tls_reload::{self, ReloadableTls, ServerTls};
 use crate::{ConnectionTimeouts, serve_connections, tls};
 
 // ============================================================================
@@ -240,6 +240,7 @@ pub(crate) fn server_tls(certs: &TestCerts, cert_reqs: i32) -> TlsConfig {
         ca_certs: (cert_reqs != 0).then(|| certs.path("ca.pem")),
         cert_reqs,
         ciphers: None,
+        refresh: false,
     }
 }
 
@@ -252,6 +253,7 @@ fn build_tls(certs: &TestCerts, cert: &str, key: Option<&str>) -> TlsConfig {
         ca_certs: None,
         cert_reqs: 0,
         ciphers: None,
+        refresh: false,
     }
 }
 
@@ -438,6 +440,7 @@ async fn serves_full_certificate_chain() {
         ca_certs: None,
         cert_reqs: 0,
         ciphers: None,
+        refresh: false,
     };
     let (addr, shutdown) = spawn_server(Some(tls)).await;
     let response = https_get(&certs, &addr, None).await.expect("chained https request");
@@ -795,11 +798,17 @@ async fn reload_keeps_the_current_certificate_on_a_bad_write() {
 #[tokio::test]
 async fn watcher_reloads_the_certificate_when_files_change() {
     let certs = TestCerts::generate();
-    let tls = server_tls(&certs, 0);
-    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
-    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
-    let _reloader = tls_reload::spawn_cert_reloader(tls.clone(), cell.clone(), None);
-    let before = served_cert_der(&certs, &addr).await;
+    let tls = TlsConfig {
+        refresh: true,
+        ..server_tls(&certs, 0)
+    };
+    // Both listeners of a server with gRPC follow the files.
+    let server_tls = ServerTls::build(&tls, true).expect("build server TLS");
+    let grpc_cell = server_tls.grpc.clone().expect("gRPC context");
+    let (http_addr, http_shutdown) = spawn_reloadable_server(server_tls.http.clone()).await;
+    let (grpc_addr, grpc_shutdown) = spawn_reloadable_server(grpc_cell).await;
+    let before = served_cert_der(&certs, &http_addr).await;
+    assert_eq!(served_cert_der(&certs, &grpc_addr).await, before);
 
     rotate_cert_files(&certs);
 
@@ -807,7 +816,9 @@ async fn watcher_reloads_the_certificate_when_files_change() {
     let mut reloaded = false;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if served_cert_der(&certs, &addr).await != before {
+        if served_cert_der(&certs, &http_addr).await != before
+            && served_cert_der(&certs, &grpc_addr).await != before
+        {
             reloaded = true;
             break;
         }
@@ -816,7 +827,8 @@ async fn watcher_reloads_the_certificate_when_files_change() {
         reloaded,
         "watcher did not reload the rotated certificate in time"
     );
-    shutdown.cancel();
+    http_shutdown.cancel();
+    grpc_shutdown.cancel();
 }
 
 #[tokio::test]
@@ -848,10 +860,10 @@ async fn watcher_reloads_across_atomic_symlink_swap() {
         ca_certs: None,
         cert_reqs: 0,
         ciphers: None,
+        refresh: true,
     };
-    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
-    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
-    let _reloader = tls_reload::spawn_cert_reloader(tls.clone(), cell.clone(), None);
+    let server_tls = ServerTls::build(&tls, false).expect("build server TLS");
+    let (addr, shutdown) = spawn_reloadable_server(server_tls.http.clone()).await;
     let before = served_cert_der(&certs, &addr).await;
 
     // Stage the new cert in ..v2, then atomically swap ..data -> ..v2.

@@ -39,11 +39,17 @@ pub struct SslArgs {
     #[arg(long)]
     #[serde(default)]
     pub ssl_ciphers: Option<String>,
+
+    /// Refresh SSL Context when SSL certificate files change
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_ssl_refresh: bool,
 }
 
 impl SslArgs {
     /// Build the TLS config: `Some` when any `ssl_*` argument is set, else
-    /// `None` (plaintext). The combination is validated in [`TlsConfig::validate`].
+    /// `None` (plaintext), where `--enable-ssl-refresh` has nothing to refresh,
+    /// as in Python. The combination is validated in [`TlsConfig::validate`].
     pub fn tls_config(&self) -> Option<TlsConfig> {
         let tls_requested = self.ssl_certfile.is_some()
             || self.ssl_keyfile.is_some()
@@ -56,6 +62,7 @@ impl SslArgs {
             ca_certs: self.ssl_ca_certs.clone(),
             cert_reqs: self.ssl_cert_reqs,
             ciphers: self.ssl_ciphers.clone(),
+            refresh: self.enable_ssl_refresh,
         })
     }
 }

@@ -250,6 +250,9 @@ pub struct TlsConfig {
     /// OpenSSL cipher string for TLS 1.2 and below, mirroring Python's
     /// `ssl.set_ciphers`. `None` keeps the forward-secret AEAD default.
     pub ciphers: Option<String>,
+    /// Reload the certificate, key and CA files when they change, without a
+    /// restart (`--enable-ssl-refresh`).
+    pub refresh: bool,
 }
 
 impl TlsConfig {
@@ -450,9 +453,6 @@ pub struct Config {
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
-    /// When `true`, hot-reload the TLS certificate/key/CA from disk when the
-    /// files change. Ignored when TLS is off.
-    pub enable_ssl_refresh: bool,
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,

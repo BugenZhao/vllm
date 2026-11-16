@@ -109,7 +109,6 @@ async fn main() -> Result<()> {
         shutdown_timeout: Duration::ZERO,
         manages_engine: false,
         keep_alive_timeout: Duration::from_secs(5),
-        enable_ssl_refresh: false,
         profiler: None,
     };
 

@@ -68,7 +68,7 @@ use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
-use crate::tls_reload::{ReloadableTls, spawn_cert_reloader};
+use crate::tls_reload::ServerTls;
 
 /// How often the server PINGs an idle gRPC connection to reap a dead peer;
 /// tonic enables no keepalive by default. 2h matches the gRPC-core default.
@@ -239,15 +239,15 @@ where
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
-    // before the (potentially long) engine handshake. The swappable cell lets
-    // `--enable-ssl-refresh` hot-reload it.
-    let http_cell = config
+    // before the (potentially long) engine handshake. gRPC uses the same TLS
+    // material but its own context (ALPN h2).
+    let server_tls = config
         .tls
         .as_ref()
-        .map(tls::build_server_config)
+        .map(|tls| ServerTls::build(tls, config.grpc_listener_mode.is_some()))
         .transpose()
-        .context("invalid TLS configuration")?
-        .map(ReloadableTls::new);
+        .context("invalid TLS configuration")?;
+    let http_cell = server_tls.as_ref().map(|tls| tls.http.clone());
 
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
@@ -276,14 +276,7 @@ where
             .await
             .with_context(|| format!("failed to bind gRPC listener for {grpc_listener_mode:?}"))?;
         let addr = grpc_listener.local_addr_display()?;
-        // gRPC uses the same TLS material but its own context (ALPN h2).
-        let grpc_cell = config
-            .tls
-            .as_ref()
-            .map(tls::build_grpc_server_config)
-            .transpose()
-            .context("invalid gRPC TLS configuration")?
-            .map(ReloadableTls::new);
+        let grpc_cell = server_tls.as_ref().and_then(|tls| tls.grpc.clone());
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
@@ -358,23 +351,6 @@ where
             keep_alive_timeout
         },
         keep_alive_enabled: !keep_alive_timeout.is_zero(),
-    };
-
-    // Hot-reload the certs into the cells above when `--enable-ssl-refresh` is
-    // set. The handle aborts the watcher when `serve` returns. Warn-and-skip if
-    // TLS is off.
-    let reloader_grpc_cell = grpc_setup.as_ref().and_then(|(_, _, _, cell, _)| cell.clone());
-    let _cert_reloader = match (config.enable_ssl_refresh, &config.tls, &http_cell) {
-        (true, Some(tls), Some(cell)) => Some(spawn_cert_reloader(
-            tls.clone(),
-            cell.clone(),
-            reloader_grpc_cell,
-        )),
-        (true, None, _) => {
-            warn!("--enable-ssl-refresh ignored: no TLS certificate configured");
-            None
-        }
-        _ => None,
     };
 
     let http_fut = {

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use notify::{RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher as _};
 use openssl::ssl::SslContext;
 use tls_listener::AsyncTls;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -60,47 +60,93 @@ where
     }
 }
 
+/// The TLS acceptors of one server: the HTTP listener's and, when the server
+/// also serves gRPC, the gRPC listener's (same material, ALPN `h2`). With
+/// [`TlsConfig::refresh`] a watcher keeps both current with the certificate
+/// files until this is dropped.
+pub(crate) struct ServerTls {
+    pub(crate) http: ReloadableTls,
+    pub(crate) grpc: Option<ReloadableTls>,
+    _reloader: Option<AbortOnDropHandle<()>>,
+}
+
+impl ServerTls {
+    /// Build the contexts once, up front, so a bad cert/key fails fast.
+    pub(crate) fn build(tls: &TlsConfig, grpc: bool) -> anyhow::Result<Self> {
+        let http = ReloadableTls::new(tls::build_server_config(tls)?);
+        let grpc = grpc
+            .then(|| tls::build_grpc_server_config(tls))
+            .transpose()?
+            .map(ReloadableTls::new);
+        let reloader = tls
+            .refresh
+            .then(|| spawn_cert_reloader(tls.clone(), http.clone(), grpc.clone()));
+        Ok(Self {
+            http,
+            grpc,
+            _reloader: reloader,
+        })
+    }
+}
+
 /// Spawn the certificate watcher; dropping the returned handle (on shutdown)
-/// aborts it.
-pub(crate) fn spawn_cert_reloader(
+/// aborts it. The watches are registered before this returns, so no change
+/// made afterwards is missed.
+fn spawn_cert_reloader(
     tls: TlsConfig,
     http: ReloadableTls,
     grpc: Option<ReloadableTls>,
 ) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(tokio::spawn(run(tls, http, grpc)))
-}
-
-async fn run(tls: TlsConfig, http: ReloadableTls, grpc: Option<ReloadableTls>) {
     let files = watched_files(&tls);
     let dirs = watched_dirs(&files);
 
     // Watch the parent directories: a symlink-swap rotation changes
     // the leaf inode, which a file watch would stop following.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut watcher = match notify::recommended_watcher(move |event| {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let watcher = match notify::recommended_watcher(move |event| {
         let _ = tx.send(event);
     }) {
-        Ok(watcher) => watcher,
-        Err(err) => {
-            warn!(error = %err, "failed to start the SSL certificate watcher; hot-reload disabled");
-            return;
-        }
-    };
-    let mut watching = false;
-    for dir in &dirs {
-        match watcher.watch(dir, RecursiveMode::NonRecursive) {
-            Ok(()) => watching = true,
-            Err(err) => {
-                warn!(error = %err, dir = %dir.display(), "failed to watch SSL certificate directory")
+        Ok(mut watcher) => {
+            let mut watching = false;
+            for dir in &dirs {
+                match watcher.watch(dir, RecursiveMode::NonRecursive) {
+                    Ok(()) => watching = true,
+                    Err(err) => warn!(
+                        error = %err,
+                        dir = %dir.display(),
+                        "failed to watch SSL certificate directory"
+                    ),
+                }
+            }
+            if watching {
+                info!(?files, "watching SSL certificate files for changes");
+                Some(watcher)
+            } else {
+                warn!("no SSL certificate directory could be watched; hot-reload is inactive");
+                None
             }
         }
-    }
-    if !watching {
-        warn!("no SSL certificate directory could be watched; hot-reload is inactive");
-        return;
-    }
-    info!(?files, "watching SSL certificate files for changes");
+        Err(err) => {
+            warn!(error = %err, "failed to start the SSL certificate watcher; hot-reload disabled");
+            None
+        }
+    };
 
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        // The watcher stops sending once dropped, so it lives as long as the task.
+        let Some(_watcher) = watcher else {
+            return;
+        };
+        run(rx, tls, http, grpc).await
+    }))
+}
+
+async fn run(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
+    tls: TlsConfig,
+    http: ReloadableTls,
+    grpc: Option<ReloadableTls>,
+) {
     // Any event triggers a whole-context rebuild, so we never inspect which file changed.
     while let Some(item) = rx.recv().await {
         log_watch_error(&item);
