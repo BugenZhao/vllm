@@ -668,12 +668,24 @@ kv_offload_stats = {
     "types": {"vllm:kv_offload_load_bytes": "counter"},
     "data": {"vllm:kv_offload_load_bytes": {(): 4096}},
 }
+# `HiSparseKVConnectorStats.data`.
+hisparse_stats = {
+    "cache_hits": [3],
+    "cache_misses": [1],
+    "host_to_device_bytes": [4096],
+    "host_cache_usage_perc": [0.5],
+    "pending_page_transfers": [2],
+    "host_block_lifetime_seconds": [],
+    "host_block_idle_before_evict_seconds": [],
+    "host_block_reuse_gap_seconds": [],
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
     "UMBPStoreConnector": umbp_stats,
     "SimpleCPUOffloadConnector": simple_cpu_offload_stats,
+    "HiSparseConnector": hisparse_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 

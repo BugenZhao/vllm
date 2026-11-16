@@ -15,7 +15,7 @@ use vllm_metrics::{
 };
 
 use crate::protocol::stats::{
-    CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
+    CachedTokensBySource, HiSparseStats, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
     MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats, SimpleCpuOffloadStats,
     UmbpStats,
 };
@@ -150,6 +150,16 @@ struct SchedulerStatsHandles {
     simple_kv_offload_used_blocks: Family<EngineLabels, U64Gauge>,
     simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
     simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
+
+    // HiSparse connector telemetry, decoded from `kv_connector_stats`.
+    hisparse_cache_hits: U64Counter,
+    hisparse_cache_misses: U64Counter,
+    hisparse_host_to_device_bytes: U64Counter,
+    hisparse_host_cache_usage_perc: F64Gauge,
+    hisparse_pending_page_transfers: U64Gauge,
+    hisparse_host_block_lifetime_seconds: HistogramMetric,
+    hisparse_host_block_idle_before_evict_seconds: HistogramMetric,
+    hisparse_host_block_reuse_gap_seconds: HistogramMetric,
 
     // NIXL connector telemetry, decoded from `kv_connector_stats`.
     nixl_xfer_time_seconds: HistogramMetric,
@@ -342,6 +352,26 @@ fn resolve_scheduler_stats_handles(
             .simple_kv_offload_pending_store_blocks
             .clone(),
         simple_kv_offload_info: metrics.simple_kv_offload_info.clone(),
+        hisparse_cache_hits: metrics.hisparse_cache_hits.get_or_create_owned(&labels),
+        hisparse_cache_misses: metrics.hisparse_cache_misses.get_or_create_owned(&labels),
+        hisparse_host_to_device_bytes: metrics
+            .hisparse_host_to_device_bytes
+            .get_or_create_owned(&labels),
+        hisparse_host_cache_usage_perc: metrics
+            .hisparse_host_cache_usage_perc
+            .get_or_create_owned(&labels),
+        hisparse_pending_page_transfers: metrics
+            .hisparse_pending_page_transfers
+            .get_or_create_owned(&labels),
+        hisparse_host_block_lifetime_seconds: metrics
+            .hisparse_host_block_lifetime_seconds
+            .get_or_create_owned(&labels),
+        hisparse_host_block_idle_before_evict_seconds: metrics
+            .hisparse_host_block_idle_before_evict_seconds
+            .get_or_create_owned(&labels),
+        hisparse_host_block_reuse_gap_seconds: metrics
+            .hisparse_host_block_reuse_gap_seconds
+            .get_or_create_owned(&labels),
         nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
         nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
         nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
@@ -483,6 +513,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
             KvConnectorStats::SimpleCpuOffload(stats) => {
                 record_simple_cpu_offload_stats(handles, stats)
             }
+            KvConnectorStats::HiSparse(stats) => record_hisparse_stats(handles, stats),
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -504,6 +535,9 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
     }
     if let Some(simple_cpu_offload) = &stats.simple_cpu_offload {
         record_simple_cpu_offload_stats(handles, simple_cpu_offload);
+    }
+    if let Some(hisparse) = &stats.hisparse {
+        record_hisparse_stats(handles, hisparse);
     }
 }
 
@@ -612,6 +646,29 @@ fn record_simple_cpu_offload_stats(handles: &SchedulerStatsHandles, stats: &Simp
             capacity_blocks: capacity_blocks.clone(),
         };
         handles.simple_kv_offload_info.get_or_create(&info_labels).set(*value);
+    }
+}
+
+fn record_hisparse_stats(handles: &SchedulerStatsHandles, stats: &HiSparseStats) {
+    handles.hisparse_cache_hits.inc_by(stats.cache_hits.iter().sum());
+    handles.hisparse_cache_misses.inc_by(stats.cache_misses.iter().sum());
+    handles
+        .hisparse_host_to_device_bytes
+        .inc_by(stats.host_to_device_bytes.iter().sum());
+    if let Some(usage) = stats.host_cache_usage_perc.last() {
+        handles.hisparse_host_cache_usage_perc.set(*usage);
+    }
+    if let Some(pending) = stats.pending_page_transfers.last() {
+        handles.hisparse_pending_page_transfers.set(*pending);
+    }
+    for value in &stats.host_block_lifetime_seconds {
+        handles.hisparse_host_block_lifetime_seconds.observe(*value);
+    }
+    for value in &stats.host_block_idle_before_evict_seconds {
+        handles.hisparse_host_block_idle_before_evict_seconds.observe(*value);
+    }
+    for value in &stats.host_block_reuse_gap_seconds {
+        handles.hisparse_host_block_reuse_gap_seconds.observe(*value);
     }
 }
 
@@ -940,6 +997,67 @@ mod tests {
             vllm:simple_kv_offload_save_outcomes_total{model_name="model",engine="0",outcome="dropped_cpu_full"} 4
             vllm:simple_kv_offload_save_outcomes_total{model_name="model",engine="0",outcome="stored"} 4
             vllm:simple_kv_offload_used_blocks{model_name="model",engine="0"} 5"#]].assert_eq(&simple_kv_offload_series());
+    }
+
+    /// Records `HiSparseKVConnectorStats` payloads into the `vllm:hisparse_*`
+    /// families, as the only connector and as a `MultiConnector` child:
+    /// counters add up every delta, gauges keep the latest level.
+    #[test]
+    fn hisparse_stats_are_recorded_into_hisparse_metrics() {
+        let metrics = Metrics::new();
+        // The residency histograms take the `kv_cache_residency` buckets.
+        metrics.set_custom_histogram_buckets(
+            serde_json::from_str(r#"{"kv_cache_residency": [1.0]}"#).unwrap(),
+        );
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+
+        let payload = |usage| {
+            serde_json::json!({
+                "cache_hits": [3, 4],
+                "cache_misses": [1],
+                "host_to_device_bytes": [4096],
+                "host_cache_usage_perc": [0.1, usage],
+                "pending_page_transfers": [2],
+                "host_block_lifetime_seconds": [1.5],
+                "host_block_idle_before_evict_seconds": [0.5],
+                "host_block_reuse_gap_seconds": [0.25, 0.75],
+            })
+        };
+        for kv_connector_stats in [
+            payload(0.25),
+            serde_json::json!({ "HiSparseConnector": payload(0.5) }),
+        ] {
+            let stats = SchedulerStats {
+                kv_connector_stats: Some(serde_json::from_value(kv_connector_stats).unwrap()),
+                ..Default::default()
+            };
+            super::record_scheduler_stats_with_handles(&handles, &stats);
+        }
+
+        let hisparse_series = metrics
+            .render()
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("vllm:hisparse_")
+                    && (!line.contains("_bucket{")
+                        || line.starts_with("vllm:hisparse_host_block_lifetime_seconds_bucket{"))
+            })
+            .join("\n");
+        expect![[r#"
+            vllm:hisparse_cache_hits_total{model_name="model",engine="0"} 14
+            vllm:hisparse_cache_misses_total{model_name="model",engine="0"} 2
+            vllm:hisparse_host_to_device_bytes_total{model_name="model",engine="0"} 8192
+            vllm:hisparse_host_cache_usage_perc{model_name="model",engine="0"} 0.5
+            vllm:hisparse_pending_page_transfers{model_name="model",engine="0"} 2
+            vllm:hisparse_host_block_lifetime_seconds_sum{model_name="model",engine="0"} 3.0
+            vllm:hisparse_host_block_lifetime_seconds_count{model_name="model",engine="0"} 2
+            vllm:hisparse_host_block_lifetime_seconds_bucket{le="1.0",model_name="model",engine="0"} 0
+            vllm:hisparse_host_block_lifetime_seconds_bucket{le="+Inf",model_name="model",engine="0"} 2
+            vllm:hisparse_host_block_idle_before_evict_seconds_sum{model_name="model",engine="0"} 1.0
+            vllm:hisparse_host_block_idle_before_evict_seconds_count{model_name="model",engine="0"} 2
+            vllm:hisparse_host_block_reuse_gap_seconds_sum{model_name="model",engine="0"} 2.0
+            vllm:hisparse_host_block_reuse_gap_seconds_count{model_name="model",engine="0"} 4"#]].assert_eq(&hisparse_series);
     }
 
     /// Exports every engine's KV fetch stage gauges from startup and sets them
