@@ -81,7 +81,7 @@ pub(crate) struct ServerTls {
 impl ServerTls {
     /// Build the contexts once, up front, so a bad cert/key fails fast.
     pub(crate) fn build(tls: &TlsConfig, grpc: bool) -> anyhow::Result<Self> {
-        // Read before building, so a change racing the build differs from it.
+        // Read before building, so a change racing the build is detected.
         let loaded = tls.refresh.then(|| CertFiles::new(tls)).map(|files| {
             let contents = files.read();
             (files, contents)
@@ -101,6 +101,9 @@ impl ServerTls {
         })
     }
 }
+
+/// The contents of [`CertFiles`].
+type Contents = Vec<Option<Vec<u8>>>;
 
 /// The files a TLS context is built from.
 struct CertFiles(Vec<PathBuf>);
@@ -124,7 +127,7 @@ impl CertFiles {
 
     /// The files' contents, following symlinks; `None` for one that cannot be
     /// read (e.g. removed mid-rotation).
-    fn read(&self) -> Vec<Option<Vec<u8>>> {
+    fn read(&self) -> Contents {
         self.0.iter().map(|file| std::fs::read(file).ok()).collect()
     }
 
@@ -149,11 +152,11 @@ impl CertFiles {
 
 /// Spawn the certificate watcher; dropping the returned handle (on shutdown)
 /// aborts it. The watches are registered before this returns, so no change
-/// made afterwards is missed. `loaded` is what the current contexts were built
-/// from.
+/// made afterwards is missed. `read` is the files' contents read just before the
+/// current contexts were built.
 fn spawn_cert_reloader(
     files: CertFiles,
-    loaded: Vec<Option<Vec<u8>>>,
+    read: Contents,
     tls: TlsConfig,
     http: ReloadableTls,
     grpc: Option<ReloadableTls>,
@@ -191,6 +194,9 @@ fn spawn_cert_reloader(
         let Some(watcher) = watcher else {
             return;
         };
+        // Unchanged since the build only if they still read the same now that
+        // the watches are registered; otherwise rebuild right away.
+        let loaded = (watcher.files.read() == read).then_some(read);
         run(watcher, rx, loaded, tls, http, grpc).await
     }))
 }
@@ -242,40 +248,57 @@ impl CertWatcher {
 async fn run(
     mut watcher: CertWatcher,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
-    mut loaded: Vec<Option<Vec<u8>>>,
+    mut loaded: Option<Contents>,
     tls: TlsConfig,
     http: ReloadableTls,
     grpc: Option<ReloadableTls>,
 ) {
     // Events do not say whether the files changed: a watched directory may
-    // hold other files (such as a log), so compare the contents instead.
+    // hold other files (such as a log), so compare the contents with `loaded`,
+    // what the current contexts were built from (`None`: unknown, because the
+    // files changed while OpenSSL read them).
     let mut failed = None;
-    while let Some(item) = rx.recv().await {
-        log_watch_error(&item);
-        // Coalesce the burst a rotation emits into one reload.
-        let ceiling = tokio::time::sleep(DEBOUNCE);
-        tokio::pin!(ceiling);
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(STEP) => break,
-                _ = &mut ceiling => break,
-                item = rx.recv() => match item {
-                    Some(item) => log_watch_error(&item),
-                    None => return,
-                },
+    let mut pending = loaded.is_none();
+    loop {
+        if !pending {
+            let Some(item) = rx.recv().await else {
+                return;
+            };
+            log_watch_error(&item);
+            // Coalesce the burst a rotation emits into one reload.
+            let ceiling = tokio::time::sleep(DEBOUNCE);
+            tokio::pin!(ceiling);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(STEP) => break,
+                    _ = &mut ceiling => break,
+                    item = rx.recv() => match item {
+                        Some(item) => log_watch_error(&item),
+                        None => return,
+                    },
+                }
             }
         }
-        // OpenSSL reads the files again, so a write racing that read can fail a
-        // rebuild of contents that are fine; retry until one succeeds, warning
-        // once per contents so a log in the directory cannot feed a loop.
+        pending = false;
         let contents = watcher.files.read();
-        if contents != loaded {
+        if loaded.as_ref() != Some(&contents) {
             match reload(&tls, &http, grpc.as_ref()) {
                 Ok(()) => {
                     info!("Reloaded SSL certificate chain");
-                    loaded = contents;
                     failed = None;
+                    // OpenSSL reads the files itself; if they changed meanwhile,
+                    // what it read is unknown, so go again.
+                    if watcher.files.read() == contents {
+                        loaded = Some(contents);
+                    } else {
+                        loaded = None;
+                        pending = true;
+                    }
                 }
+                // A write racing OpenSSL's read can also fail a rebuild of good
+                // contents: any later event retries while they differ from
+                // `loaded`. Warn once per contents, so a log in the directory
+                // cannot feed a loop.
                 Err(err) => {
                     if failed.as_ref() != Some(&contents) {
                         warn!(
@@ -315,4 +338,44 @@ pub(crate) fn reload(
         cell.store(context);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tls_tests::{TestCerts, server_tls};
+
+    #[tokio::test]
+    async fn rebuilds_when_the_files_change_before_the_watches_exist() {
+        let certs = TestCerts::generate();
+        let tls = TlsConfig {
+            refresh: true,
+            ..server_tls(&certs, 0)
+        };
+        let files = CertFiles::new(&tls);
+        let read = files.read();
+        let http = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
+        let built = http.current();
+
+        // A rotation after the build but before the watches are registered
+        // raises no event the watcher could see.
+        std::fs::copy(certs.path("server_chain.pem"), certs.path("server.pem")).expect("cert");
+        std::fs::copy(certs.path("server_chain.key"), certs.path("server.key")).expect("key");
+        let _reloader = spawn_cert_reloader(files, read, tls, http.clone(), None);
+
+        let mut reloaded = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if !Arc::ptr_eq(&built, &http.current()) {
+                reloaded = true;
+                break;
+            }
+        }
+        assert!(
+            reloaded,
+            "the rotation before the watches existed was missed"
+        );
+    }
 }
