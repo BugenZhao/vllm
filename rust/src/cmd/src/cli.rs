@@ -8,6 +8,7 @@
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
 mod logging;
+mod media;
 mod model;
 mod ssl;
 mod unsupported;
@@ -29,7 +30,7 @@ use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
-use vllm_chat::multimodal::{MediaFetchPolicy, MmLimitPerPrompt};
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -47,6 +48,7 @@ use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
+use crate::cli::media::MediaFetchArgs;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -252,6 +254,9 @@ pub struct RenderArgs {
     /// applies to rendering.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Where request media may be fetched from.
+    #[command(flatten)]
+    media_fetch: MediaFetchArgs,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -298,6 +303,7 @@ impl RenderArgs {
             language_model_only: self.language_model_only,
             dtype: self.dtype.model_dtype(),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            media_fetch_policy: self.media_fetch.policy(),
             tls,
         }
     }
@@ -480,20 +486,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
 
-    /// Allowing API requests to read local images or videos from directories
-    /// specified by the server file system. This is a security risk. Should
-    /// only be enabled in trusted environments.
-    #[arg(long, value_name = "PATH")]
-    #[serde(default)]
-    pub allowed_local_media_path: Option<PathBuf>,
-
-    /// If set, only media URLs that belong to this domain can be used for
-    /// multi-modal inputs. Listed hosts are fetched by name even when they
-    /// resolve to loopback or private addresses; without the list only
-    /// public addresses are fetched.
-    #[arg(long, num_args = 1.., value_name = "DOMAIN")]
-    #[serde(default)]
-    pub allowed_media_domains: Option<Vec<String>>,
+    /// Where request media may be fetched from.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub media_fetch: MediaFetchArgs,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -962,18 +958,6 @@ impl SharedRuntimeArgs {
     ///
     /// Round-tripping the parsed map rather than the raw argument keeps the
     /// engine's own profiling options (`num_frames`, `width`, ...) intact.
-    /// The `--allowed-local-media-path` / `--allowed-media-domains` policy;
-    /// an empty path disables local media, as in Python.
-    fn media_fetch_policy(&self) -> MediaFetchPolicy {
-        MediaFetchPolicy {
-            allowed_local_media_path: self
-                .allowed_local_media_path
-                .clone()
-                .filter(|path| !path.as_os_str().is_empty()),
-            allowed_media_domains: self.allowed_media_domains.clone(),
-        }
-    }
-
     pub fn limit_mm_per_prompt_json(&self) -> Option<String> {
         (!self.limit_mm_per_prompt.is_empty()).then(|| {
             serde_json::to_string(&self.limit_mm_per_prompt)
@@ -1053,7 +1037,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
-        let media_fetch_policy = self.media_fetch_policy();
+        let media_fetch_policy = self.media_fetch.policy();
         let ModelFileSources {
             model,
             tokenizer,
@@ -1148,7 +1132,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
-        let media_fetch_policy = self.media_fetch_policy();
+        let media_fetch_policy = self.media_fetch.policy();
         let ModelFileSources {
             model,
             tokenizer,
