@@ -2446,21 +2446,82 @@ mod tests {
         }
     }
 
+    /// Two local files of one size keep distinct identities: the item is keyed
+    /// by the file's content, not by its path or size.
     #[tokio::test]
-    async fn content_identity_separates_different_images_of_one_size() {
-        let info = qwen3_vl_info();
-        let data_url = |rgb| {
-            image_url(format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(png_bytes(rgb))
-            ))
+    async fn local_files_of_one_size_keep_distinct_content_identities() {
+        let root = tempfile::tempdir().unwrap();
+        let info = qwen3_vl_info()
+            .with_media_fetch_policy(&MediaFetchPolicy {
+                allowed_local_media_path: Some(root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+        let file_part = |name: &str, rgb| {
+            let path = root.path().join(name);
+            fs::write(&path, png_bytes(rgb)).unwrap();
+            image_url(url::Url::from_file_path(path).unwrap().to_string())
         };
-        let red = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
-        let red_again = prepare_one(&info, data_url([255, 0, 0])).await.unwrap();
-        let blue = prepare_one(&info, data_url([0, 0, 255])).await.unwrap();
+        let red = prepare_one(&info, file_part("red.png", [255, 0, 0])).await.unwrap();
+        let red_again = prepare_one(&info, file_part("red-copy.png", [255, 0, 0])).await.unwrap();
+        let blue = prepare_one(&info, file_part("blue.png", [0, 0, 255])).await.unwrap();
         assert_eq!(red.mm_position.length, blue.mm_position.length);
         assert_eq!(red.identifier, red_again.identifier);
         assert_ne!(red.identifier, blue.identifier);
         assert_ne!(red.mm_hash, blue.mm_hash);
+    }
+
+    /// Serve `body` once per connection on a loopback port, for media fetches.
+    async fn serve_on_loopback(body: Vec<u8>) -> std::net::SocketAddr {
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }
+        });
+        addr
+    }
+
+    /// Without `--allowed-media-domains` a loopback host is refused; listed, it
+    /// is fetched by name; a host missing from the list is refused.
+    #[tokio::test]
+    async fn allowed_media_domains_admit_listed_private_hosts_only() {
+        let addr = serve_on_loopback(png_bytes([255, 0, 0])).await;
+        let url = format!("http://127.0.0.1:{}/red.png", addr.port());
+        let with_domains = |domains: Option<&[&str]>| {
+            qwen3_vl_info()
+                .with_media_fetch_policy(&MediaFetchPolicy {
+                    allowed_media_domains: domains
+                        .map(|domains| domains.iter().map(|domain| domain.to_string()).collect()),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+
+        let refused = prepare_one(&with_domains(None), image_url(url.clone())).await.unwrap_err();
+        assert!(refused.is_request_validation_error(), "{refused}");
+
+        prepare_one(&with_domains(Some(&["127.0.0.1"])), image_url(url.clone()))
+            .await
+            .unwrap();
+
+        let unlisted = prepare_one(&with_domains(Some(&["media.example"])), image_url(url))
+            .await
+            .unwrap_err();
+        assert!(unlisted.is_request_validation_error(), "{unlisted}");
+        assert!(
+            unlisted.to_report_string().contains("127.0.0.1"),
+            "{unlisted}"
+        );
     }
 }
