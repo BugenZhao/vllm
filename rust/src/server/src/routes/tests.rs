@@ -7262,42 +7262,41 @@ async fn completions_reject_empty_prompt_batches_before_streaming() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn completions_stream_invalid_batch_items_as_errors_before_done() {
+async fn completions_reject_invalid_batch_items_before_streaming() {
     let (app, _engine_task) = test_app().await;
-    for prompt in [
-        json!([[]]),
-        json!([[1], []]),
-        json!([[], [1]]),
-        json!([""]),
-        json!(["hello", ""]),
-    ] {
-        let response = app
-            .clone()
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "model": "Qwen/Qwen1.5-0.5B-Chat",
-                            "prompt": prompt,
-                            "stream": true,
-                            "add_special_tokens": false
-                        })
-                        .to_string(),
-                    ))
-                    .expect("build request"),
-            )
-            .await
-            .expect("call app");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-        let payloads = sse_data_payloads(&text);
-        assert_eq!(payloads.len(), 2, "{text}");
-        assert!(sse_json_payloads(&text)[0]["error"].is_object(), "{text}");
-        assert_eq!(payloads[1], "[DONE]");
+    for stream in [false, true] {
+        for prompt in [
+            json!([[]]),
+            json!([[1], []]),
+            json!([[], [1]]),
+            json!([""]),
+            json!(["hello", ""]),
+        ] {
+            let response = app
+                .clone()
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({
+                                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                                "prompt": prompt,
+                                "stream": stream,
+                                "add_special_tokens": false
+                            })
+                            .to_string(),
+                        ))
+                        .expect("build request"),
+                )
+                .await
+                .expect("call app");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{prompt}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+            assert!(json["error"].is_object(), "{json}");
+        }
     }
 }
 
@@ -7521,21 +7520,8 @@ async fn completions_batch_late_lowering_error_aborts_submitted_prompt() {
             )
             .await
             .expect("call app");
-        assert_eq!(
-            response.status(),
-            if stream {
-                StatusCode::OK
-            } else {
-                StatusCode::BAD_REQUEST
-            }
-        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         engine_task.await.expect("cleanup before consuming the error response");
-        if stream {
-            let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
-            let text = std::str::from_utf8(&body).expect("utf8");
-            assert!(sse_json_payloads(text)[0]["error"].is_object(), "{text}");
-            assert_eq!(sse_data_payloads(text).last(), Some(&"[DONE]"));
-        }
     }
 }
 

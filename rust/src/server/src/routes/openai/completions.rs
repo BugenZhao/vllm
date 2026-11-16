@@ -127,13 +127,6 @@ pub async fn completions(
                 vllm_text::Error::TokenizerUnavailable,
             ));
         }
-        if is_batch && let Err(error) = prepared.text_request.validate() {
-            return Ok(completion_submission_error(
-                text_submit_error("invalid completion request", error),
-                streaming,
-                options,
-            ));
-        }
         prepared_requests.push(prepared);
     }
     let request_span = tracing::info_span!(
@@ -145,20 +138,13 @@ pub async fn completions(
     let fingerprint = state.system_fingerprint.clone();
     let mut submitted = Vec::with_capacity(prepared_requests.len());
     for prepared in prepared_requests {
-        let streams = match text
+        // A failed submission drops the prompts submitted before it, which
+        // aborts them, and fails the whole request like a single prompt.
+        let streams = text
             .generate_n(prepared.text_request, prepared.n)
             .instrument(request_span.clone())
             .await
-        {
-            Ok(streams) => streams,
-            Err(error) => {
-                return Ok(completion_submission_error(
-                    text_submit_error("failed to submit completion request", error),
-                    streaming && is_batch,
-                    options,
-                ));
-            }
-        };
+            .map_err(|error| text_submit_error("failed to submit completion request", error))?;
         submitted.push((
             streams,
             prepared.request_id,
@@ -230,19 +216,6 @@ pub async fn completions(
         .instrument(request_span)
         .await?;
         Ok(Json(merge_prompt_responses(responses)).into_response())
-    }
-}
-
-fn completion_submission_error(
-    error: ApiError,
-    streaming: bool,
-    options: ApiServerOptions,
-) -> Response {
-    if streaming {
-        let chunks = futures::stream::once(async move { Err::<CompletionSseChunk, _>(error) });
-        sse_response(openai_sse_stream(chunks), options.sse_keep_alive_interval)
-    } else {
-        error.into_response()
     }
 }
 
