@@ -97,11 +97,16 @@ pub async fn completions(
     let text = state.chat.text();
     let options = state.api_server_options;
     let mut prepared_requests = Vec::with_capacity(prompts.len());
-    for prompt in prompts {
+    for (index, prompt) in prompts.into_iter().enumerate() {
         let mut item = body.clone();
         item.prompt = prompt.into();
-        let prepared =
+        let mut prepared =
             prepare_completion_request(item, &lora, context.clone(), text.request_processor())?;
+        // Each prompt is its own engine request, so it needs its own ID, like
+        // Python's `{request_id}-{i}`; the response keeps the shared ID.
+        if is_batch {
+            prepared.text_request.request_id = format!("{}-{index}", prepared.request_id);
+        }
         validate_n_limit(prepared.n.get(), options.max_n_sequences)?;
         validate_max_output_tokens(
             "max_tokens",

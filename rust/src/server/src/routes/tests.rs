@@ -1916,8 +1916,11 @@ where
     )
     .await
     .expect("connect client");
-    let chat =
-        ChatLlm::from_shared_backend(EngineCoreLlm::new(client), Arc::new(FakeChatBackend::new()));
+    // Without randomization, the engine sees the route's own request IDs.
+    let chat = ChatLlm::from_shared_backend(
+        EngineCoreLlm::new(client).with_request_id_randomization(false),
+        Arc::new(FakeChatBackend::new()),
+    );
     (
         build_router(Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
@@ -1941,6 +1944,13 @@ async fn test_app_with_batch_engine(
                     assert_eq!(
                         decode_prompt_token_ids(&request).as_deref(),
                         Some(expected_prompt.as_slice())
+                    );
+                    assert!(
+                        requests.iter().all(|other: &EngineCoreRequest| {
+                            other.request_id != request.request_id
+                        }),
+                        "duplicate engine request ID {}",
+                        request.request_id
                     );
                     requests.push(request);
                 }
