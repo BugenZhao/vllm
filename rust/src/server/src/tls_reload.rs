@@ -16,6 +16,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use notify::{RecursiveMode, Watcher as _};
 use openssl::ssl::SslContext;
+use thiserror_ext::AsReport as _;
 use tls_listener::AsyncTls;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::task::AbortOnDropHandle;
@@ -112,7 +113,7 @@ fn spawn_cert_reloader(
                 match watcher.watch(dir, RecursiveMode::NonRecursive) {
                     Ok(()) => watching = true,
                     Err(err) => warn!(
-                        error = %err,
+                        error = %err.as_report(),
                         dir = %dir.display(),
                         "failed to watch SSL certificate directory"
                     ),
@@ -127,7 +128,7 @@ fn spawn_cert_reloader(
             }
         }
         Err(err) => {
-            warn!(error = %err, "failed to start the SSL certificate watcher; hot-reload disabled");
+            warn!(error = %err.as_report(), "failed to start the SSL certificate watcher; hot-reload disabled");
             None
         }
     };
@@ -171,7 +172,7 @@ async fn run(
 /// The reload that follows re-reads the files, so an error is noted, not fatal.
 fn log_watch_error(item: &notify::Result<notify::Event>) {
     if let Err(err) = item {
-        warn!(error = %err, "SSL certificate watcher reported an error");
+        warn!(error = %err.as_report(), "SSL certificate watcher reported an error");
     }
 }
 
@@ -196,7 +197,10 @@ pub(crate) fn reload(tls: &TlsConfig, http: &ReloadableTls, grpc: Option<&Reload
 }
 
 fn keep_current(err: anyhow::Error) {
-    warn!(error = %err, "SSL certificate reload failed; keeping the current certificate");
+    warn!(
+        error = %format_args!("{err:#}"),
+        "SSL certificate reload failed; keeping the current certificate"
+    );
 }
 
 /// The certificate files to watch: the cert chain (always), plus the key and CA
