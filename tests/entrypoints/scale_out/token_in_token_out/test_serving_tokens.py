@@ -1072,10 +1072,6 @@ async def _wait_for_gauge(client, name: str, value: float) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
-)
 @pytest.mark.parametrize(
     "server",
     [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
@@ -1121,10 +1117,6 @@ async def test_generate_priority_header_overrides_body(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not read X-Vllm-Priority on this endpoint",
-)
 @pytest.mark.parametrize(
     "server",
     [["--scheduling-policy", "priority", "--max-num-seqs", "1"]],
