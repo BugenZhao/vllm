@@ -621,6 +621,12 @@ fn continuing_reasoning_only_final_assistant_keeps_thinking_open() {
                 text: "The answer is ".into(),
             },
         ],
+        // Empty text parts still render their separator, so the block closes.
+        vec![
+            reasoning(),
+            AssistantContentBlock::Text { text: "".into() },
+            AssistantContentBlock::Text { text: "".into() },
+        ],
         vec![
             reasoning(),
             AssistantContentBlock::ToolCall(AssistantToolCall {
@@ -646,6 +652,7 @@ fn continuing_reasoning_only_final_assistant_keeps_thinking_open() {
         [
             "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider ",
             "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think>The answer is ",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think>\n\n",
             "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
         ]
     "#]]

@@ -770,6 +770,8 @@ fn render_assistant_message(
     dialect: DsDialect,
 ) -> Result<()> {
     let has_tool_calls = content.has_tool_calls();
+    let mut text = String::new();
+    write_assistant_text(&mut text, content);
 
     if emit_thinking_block {
         let has_reasoning = content.has_reasoning();
@@ -780,13 +782,13 @@ fn render_assistant_message(
         // model resumes its reasoning (e.g. `/v1/responses` continuing an
         // `in_progress` reasoning item).
         let continues_reasoning =
-            continue_final && has_reasoning && !has_tool_calls && content.text().is_empty();
+            continue_final && has_reasoning && !has_tool_calls && text.is_empty();
         if !continues_reasoning {
             out.push_str(THINKING_END_TOKEN);
         }
     }
 
-    write_assistant_text(out, content);
+    out.push_str(&text);
 
     if has_tool_calls {
         let tool_calls_tag = dialect.tool_calls_tag();
