@@ -261,10 +261,8 @@ pub(super) fn render_request_with_media_order(
                     Some(_) => false,
                 }
             } else {
-                // A final assistant turn still needs a new-turn opener when the
-                // caller asked for one (StartNewAssistant); otherwise the prompt
-                // ends at EOS and the model generates after end-of-sentence
-                // (vllm#46256).
+                // A final assistant turn also gets the opener under
+                // `StartNewAssistant`; otherwise the prompt ends at EOS.
                 matches!(message, ChatMessage::Assistant { .. })
                     && next_entry.is_none()
                     && request.chat_options.add_generation_prompt()
