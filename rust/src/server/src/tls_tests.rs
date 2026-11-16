@@ -979,6 +979,74 @@ async fn watcher_rewatches_a_recreated_target_directory() {
     shutdown.cancel();
 }
 
+/// Counts the reload watcher's WARN events.
+#[derive(Clone, Default)]
+struct ReloadWarnCount(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReloadWarnCount {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let metadata = event.metadata();
+        if metadata.target() == "vllm_server::tls_reload"
+            && *metadata.level() == tracing::Level::WARN
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn watcher_warns_once_about_an_unwatchable_directory() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let certs = TestCerts::generate();
+    // The files sit in a search-only directory, readable through a path but not
+    // listable, so it cannot be watched; the links' directory can.
+    let root = tempfile::tempdir().expect("tempdir");
+    let (sealed, links) = (root.path().join("sealed"), root.path().join("links"));
+    std::fs::create_dir(&sealed).expect("mkdir sealed");
+    std::fs::create_dir(&links).expect("mkdir links");
+    for (name, source) in [("tls.crt", "server.pem"), ("tls.key", "server.key")] {
+        std::fs::copy(certs.path(source), sealed.join(name)).expect("copy");
+        symlink(sealed.join(name), links.join(name)).expect("symlink");
+    }
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o111)).expect("chmod");
+    if std::fs::read_dir(&sealed).is_ok() {
+        // Root lists (and watches) any directory.
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        eprintln!("skipped: a search-only directory is still listable, as for root");
+        return;
+    }
+    let leaf = |name: &str| links.join(name).to_str().expect("utf-8").to_string();
+    let tls = TlsConfig {
+        cert_file: Some(leaf("tls.crt")),
+        key_file: Some(leaf("tls.key")),
+        ca_certs: None,
+        cert_reqs: 0,
+        ciphers: None,
+        refresh: true,
+    };
+
+    let warnings = ReloadWarnCount::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(warnings.clone()));
+    let server_tls = ServerTls::build(&tls, false).expect("build server TLS");
+    // E.g. a log kept beside the links: each write makes the watcher retry the
+    // directory, which must not warn (and log) again.
+    for line in 0..5 {
+        std::fs::write(links.join("server.log"), format!("line {line}\n")).expect("write log");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    drop(server_tls);
+}
+
 #[tokio::test]
 async fn watcher_reloads_across_atomic_symlink_swap() {
     use std::os::unix::fs::symlink;

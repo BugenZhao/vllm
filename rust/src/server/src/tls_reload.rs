@@ -171,6 +171,7 @@ fn spawn_cert_reloader(
                 files,
                 watcher,
                 dirs: BTreeSet::new(),
+                failed_dirs: BTreeSet::new(),
             };
             if watcher.watch_dirs() {
                 info!(files = ?watcher.files.0, "watching SSL certificate files for changes");
@@ -199,6 +200,9 @@ struct CertWatcher {
     files: CertFiles,
     watcher: RecommendedWatcher,
     dirs: BTreeSet<PathBuf>,
+    /// Directories that failed to be watched, warned about once until they
+    /// can be watched again.
+    failed_dirs: BTreeSet<PathBuf>,
 }
 
 impl CertWatcher {
@@ -212,16 +216,23 @@ impl CertWatcher {
             let _ = self.watcher.unwatch(dir);
         }
         self.dirs.clear();
+        self.failed_dirs.retain(|dir| dirs.contains(dir));
         for dir in dirs {
             match self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
                 Ok(()) => {
+                    self.failed_dirs.remove(&dir);
                     self.dirs.insert(dir);
                 }
-                Err(err) => warn!(
-                    error = %err.as_report(),
-                    dir = %dir.display(),
-                    "failed to watch SSL certificate directory"
-                ),
+                Err(err) => {
+                    if !self.failed_dirs.contains(&dir) {
+                        warn!(
+                            error = %err.as_report(),
+                            dir = %dir.display(),
+                            "failed to watch SSL certificate directory"
+                        );
+                        self.failed_dirs.insert(dir);
+                    }
+                }
             }
         }
         !self.dirs.is_empty()
