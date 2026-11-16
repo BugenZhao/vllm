@@ -9,12 +9,13 @@
 //! swaps it into a [`ReloadableTls`] cell read per handshake; in-flight
 //! connections keep the context they negotiated with.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use notify::{RecursiveMode, Watcher as _};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 use openssl::ssl::SslContext;
 use thiserror_ext::AsReport as _;
 use tls_listener::AsyncTls;
@@ -80,14 +81,19 @@ pub(crate) struct ServerTls {
 impl ServerTls {
     /// Build the contexts once, up front, so a bad cert/key fails fast.
     pub(crate) fn build(tls: &TlsConfig, grpc: bool) -> anyhow::Result<Self> {
+        // Read before building, so a change racing the build differs from it.
+        let loaded = tls.refresh.then(|| CertFiles::new(tls)).map(|files| {
+            let contents = files.read();
+            (files, contents)
+        });
         let http = ReloadableTls::new(tls::build_server_config(tls)?);
         let grpc = grpc
             .then(|| tls::build_grpc_server_config(tls))
             .transpose()?
             .map(ReloadableTls::new);
-        let reloader = tls
-            .refresh
-            .then(|| spawn_cert_reloader(tls.clone(), http.clone(), grpc.clone()));
+        let reloader = loaded.map(|(files, contents)| {
+            spawn_cert_reloader(files, contents, tls.clone(), http.clone(), grpc.clone())
+        });
         Ok(Self {
             http,
             grpc,
@@ -96,19 +102,62 @@ impl ServerTls {
     }
 }
 
+/// The files a TLS context is built from.
+struct CertFiles(Vec<PathBuf>);
+
+impl CertFiles {
+    /// The cert chain (always), plus the key when configured separately and
+    /// the CA when client certificates are verified against it.
+    fn new(tls: &TlsConfig) -> Self {
+        Self(
+            [
+                tls.cert_file.as_deref(),
+                tls.key_file.as_deref(),
+                tls.ca_certs.as_deref().filter(|_| tls.cert_reqs != 0),
+            ]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .collect(),
+        )
+    }
+
+    /// The files' contents, following symlinks; `None` for one that cannot be
+    /// read (e.g. removed mid-rotation).
+    fn read(&self) -> Vec<Option<Vec<u8>>> {
+        self.0.iter().map(|file| std::fs::read(file).ok()).collect()
+    }
+
+    /// The directories to watch: each file's parent, since a symlink-swap
+    /// rotation changes the leaf inode, which a file watch would stop
+    /// following; and, for a symlinked file, the directory it resolves to, so
+    /// a write to a target elsewhere is seen.
+    fn dirs(&self) -> BTreeSet<PathBuf> {
+        let parent = |file: &Path| match file.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        self.0
+            .iter()
+            .flat_map(|file| {
+                let resolved = std::fs::canonicalize(file).ok().map(|file| parent(&file));
+                std::iter::once(parent(file)).chain(resolved)
+            })
+            .collect()
+    }
+}
+
 /// Spawn the certificate watcher; dropping the returned handle (on shutdown)
 /// aborts it. The watches are registered before this returns, so no change
-/// made afterwards is missed.
+/// made afterwards is missed. `loaded` is what the current contexts were built
+/// from.
 fn spawn_cert_reloader(
+    files: CertFiles,
+    loaded: Vec<Option<Vec<u8>>>,
     tls: TlsConfig,
     http: ReloadableTls,
     grpc: Option<ReloadableTls>,
 ) -> AbortOnDropHandle<()> {
-    let files = watched_files(&tls);
-    let dirs = watched_dirs(&files);
-
-    // Watch the parent directories: a symlink-swap rotation changes
-    // the leaf inode, which a file watch would stop following.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         // A reload reads the files, which inotify reports as access events;
@@ -117,20 +166,14 @@ fn spawn_cert_reloader(
             let _ = tx.send(event);
         }
     }) {
-        Ok(mut watcher) => {
-            let mut watching = false;
-            for dir in &dirs {
-                match watcher.watch(dir, RecursiveMode::NonRecursive) {
-                    Ok(()) => watching = true,
-                    Err(err) => warn!(
-                        error = %err.as_report(),
-                        dir = %dir.display(),
-                        "failed to watch SSL certificate directory"
-                    ),
-                }
-            }
-            if watching {
-                info!(?files, "watching SSL certificate files for changes");
+        Ok(watcher) => {
+            let mut watcher = CertWatcher {
+                files,
+                watcher,
+                dirs: BTreeSet::new(),
+            };
+            if watcher.watch_dirs() {
+                info!(files = ?watcher.files.0, "watching SSL certificate files for changes");
                 Some(watcher)
             } else {
                 warn!("no SSL certificate directory could be watched; hot-reload is inactive");
@@ -144,21 +187,58 @@ fn spawn_cert_reloader(
     };
 
     AbortOnDropHandle::new(tokio::spawn(async move {
-        // The watcher stops sending once dropped, so it lives as long as the task.
-        let Some(_watcher) = watcher else {
+        let Some(watcher) = watcher else {
             return;
         };
-        run(rx, tls, http, grpc).await
+        run(watcher, rx, loaded, tls, http, grpc).await
     }))
 }
 
+/// The watcher with the directories it watches.
+struct CertWatcher {
+    files: CertFiles,
+    watcher: RecommendedWatcher,
+    dirs: BTreeSet<PathBuf>,
+}
+
+impl CertWatcher {
+    /// Watch the files' directories, dropping those they no longer resolve to.
+    /// Every directory is watched again each time: a directory removed and
+    /// recreated (e.g. a link pointed away and back) loses its watch with the
+    /// old inode. Returns whether any directory is watched.
+    fn watch_dirs(&mut self) -> bool {
+        let dirs = self.files.dirs();
+        for dir in self.dirs.difference(&dirs) {
+            let _ = self.watcher.unwatch(dir);
+        }
+        self.dirs.clear();
+        for dir in dirs {
+            match self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.dirs.insert(dir);
+                }
+                Err(err) => warn!(
+                    error = %err.as_report(),
+                    dir = %dir.display(),
+                    "failed to watch SSL certificate directory"
+                ),
+            }
+        }
+        !self.dirs.is_empty()
+    }
+}
+
 async fn run(
+    mut watcher: CertWatcher,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
+    mut loaded: Vec<Option<Vec<u8>>>,
     tls: TlsConfig,
     http: ReloadableTls,
     grpc: Option<ReloadableTls>,
 ) {
-    // Any event triggers a whole-context rebuild, so we never inspect which file changed.
+    // Events do not say whether the files changed: a watched directory may
+    // hold other files (such as a log), so compare the contents instead.
+    let mut failed = None;
     while let Some(item) = rx.recv().await {
         log_watch_error(&item);
         // Coalesce the burst a rotation emits into one reload.
@@ -174,7 +254,29 @@ async fn run(
                 },
             }
         }
-        reload(&tls, &http, grpc.as_ref());
+        // OpenSSL reads the files again, so a write racing that read can fail a
+        // rebuild of contents that are fine; retry until one succeeds, warning
+        // once per contents so a log in the directory cannot feed a loop.
+        let contents = watcher.files.read();
+        if contents != loaded {
+            match reload(&tls, &http, grpc.as_ref()) {
+                Ok(()) => {
+                    info!("Reloaded SSL certificate chain");
+                    loaded = contents;
+                    failed = None;
+                }
+                Err(err) => {
+                    if failed.as_ref() != Some(&contents) {
+                        warn!(
+                            error = %format_args!("{err:#}"),
+                            "SSL certificate reload failed; keeping the current certificate"
+                        );
+                    }
+                    failed = Some(contents);
+                }
+            }
+        }
+        watcher.watch_dirs();
     }
 }
 
@@ -187,55 +289,19 @@ fn log_watch_error(item: &notify::Result<notify::Event>) {
 }
 
 /// Rebuild the active TLS context(s) and swap them in, all-or-nothing: if any
-/// rebuild fails (a partial or malformed write), keep the current certificate
-/// and log, never serving a half-updated pair.
-pub(crate) fn reload(tls: &TlsConfig, http: &ReloadableTls, grpc: Option<&ReloadableTls>) {
-    let http_context = match tls::build_server_config(tls) {
-        Ok(context) => context,
-        Err(err) => return keep_current(err),
-    };
-    let grpc_context = match grpc.map(|_| tls::build_grpc_server_config(tls)).transpose() {
-        Ok(context) => context,
-        Err(err) => return keep_current(err),
-    };
+/// rebuild fails (a partial or malformed write), keep the current certificate,
+/// never serving a half-updated pair.
+pub(crate) fn reload(
+    tls: &TlsConfig,
+    http: &ReloadableTls,
+    grpc: Option<&ReloadableTls>,
+) -> anyhow::Result<()> {
+    let http_context = tls::build_server_config(tls)?;
+    let grpc_context = grpc.map(|_| tls::build_grpc_server_config(tls)).transpose()?;
 
     http.store(http_context);
     if let (Some(cell), Some(context)) = (grpc, grpc_context) {
         cell.store(context);
     }
-    info!("Reloaded SSL certificate chain");
-}
-
-fn keep_current(err: anyhow::Error) {
-    warn!(
-        error = %format_args!("{err:#}"),
-        "SSL certificate reload failed; keeping the current certificate"
-    );
-}
-
-/// The certificate files to watch: the cert chain (always), plus the key and CA
-/// when configured separately.
-fn watched_files(tls: &TlsConfig) -> Vec<PathBuf> {
-    [
-        tls.cert_file.as_deref(),
-        tls.key_file.as_deref(),
-        tls.ca_certs.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(PathBuf::from)
-    .collect()
-}
-
-fn watched_dirs(files: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = files
-        .iter()
-        .map(|file| match file.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => PathBuf::from("."),
-        })
-        .collect();
-    dirs.sort();
-    dirs.dedup();
-    dirs
+    Ok(())
 }

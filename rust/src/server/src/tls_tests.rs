@@ -6,6 +6,7 @@
 //! terminates below the app.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -762,7 +763,7 @@ async fn reload_serves_the_new_certificate() {
     let before = served_cert_der(&certs, &addr).await;
 
     rotate_cert_files(&certs);
-    tls_reload::reload(&tls, &cell, None);
+    tls_reload::reload(&tls, &cell, None).expect("reload");
 
     assert_ne!(
         served_cert_der(&certs, &addr).await,
@@ -786,7 +787,7 @@ async fn reload_keeps_the_current_certificate_on_a_bad_write() {
         b"-----BEGIN CERTIFICATE-----\nnope\n",
     )
     .expect("write partial cert");
-    tls_reload::reload(&tls, &cell, None);
+    tls_reload::reload(&tls, &cell, None).expect_err("a partial cert must not load");
 
     assert_eq!(
         served_cert_der(&certs, &addr).await,
@@ -839,6 +840,143 @@ async fn watcher_reloads_the_certificate_when_files_change() {
     );
     http_shutdown.cancel();
     grpc_shutdown.cancel();
+}
+
+#[tokio::test]
+async fn watcher_ignores_other_files_in_the_directory() {
+    let certs = TestCerts::generate();
+    let tls = TlsConfig {
+        refresh: true,
+        ..server_tls(&certs, 0)
+    };
+    let server_tls = ServerTls::build(&tls, false).expect("build server TLS");
+    let loaded = server_tls.http.current();
+
+    // E.g. a log file kept beside the certificates: the reload's own log line
+    // must not trigger the next reload.
+    for line in 0..5 {
+        std::fs::write(certs.path("server.log"), format!("line {line}\n")).expect("write log");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        Arc::ptr_eq(&loaded, &server_tls.http.current()),
+        "a write to another file in the directory reloaded the certificate"
+    );
+}
+
+#[tokio::test]
+async fn watcher_reloads_symlinked_files_rewritten_elsewhere() {
+    use std::os::unix::fs::symlink;
+
+    let certs = TestCerts::generate();
+    // The configured paths are links into the directory holding the files,
+    // which rotation rewrites in place.
+    let links = tempfile::tempdir().expect("tempdir");
+    let link = |name: &str, target: &str| {
+        let path = links.path().join(name);
+        symlink(certs.path(target), &path).expect("symlink");
+        path.to_str().expect("utf-8").to_string()
+    };
+    let tls = TlsConfig {
+        cert_file: Some(link("tls.crt", "server.pem")),
+        key_file: Some(link("tls.key", "server.key")),
+        ca_certs: None,
+        cert_reqs: 0,
+        ciphers: None,
+        refresh: true,
+    };
+    let server_tls = ServerTls::build(&tls, false).expect("build server TLS");
+    let (addr, shutdown) = spawn_reloadable_server(server_tls.http.clone()).await;
+    let before = served_cert_der(&certs, &addr).await;
+
+    rotate_cert_files(&certs);
+
+    let mut reloaded = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if served_cert_der(&certs, &addr).await != before {
+            reloaded = true;
+            break;
+        }
+    }
+    assert!(
+        reloaded,
+        "watcher did not reload after the link targets were rewritten"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn watcher_rewatches_a_recreated_target_directory() {
+    use std::os::unix::fs::symlink;
+
+    let certs = TestCerts::generate();
+    let root = tempfile::tempdir().expect("tempdir");
+    let (x, y, links) = (
+        root.path().join("x"),
+        root.path().join("y"),
+        root.path().join("links"),
+    );
+    for dir in [&x, &y, &links] {
+        std::fs::create_dir(dir).expect("mkdir");
+    }
+    let put = |dir: &Path, cert: &str, key: &str| {
+        std::fs::copy(certs.path(cert), dir.join("tls.crt")).expect("cert");
+        std::fs::copy(certs.path(key), dir.join("tls.key")).expect("key");
+    };
+    // Re-point both links at once, as an atomic rename each.
+    let point = |dir: &Path| {
+        for name in ["tls.crt", "tls.key"] {
+            let staged = links.join(format!("{name}.tmp"));
+            symlink(dir.join(name), &staged).expect("stage link");
+            std::fs::rename(&staged, links.join(name)).expect("swap link");
+        }
+    };
+    let leaf = |name: &str| links.join(name).to_str().expect("utf-8").to_string();
+
+    put(&x, "server.pem", "server.key");
+    point(&x);
+    let tls = TlsConfig {
+        cert_file: Some(leaf("tls.crt")),
+        key_file: Some(leaf("tls.key")),
+        ca_certs: None,
+        cert_reqs: 0,
+        ciphers: None,
+        refresh: true,
+    };
+    let server_tls = ServerTls::build(&tls, false).expect("build server TLS");
+    let (addr, shutdown) = spawn_reloadable_server(server_tls.http.clone()).await;
+    let first = served_cert_der(&certs, &addr).await;
+    let wait_for = |want_first: bool| {
+        let (certs, addr, first) = (&certs, &addr, &first);
+        async move {
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if (served_cert_der(certs, addr).await == *first) == want_first {
+                    return true;
+                }
+            }
+            false
+        }
+    };
+
+    // Point away, recreate x with the original certificate, point back.
+    put(&y, "server_chain.pem", "server_chain.key");
+    point(&y);
+    assert!(wait_for(false).await, "did not follow the links to y");
+    std::fs::remove_dir_all(&x).expect("remove x");
+    std::fs::create_dir(&x).expect("recreate x");
+    put(&x, "server.pem", "server.key");
+    point(&x);
+    assert!(wait_for(true).await, "did not follow the links back to x");
+
+    // A rewrite inside the recreated directory must still be seen.
+    put(&x, "server_chain.pem", "server_chain.key");
+    assert!(
+        wait_for(false).await,
+        "missed a rewrite in the recreated target directory"
+    );
+    shutdown.cancel();
 }
 
 #[tokio::test]
