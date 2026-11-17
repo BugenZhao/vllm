@@ -41,8 +41,9 @@ pub struct CompletionRequest {
 
     /// The prompt(s) to generate completions for.
     ///
-    /// We use [`vllm_text::Prompt`] here to support token-id input.
-    pub prompt: Prompt,
+    /// We use [`vllm_text::Prompt`] here to support token-id input. `None`
+    /// (missing or null) is rejected when the request is lowered.
+    pub prompt: Option<Prompt>,
 
     /// Echo back the prompt in addition to the completion
     #[serde(default)]

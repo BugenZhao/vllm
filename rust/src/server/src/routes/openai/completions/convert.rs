@@ -7,7 +7,7 @@ use thiserror_ext::AsReport as _;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest, TextRequestProcessor};
 
 use super::types::CompletionRequest;
-use crate::error::{ApiError, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
@@ -68,6 +68,14 @@ pub(super) fn prepare_completion_request(
     processor: &TextRequestProcessor,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    // Python's message; `prompt_embeds` itself is rejected above. An empty text
+    // prompt is left to tokenization, which may still yield a BOS token.
+    let Some(prompt) = request.prompt else {
+        bail_invalid_request!(
+            param = "prompt",
+            "Either prompt or prompt_embeds must be provided and non-empty."
+        );
+    };
     let n = resolve_n(request.n)?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
@@ -116,7 +124,7 @@ pub(super) fn prepare_completion_request(
     let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut text_request = TextRequest {
         request_id: request_id.clone(),
-        prompt: request.prompt,
+        prompt,
         mm_features: None,
         sampling_params: SamplingParams {
             temperature: request.temperature,
@@ -288,7 +296,7 @@ mod tests {
         let request: CompletionRequest =
             serde_json::from_value(base_request_json()).expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
+        assert_eq!(request.prompt, Some(Prompt::Text("hello".to_string())));
         assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
     }
 
@@ -331,7 +339,7 @@ mod tests {
         }))
         .expect("parse request");
 
-        assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
+        assert_eq!(request.prompt, Some(Prompt::TokenIds(vec![11, 22, 33])));
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
     }
