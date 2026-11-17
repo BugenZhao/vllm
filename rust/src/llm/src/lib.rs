@@ -15,7 +15,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
-use vllm_metrics::METRICS;
+use vllm_metrics::{ADMISSION_REJECTION_REASONS, AdmissionRejectionLabels, METRICS};
 
 mod aux_output;
 mod error;
@@ -153,6 +153,17 @@ impl EngineCoreLlm {
                 (engine, Arc::new(handles))
             })
             .collect();
+        // Export both `vllm:admission_rejections` series from startup, like
+        // Python. Nothing counts them yet: the queue limits are unsupported.
+        for reason in ADMISSION_REJECTION_REASONS {
+            METRICS
+                .request
+                .admission_rejections
+                .get_or_create_owned(&AdmissionRejectionLabels {
+                    model_name: client.model_name().to_string(),
+                    reason,
+                });
+        }
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let info = LlmInfo {

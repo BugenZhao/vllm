@@ -1135,6 +1135,7 @@ async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
         .filter(|line| line.contains(&model_name))
         .filter(|line| {
             line.starts_with("vllm:request_success_total")
+                || line.starts_with("vllm:admission_rejections_total")
                 || line.starts_with("vllm:prompt_tokens_total")
                 || line.starts_with("vllm:generation_tokens_total")
                 || line.starts_with("vllm:e2e_request_latency_seconds_count")
@@ -1143,6 +1144,8 @@ async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
         .collect();
     series.sort();
     expect_test::expect![[r#"
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_reqs"} 0
+        vllm:admission_rejections_total{model_name="<model>",reason="max_num_queued_tokens"} 0
         vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
         vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
         vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
