@@ -11,7 +11,7 @@ use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 
-use crate::{Result, Tokenizer};
+use crate::{Result, Tokenizer, parse_checkpoint_json};
 
 /// Default regex pattern used when loading tiktoken from a BPE file. This is
 /// the same `cl100k_base` pattern that HuggingFace transformers uses as its
@@ -376,7 +376,7 @@ impl LoadedTiktokenConfig {
             .filter(|p| p.exists())
             .and_then(|config_path| {
                 let content = std::fs::read_to_string(&config_path).ok()?;
-                serde_json::from_str(&content).ok()
+                parse_checkpoint_json(&content).ok()
             })
             .map(|config: TiktokenTokenizerConfig| config.added_tokens_decoder)
             .unwrap_or_default();
@@ -386,7 +386,7 @@ impl LoadedTiktokenConfig {
             .filter(|p| p.exists())
             .and_then(|config_path| {
                 let content = std::fs::read_to_string(&config_path).ok()?;
-                serde_json::from_str(&content).ok()
+                parse_checkpoint_json(&content).ok()
             });
         let vocab_size_from_config = model_config.as_ref().and_then(|c| c.effective_vocab_size());
 
@@ -721,9 +721,11 @@ mod tests {
     fn tiktoken_skip_special_tokens_filters_special_but_keeps_non_special_added_tokens() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let bpe_path = write_synthetic_bpe_file(dir.path());
+        // Both configs carry an ignored non-finite field, as Python's `json` writes.
         fs::write(
             dir.path().join("tokenizer_config.json"),
             r#"{
+                "model_max_length": Infinity,
                 "added_tokens_decoder": {
                     "257": { "content": "<|im_end|>", "special": true },
                     "258": { "content": "<|tool_call_begin|>", "special": false }
@@ -731,8 +733,11 @@ mod tests {
             }"#,
         )
         .expect("write tokenizer_config.json");
-        fs::write(dir.path().join("config.json"), r#"{"vocab_size": 260}"#)
-            .expect("write config.json");
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{"vocab_size": 260, "time_step_limit": [0.0, Infinity]}"#,
+        )
+        .expect("write config.json");
 
         for backend in explicit_backends(&bpe_path) {
             // Resolve the BPE ids for "Hi" so we can interleave them with special-token

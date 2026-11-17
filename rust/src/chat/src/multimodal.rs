@@ -31,7 +31,7 @@ use tracing::{Instrument as _, warn};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::{DynTokenizer, Tokenizer, parse_checkpoint_json};
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
@@ -327,7 +327,7 @@ fn load_preprocessor_config(
     if let Some(path) = processor_config_path {
         let text = fs::read_to_string(path)
             .map_err(|error| multimodal!("failed to read processor_config.json: {error}"))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let value: serde_json::Value = parse_checkpoint_json(&text)
             .map_err(|error| multimodal!("failed to parse processor_config.json: {error}"))?;
         if let Some(processor) = value.get(processor_section).filter(|value| !value.is_null()) {
             let config = PreProcessorConfig::from_value(processor.clone()).map_err(|error| {
@@ -343,7 +343,8 @@ fn load_preprocessor_config(
     };
     let text = fs::read_to_string(path)
         .map_err(|error| multimodal!("failed to read {dedicated_name}: {error}"))?;
-    let config = PreProcessorConfig::from_json(&text)
+    let config = parse_checkpoint_json(&text)
+        .and_then(PreProcessorConfig::from_value)
         .map_err(|error| multimodal!("failed to parse {dedicated_name}: {error}"))?;
     Ok(Some(config))
 }
@@ -394,7 +395,7 @@ impl MultimodalModelInfo {
             Some(path) => {
                 let text = fs::read_to_string(path)
                     .map_err(|error| multimodal!("failed to read config.json: {error}"))?;
-                serde_json::from_str(&text)
+                parse_checkpoint_json(&text)
                     .map_err(|error| multimodal!("failed to parse config.json: {error}"))?
             }
             None => serde_json::Value::Object(Default::default()),
@@ -1777,11 +1778,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join("preprocessor_config.json");
         let combined = dir.path().join("processor_config.json");
-        fs::write(&legacy, r#"{"sampling_rate":8000}"#).unwrap();
+        // Both files carry an ignored non-finite field, as Python's `json` writes.
+        fs::write(&legacy, r#"{"sampling_rate":8000,"max_value":Infinity}"#).unwrap();
         for section in ["image_processor", "video_processor", "feature_extractor"] {
             fs::write(
                 &combined,
-                serde_json::json!({section: {"sampling_rate":24000}}).to_string(),
+                format!(r#"{{"{section}":{{"sampling_rate":24000}},"max_value":NaN}}"#),
             )
             .unwrap();
             let config = load_preprocessor_config(
@@ -1804,6 +1806,31 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(config.get_extra::<usize>("sampling_rate"), Some(8000));
+    }
+
+    #[test]
+    fn text_only_config_with_non_finite_literals_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        fs::write(
+            &config,
+            r#"{"model_type":"nemotron_h","time_step_limit":[0.0, Infinity]}"#,
+        )
+        .unwrap();
+
+        let info = MultimodalModelInfo::from_paths(
+            "text-checkpoint".to_owned(),
+            Some("nemotron_h".to_owned()),
+            MultimodalConfigFiles {
+                config: Some(&config),
+                ..Default::default()
+            },
+            Arc::new(TestTokenizer::new()),
+            HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(info.is_none());
     }
 
     #[tokio::test]

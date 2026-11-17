@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnError, serde_as};
 use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result};
 use crate::normalize_top_k;
@@ -372,7 +373,7 @@ where
             error.as_report()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
+    parse_checkpoint_json(&content).map_err(|error| {
         Error::Tokenizer(format!(
             "failed to parse {}: {}",
             path.display(),
@@ -383,7 +384,39 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationConfig, HfTokenizerConfig, ModelConfig, ModelDtype};
+    use std::io::Write as _;
+
+    use super::{
+        GenerationConfig, HfTokenizerConfig, ModelConfig, ModelDtype, load_generation_config,
+        load_model_config,
+    };
+
+    #[test]
+    fn model_config_file_with_non_finite_literals_loads() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"{"model_type": "nemotron_h", "time_step_limit": [0.0, Infinity], "vocab_size": 131072}"#,
+        )
+        .unwrap();
+
+        let config = load_model_config(Some(file.path())).unwrap();
+
+        assert_eq!(config.model_type(), Some("nemotron_h"));
+        assert_eq!(config.vocab_size().unwrap(), 131072);
+    }
+
+    #[test]
+    fn generation_config_rejects_non_finite_sampling_defaults() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(br#"{"do_sample": true, "temperature": NaN}"#).unwrap();
+
+        let error = load_generation_config(Some(file.path())).unwrap_err();
+
+        assert!(
+            error.to_string().contains(r#"invalid type: string "NaN", expected f32"#),
+            "{error}"
+        );
+    }
 
     #[test]
     fn tokenizer_config_reads_single_and_named_chat_templates() {
