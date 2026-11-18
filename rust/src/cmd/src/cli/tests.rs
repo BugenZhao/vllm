@@ -255,6 +255,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    config: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",
@@ -506,6 +507,272 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
         ]
     "#]]
     .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+/// Write a `vllm-rs serve --config` file.
+fn config_file(yaml: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+    std::fs::write(file.path(), yaml).unwrap();
+    file
+}
+
+#[test]
+fn serve_args_read_config_file() {
+    let config = config_file(
+        r#"
+model: Qwen/Qwen3-0.6B
+port: 9000
+served_model_name: qwen
+api-key: [key-a, key-b]
+hf-overrides:
+  rope_parameters:
+    rope_type: yarn
+enable-log-requests: true
+enable-log-deltas: false
+max-model-len: 4096
+tensor-parallel-size: 2
+enforce-eager: true
+enable-prefix-caching: false
+speculative-config:
+  method: ngram
+"#,
+    );
+    let cli = Cli::try_parse_from([
+        "vllm-rs".as_ref(),
+        "serve".as_ref(),
+        "--config".as_ref(),
+        config.path().as_os_str(),
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.config.as_deref(), Some(config.path()));
+    assert_eq!(args.port, 9000);
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.runtime.api_key, ["key-a", "key-b"]);
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        serde_json::json!({"rope_parameters": {"rope_type": "yarn"}})
+    );
+    assert!(args.runtime.enable_log_requests);
+    assert!(!args.runtime.enable_log_deltas);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("4096"));
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+            "--enforce-eager",
+            "--no-enable-prefix-caching",
+            "--speculative-config",
+            "{\"method\":\"ngram\"}",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+/// YAML merge keys resolve as in PyYAML, at the top level and inside an
+/// option's mapping.
+#[test]
+fn serve_args_resolve_merge_keys_in_config_file() {
+    let config = config_file(
+        r#"
+<<: {model: Qwen/Qwen3-0.6B, port: 9000}
+hf-overrides:
+  <<: {rope_theta: 500000}
+"#,
+    );
+    let cli = Cli::try_parse_from([
+        "vllm-rs".as_ref(),
+        "serve".as_ref(),
+        "--config".as_ref(),
+        config.path().as_os_str(),
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-0.6B");
+    assert_eq!(args.port, 9000);
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        serde_json::json!({"rope_theta": 500000})
+    );
+}
+
+/// As in Python, options on the command line override the config file's, and
+/// a positional model overrides its `model`.
+#[test]
+fn serve_args_command_line_overrides_config_file() {
+    let config = config_file(
+        r#"
+model: Qwen/Qwen3-0.6B
+port: 9000
+served-model-name: [qwen]
+max_model_len: 4096
+tensor-parallel-size: 2
+"#,
+    );
+    let cli = Cli::try_parse_from([
+        "vllm-rs".as_ref(),
+        "serve".as_ref(),
+        "Qwen/Qwen3-1.7B".as_ref(),
+        "--port=9001".as_ref(),
+        "--config".as_ref(),
+        config.path().as_os_str(),
+        "--max-model-len".as_ref(),
+        "1024".as_ref(),
+        "-tp".as_ref(),
+        "4".as_ref(),
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.model.id, "Qwen/Qwen3-1.7B");
+    assert_eq!(args.port, 9001);
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("1024"));
+    // Python keeps the last value of the engine's options.
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+            "--tensor-parallel-size",
+            "4",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+/// Dotted forms merge across the config file and the command line, as in
+/// Python, and the merged value reaches the managed engine too.
+#[test]
+fn serve_args_merge_dotted_forms_across_config_file() {
+    let config = config_file(
+        r#"
+hf-overrides.rope_parameters.rope_type: yarn
+hf_overrides.rope_parameters.factor: 2
+hf-overrides.eos_token_id: [1, 2]
+hf-overrides.rope_scaling: null
+"#,
+    );
+    let cli = Cli::try_parse_from([
+        "vllm-rs".as_ref(),
+        "serve".as_ref(),
+        "Qwen/Qwen3-0.6B".as_ref(),
+        "--config".as_ref(),
+        config.path().as_os_str(),
+        "--hf-overrides.rope_parameters.factor".as_ref(),
+        "4".as_ref(),
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let hf_overrides = serde_json::json!({
+        "rope_parameters": {"rope_type": "yarn", "factor": 4},
+        "eos_token_id": [1, 2],
+        "rope_scaling": null,
+    });
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        hf_overrides
+    );
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        hf_overrides
+    );
+}
+
+/// A `false` for an option that takes a value reaches it as on the command
+/// line, including options whose default `VLLM_SERVER_DEV_MODE` turns on.
+#[test]
+fn serve_args_keep_false_from_config_file() {
+    let config = config_file(
+        r#"
+enable-scale-out: false
+log-error-stack: false
+api-key: false
+"#,
+    );
+    let cli = Cli::try_parse_from([
+        "vllm-rs".as_ref(),
+        "serve".as_ref(),
+        "Qwen/Qwen3-0.6B".as_ref(),
+        "--config".as_ref(),
+        config.path().as_os_str(),
+        "--server-dev-mode".as_ref(),
+        "1".as_ref(),
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(config.api_server_options.server_dev_mode);
+    assert!(!config.api_server_options.enable_scale_out);
+    assert!(!config.api_server_options.log_error_stack);
+    assert_eq!(args.runtime.api_key, ["false"]);
+}
+
+#[test]
+fn serve_args_reject_invalid_config_file() {
+    let parse = |args: &[&std::ffi::OsStr]| {
+        let args = [["vllm-rs".as_ref(), "serve".as_ref()].as_slice(), args].concat();
+        Cli::try_parse_from(args).unwrap_err().to_string()
+    };
+
+    let no_model = config_file("port: 9000\n");
+    let error = parse(&["--config".as_ref(), no_model.path().as_os_str()]);
+    assert!(
+        error.contains("the model must appear immediately after the command"),
+        "{error}"
+    );
+
+    let not_a_mapping = config_file("- --port\n- '9000'\n");
+    let error = parse(&[
+        "Qwen/Qwen3-0.6B".as_ref(),
+        "--config".as_ref(),
+        not_a_mapping.path().as_os_str(),
+    ]);
+    assert!(
+        error.contains("expected a YAML mapping of options"),
+        "{error}"
+    );
+
+    for (yaml, expected) in [
+        ("port: false\n", "invalid value 'false' for '--port <PORT>'"),
+        (
+            "enable-elastic-ep: false\n",
+            "argument is not implemented in Rust frontend yet",
+        ),
+    ] {
+        let config = config_file(yaml);
+        let error = parse(&[
+            "Qwen/Qwen3-0.6B".as_ref(),
+            "--config".as_ref(),
+            config.path().as_os_str(),
+        ]);
+        assert!(error.contains(expected), "{yaml}: {error}");
+    }
+
+    let error = parse(&[
+        "Qwen/Qwen3-0.6B".as_ref(),
+        "--config=/nonexistent/vllm-config.yaml".as_ref(),
+    ]);
+    assert!(
+        error.contains("failed to read the config file /nonexistent/vllm-config.yaml"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -3406,6 +3673,7 @@ fn serve_args_accept_handshake_aliases() {
                     port: 8000,
                     uds: None,
                     grpc_port: None,
+                    config: None,
                     runtime: SharedRuntimeArgs {
                         model: ModelArgs {
                             id: "Qwen/Qwen3-0.6B",

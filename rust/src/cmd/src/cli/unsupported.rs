@@ -152,11 +152,6 @@ pub struct TopLevelUnsupportedArgs {
     #[arg(long, hide = true)]
     pub api_server_count: Option<Noop>,
 
-    /// Read CLI options from a config file. Must be a YAML with the following
-    /// options: https://docs.vllm.ai/en/latest/configuration/serve_args.html
-    #[arg(long)]
-    pub config: Option<Unsupported>,
-
     /// Launch a gRPC server instead of the HTTP OpenAI-compatible server.
     /// Requires: pip install vllm[grpc].
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
