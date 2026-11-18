@@ -2333,7 +2333,9 @@ async fn render_chat_uses_processor_owned_parser_selections() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A parser the server is configured with but cannot find is this side's
+    // error, as on the chat route.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let body = String::from_utf8(body.to_vec()).expect("decode body");
     assert!(

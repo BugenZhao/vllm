@@ -334,6 +334,49 @@ mod tests {
         assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Multimodal preprocessing and request template errors map by whose
+    /// fault they are: 400 for what the request got wrong, 500 for this side's
+    /// preprocessing and the model's own files.
+    #[test]
+    fn multimodal_and_request_template_errors_map_by_fault() {
+        let errors = [
+            vllm_chat::Error::from(llm_multimodal::MultiModalError::UnsupportedContent(
+                "image_embeds",
+            )),
+            vllm_chat::Error::from(
+                llm_multimodal::registry::ModelRegistryError::UnsupportedModality {
+                    spec: "test",
+                    modality: llm_multimodal::Modality::Video,
+                },
+            ),
+            vllm_chat::Error::InvalidRequestChatTemplate {
+                message: "syntax error: unexpected end of input".to_string(),
+            },
+            vllm_chat::Error::from(llm_multimodal::TransformError::ShapeError(
+                "invalid resize inputs: image 28x28, token patch 0x0".to_string(),
+            )),
+            vllm_chat::Error::from(
+                llm_multimodal::registry::ModelRegistryError::MissingConfigField {
+                    field: "image_token_id".to_string(),
+                },
+            ),
+        ];
+        let statuses = errors
+            .into_iter()
+            .map(|error| chat_submit_error("failed to submit chat request", error).status_code())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ]
+        );
+    }
+
     #[test]
     fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {

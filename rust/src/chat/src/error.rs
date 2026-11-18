@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
-use thiserror_ext::{AsReport as _, Macro};
+use thiserror_ext::Macro;
 
 use crate::RendererSelection;
 
@@ -34,6 +34,13 @@ pub enum Error {
     UntrustedRequestChatTemplate,
     #[error("chat_template is not supported by this chat renderer")]
     UnsupportedRequestChatTemplate,
+    /// The request's own `chat_template` failed to compile or render.
+    #[error("{message}")]
+    InvalidRequestChatTemplate { message: String },
+    /// `continue_final_message` asked to continue a final message that has
+    /// no text, or that the chat template does not render.
+    #[error("{message}")]
+    InvalidContinueFinalMessage { message: String },
     #[error(
         "--chat-template is not supported by the `{renderer}` renderer; use --tokenizer-mode hf to render a Jinja chat template"
     )]
@@ -63,7 +70,11 @@ pub enum Error {
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error(transparent)]
-    Media(#[from] llm_multimodal::MediaConnectorError),
+    Media(#[from] llm_multimodal::MultiModalError),
+    #[error(transparent)]
+    MultimodalTransform(#[from] llm_multimodal::TransformError),
+    #[error(transparent)]
+    MultimodalSpec(#[from] llm_multimodal::registry::ModelRegistryError),
     #[error("{kind} parsing is not available for model `{model_id}`")]
     ParserUnavailableForModel {
         kind: &'static str,
@@ -154,6 +165,8 @@ impl Error {
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
+            | Self::InvalidRequestChatTemplate { .. }
+            | Self::InvalidContinueFinalMessage { .. }
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::OutputGrammar { error } => matches!(
@@ -168,9 +181,9 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
-            // A media host that timed out or failed, and a decoder that failed
-            // on this side, stay server errors, as in Python.
-            Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
+            Self::Media(error) => media_error_is_request_error(error),
+            Self::MultimodalTransform(error) => transform_error_is_request_error(error),
+            Self::MultimodalSpec(error) => spec_error_is_request_error(error),
 
             _ => false,
         }
@@ -181,7 +194,9 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::Text(error) => error.param(),
-            Self::UnsupportedRequestChatTemplate => Some("chat_template"),
+            Self::UnsupportedRequestChatTemplate | Self::InvalidRequestChatTemplate { .. } => {
+                Some("chat_template")
+            }
             _ => None,
         }
     }
@@ -193,24 +208,58 @@ impl Error {
     }
 }
 
-impl From<llm_multimodal::MultiModalError> for Error {
-    fn from(error: llm_multimodal::MultiModalError) -> Self {
-        match error {
-            llm_multimodal::MultiModalError::Media(error) => Self::Media(error),
-            error => Self::Multimodal(error.to_report_string()),
-        }
+impl From<llm_multimodal::MediaConnectorError> for Error {
+    fn from(error: llm_multimodal::MediaConnectorError) -> Self {
+        Self::Media(error.into())
     }
 }
 
-impl From<llm_multimodal::TransformError> for Error {
-    fn from(error: llm_multimodal::TransformError) -> Self {
-        Self::Multimodal(error.to_report_string())
+/// Whether a media tracker error is the request's: media the request got
+/// wrong or a content part it may not send. A media host that timed out or
+/// failed, and a decoder that failed on this side, stay server errors, as in
+/// Python; so do a failed tracker task and a broken tracker invariant.
+fn media_error_is_request_error(error: &llm_multimodal::MultiModalError) -> bool {
+    use llm_multimodal::MultiModalError;
+    match error {
+        MultiModalError::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
+        MultiModalError::UnsupportedContent(_) => true,
+        MultiModalError::Join(_) | MultiModalError::Validation(_) => false,
     }
 }
 
-impl From<llm_multimodal::registry::ModelRegistryError> for Error {
-    fn from(error: llm_multimodal::registry::ModelRegistryError) -> Self {
-        Self::Multimodal(error.to_report_string())
+/// Whether a processor error on already decoded media is the request's: only
+/// a payload over its decoded-size cap is. The shape errors describe this
+/// process's preprocessing output or the checkpoint's processor config.
+// TODO: `ShapeError` also carries refusals of the request's media geometry
+// (Step3-VL collapsing a 100000x32 image to 3024x0), which Python answers
+// with 400; classify those once their producers report them apart.
+fn transform_error_is_request_error(error: &llm_multimodal::TransformError) -> bool {
+    use llm_multimodal::TransformError;
+    match error {
+        TransformError::DecodedTooLarge { .. } => true,
+        TransformError::InvalidShape { .. }
+        | TransformError::EmptyBatch
+        | TransformError::InconsistentShapes
+        | TransformError::ShapeError(_) => false,
+    }
+}
+
+/// Whether a model spec error is the request's: more items of a modality, or
+/// a modality, than the model takes. The rest describe the model's files and
+/// config, or this process's preprocessing output.
+fn spec_error_is_request_error(error: &llm_multimodal::registry::ModelRegistryError) -> bool {
+    use llm_multimodal::registry::ModelRegistryError;
+    match error {
+        ModelRegistryError::ModalityLimitExceeded { .. }
+        | ModelRegistryError::UnsupportedModality { .. } => true,
+        ModelRegistryError::UnsupportedModel(_)
+        | ModelRegistryError::TokenNotFound { .. }
+        | ModelRegistryError::MissingConfigField { .. }
+        | ModelRegistryError::InvalidPreprocessedField { .. }
+        | ModelRegistryError::InvalidConfigField { .. }
+        | ModelRegistryError::TextEncodingFailed { .. }
+        | ModelRegistryError::InvalidPreprocessorConfig { .. }
+        | ModelRegistryError::DuplicateModality { .. } => false,
     }
 }
 
@@ -229,33 +278,73 @@ mod tests {
 
     use expect_test::expect;
     use itertools::Itertools as _;
-    use llm_multimodal::{MediaConnectorError, MultiModalError};
+    use llm_multimodal::registry::ModelRegistryError;
+    use llm_multimodal::{MediaConnectorError, Modality, MultiModalError, TransformError};
 
     use super::*;
 
-    /// Only media the request got wrong is a validation error; a media host
-    /// that timed out and a decoder that failed on this side are not.
+    /// Only what the request got wrong is a validation error: its media, a
+    /// content part it may not send, too many items or a modality the model
+    /// does not take. A media host that timed out, a
+    /// decoder or preprocessing step that failed on this side, and the model's
+    /// own files are not.
     #[test]
-    fn media_error_is_request_validation_error_only_when_the_request_is_at_fault() {
+    fn multimodal_error_is_request_validation_error_only_when_the_request_is_at_fault() {
         let errors = [
-            MediaConnectorError::DataUrl("missing comma".to_string()),
-            MediaConnectorError::Timeout {
+            Error::from(MediaConnectorError::DataUrl("missing comma".to_string())),
+            Error::from(MediaConnectorError::Timeout {
                 url: "https://example.com/a.png".to_string(),
                 budget: Duration::from_secs(5),
-            },
-            MediaConnectorError::DecodeIo(std::io::Error::other("broken pipe")),
+            }),
+            Error::from(MediaConnectorError::DecodeIo(std::io::Error::other(
+                "broken pipe",
+            ))),
+            Error::from(MultiModalError::UnsupportedContent("image_embeds")),
+            Error::from(MultiModalError::Validation(
+                "image slot refers to a slot that was never fetched".to_string(),
+            )),
+            Error::from(TransformError::DecodedTooLarge {
+                bytes: 2048,
+                limit: 1024,
+                knob: "SMG_AUDIO_MAX_DECODED_BYTES",
+            }),
+            Error::from(TransformError::ShapeError(
+                "invalid resize inputs: image 28x28, token patch 0x0".to_string(),
+            )),
+            Error::from(ModelRegistryError::ModalityLimitExceeded {
+                spec: "test",
+                modality: Modality::Audio,
+                limit: 1,
+                requested: 2,
+            }),
+            Error::from(ModelRegistryError::UnsupportedModality {
+                spec: "test",
+                modality: Modality::Video,
+            }),
+            Error::from(ModelRegistryError::DuplicateModality {
+                spec: "test",
+                modality: Modality::Image,
+            }),
+            Error::from(ModelRegistryError::MissingConfigField {
+                field: "image_token_id".to_string(),
+            }),
         ];
         let rendered = errors
             .into_iter()
-            .map(|error| {
-                let error = Error::from(MultiModalError::Media(error));
-                format!("{}: {error}", error.is_request_validation_error())
-            })
+            .map(|error| format!("{}: {error}", error.is_request_validation_error()))
             .join("\n");
         expect![[r#"
             true: data URL parse error: missing comma
             false: media fetch of https://example.com/a.png timed out after 5s
-            false: I/O error while decoding media: broken pipe"#]]
+            false: I/O error while decoding media: broken pipe
+            true: unsupported content part: image_embeds
+            false: tracker validation error: image slot refers to a slot that was never fetched
+            true: decoded audio payload is 2048 bytes, exceeding SMG_AUDIO_MAX_DECODED_BYTES=1024
+            false: Shape error: invalid resize inputs: image 28x28, token patch 0x0
+            true: model spec test supports at most 1 audio inputs; got 2
+            true: modality video is not supported by model spec test
+            false: modality image appears more than once in the request for model spec test
+            false: missing config field 'image_token_id'"#]]
         .assert_eq(&rendered);
     }
 }
