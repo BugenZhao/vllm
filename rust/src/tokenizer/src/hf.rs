@@ -768,7 +768,9 @@ mod tests {
         tokenizer.save(&path, false).expect("save tokenizer json");
         std::fs::write(
             dir.path().join("tokenizer_config.json"),
+            // Python's `json` writes an unbounded float `model_max_length` as `Infinity`.
             r#"{
+                "model_max_length": Infinity,
                 "added_tokens_decoder": {
                     "9": {
                         "content": "<|image_pad|>",

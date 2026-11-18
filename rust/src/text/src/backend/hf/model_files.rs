@@ -9,6 +9,7 @@ use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use hf_hub::{Cache, Repo, RepoType};
 use serde::Serialize;
 use thiserror_ext::AsReport as _;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use super::HfOverrides;
 use super::config::{HfTokenizerConfig, load_tokenizer_config};
@@ -207,7 +208,7 @@ fn materialize_config(
     overrides: &HfOverrides,
 ) -> anyhow::Result<tempfile::TempPath> {
     let mut config: serde_json::Value = match path {
-        Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+        Some(path) => parse_checkpoint_json(&std::fs::read_to_string(path)?)?,
         None => serde_json::json!({}),
     };
     anyhow::ensure!(config.is_object(), "HF model config must be a JSON object");

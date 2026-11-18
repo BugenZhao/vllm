@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 
-use crate::Result;
+use crate::{Result, parse_checkpoint_json};
 
 /// Minimal `tokenizer.json` projection used to patch `added_tokens` while
 /// preserving the rest of the tokenizer definition verbatim.
@@ -87,7 +87,7 @@ pub(super) fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde
 fn load_tokenizer_config_json(path: &Path) -> Result<TokenizerConfigJson> {
     let text = fs::read_to_string(path)
         .map_err(|error| backend!("failed to read {}: {}", path.display(), error))?;
-    serde_json::from_str(&text)
+    parse_checkpoint_json(&text)
         .map_err(|error| backend!("failed to parse {}: {}", path.display(), error))
 }
 
