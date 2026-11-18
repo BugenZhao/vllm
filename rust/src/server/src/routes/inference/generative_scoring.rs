@@ -234,11 +234,13 @@ fn prepare_generative_scoring_request(
             },
             intermediate: false,
             prompt_truncation: None,
-            priority: request.priority,
+            // The `X-Vllm-Priority` and `X-Session-ID` headers apply as on
+            // `/inference/v1/generate`; Python's scoring path reads neither.
+            priority: ctx.priority.unwrap_or(request.priority),
             cache_salt: cache_salt.clone(),
             add_special_tokens: false,
             data_parallel_rank: ctx.data_parallel_rank,
-            session_id: None,
+            session_id: ctx.session_id.clone(),
             kv_hints: None,
             reasoning_parser_kwargs: Default::default(),
             reasoning_ended: None,

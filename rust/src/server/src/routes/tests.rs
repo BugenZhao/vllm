@@ -8596,6 +8596,8 @@ async fn generative_scoring_supports_token_id_item_first_and_true_probabilities(
                     Some(&[3, 4, 1, 2][..])
                 );
                 assert_eq!(request.cache_salt.as_deref(), Some("salt"));
+                assert_eq!(request.priority, -3);
+                assert_eq!(request.session_id.as_deref(), Some("tenant-session"));
                 let sampling_params = request.sampling_params.as_ref().expect("sampling params");
                 assert_eq!(sampling_params.logprob_token_ids, Some(vec![10, 20]));
 
@@ -8656,6 +8658,8 @@ async fn generative_scoring_supports_token_id_item_first_and_true_probabilities(
                 .method("POST")
                 .uri("/generative_scoring")
                 .header("content-type", "application/json")
+                .header("X-Vllm-Priority", "-3")
+                .header("X-Session-ID", "tenant-session")
                 .body(Body::from(
                     json!({
                         "request_id": "score-token-ids",
