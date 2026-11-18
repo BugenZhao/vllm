@@ -3,6 +3,7 @@
 
 mod access_log;
 mod auth;
+mod body_guard;
 mod cors;
 mod error_log;
 mod forwarded_headers;
