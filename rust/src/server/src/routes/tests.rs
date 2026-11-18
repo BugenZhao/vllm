@@ -6939,6 +6939,11 @@ async fn engine_request_errors_map_to_http_status() {
             ),
             ("/inference/v1/generate", raw(false), status),
             (
+                "/generative_scoring",
+                json!({"model": model, "query": [11], "items": [[22]], "label_token_ids": [1]}),
+                status,
+            ),
+            (
                 "/v1/responses",
                 json!({"model": model, "input": "hello"}),
                 status,
@@ -9549,6 +9554,10 @@ async fn skip_tokenizer_init_serves_token_id_completions_only() {
         ),
         ("/tokenize", json!({"prompt": "hi"})),
         ("/detokenize", json!({"tokens": [104]})),
+        (
+            "/generative_scoring",
+            json!({"query": "hi", "items": [[104]], "label_token_ids": [1]}),
+        ),
     ] {
         let (status, json) = post_json(&mut app, uri, body).await;
         errors.push(format!("{uri} {status}: {}", json["error"]["message"]));
@@ -9562,6 +9571,7 @@ async fn skip_tokenizer_init_serves_token_id_completions_only() {
             "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
             "/tokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
             "/detokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/generative_scoring 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
         ]
     "#]].assert_debug_eq(&errors);
 }

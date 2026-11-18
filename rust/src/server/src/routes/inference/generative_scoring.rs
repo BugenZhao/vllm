@@ -21,7 +21,7 @@ use vllm_text::{
     TextOutputStreamExt as _, TextRequest,
 };
 
-use crate::error::{ApiError, bail_invalid_request, server_error, text_submit_error};
+use crate::error::{ApiError, bail_invalid_request, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::types::{Normalizable, Usage, default_true};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -214,7 +214,12 @@ fn prepare_generative_scoring_request(
                 logprob_token_ids: Some(label_token_ids.clone()),
                 ..Default::default()
             },
-            decode_options: TextDecodeOptions::default(),
+            // Scoring reads only the label logprobs, so the sampled token is
+            // never decoded; this also serves token-ID inputs without a tokenizer.
+            decode_options: TextDecodeOptions {
+                detokenize: false,
+                ..Default::default()
+            },
             intermediate: false,
             prompt_truncation: None,
             priority: request.priority,
@@ -295,10 +300,7 @@ fn build_prompt_token_ids(
     let query_token_ids = match query {
         GenerativeScoringInput::Text(query) => {
             tokenizer.encode(&query, add_special_tokens).map_err(|error| {
-                server_error!(
-                    "failed to tokenize generative scoring query: {}",
-                    error.to_report_string()
-                )
+                text_submit_error("failed to tokenize generative scoring query", error.into())
             })?
         }
         GenerativeScoringInput::TokenIds(token_ids) => token_ids,
@@ -310,10 +312,7 @@ fn build_prompt_token_ids(
             .into_iter()
             .map(|item| {
                 let item_token_ids = tokenizer.encode(&item, false).map_err(|error| {
-                    server_error!(
-                        "failed to tokenize generative scoring item: {}",
-                        error.to_report_string()
-                    )
+                    text_submit_error("failed to tokenize generative scoring item", error.into())
                 })?;
                 Ok(concat_and_truncate_prompt(
                     &query_token_ids,
@@ -368,10 +367,10 @@ fn collect_generative_scoring(
     let mut usage = TokenUsage::default();
 
     for (index, output) in outputs.into_iter().enumerate() {
-        if matches!(output.finish_reason, FinishReason::Error(_)) {
-            return Err(server_error!(
-                "generation error for generative scoring item {index}"
-            ));
+        // Like Python, an engine-reported error fails the request with its own
+        // status (a validation error is a 400, a retryable one a 503).
+        if let FinishReason::Error(error) = &output.finish_reason {
+            return Err(engine_error(error.as_deref()));
         }
 
         let logprobs = output.logprobs.as_ref().ok_or_else(|| {
