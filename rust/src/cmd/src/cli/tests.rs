@@ -2,10 +2,8 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::time::Duration;
 
-use clap::{CommandFactory, FromArgMatches};
 use expect_test::expect;
 use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -22,31 +20,6 @@ use vllm_tracing::{LogFormatter, LogLevel};
 use super::{
     BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
 };
-
-/// Parse CLI fixtures without the caller's proxy settings.
-fn parse_without_forwarded_env<I, T>(args: I) -> Result<Cli, clap::Error>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString>,
-{
-    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let args = super::repartition_managed_engine_args::<Cli>(&args, Some("serve"))?;
-    let matches = Cli::command()
-        .mut_subcommand("serve", |command| {
-            command.mut_arg("forwarded_allow_ips", |arg| arg.env(None::<&str>))
-        })
-        .mut_subcommand("frontend", |command| {
-            command.mut_arg("runtime", |arg| {
-                arg.value_parser(|value: &str| {
-                    let mut args = super::parse_runtime_args_json(value)?;
-                    args.forwarded_allow_ips = None;
-                    Ok::<_, String>(args)
-                })
-            })
-        })
-        .try_get_matches_from(args)?;
-    Cli::from_arg_matches(&matches)
-}
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
 fn topology(args: &super::ServeArgs) -> vllm_managed_engine::data_parallel::DataParallelTopology {
@@ -260,7 +233,7 @@ fn render_args_reject_client_cert_verification_without_ca() {
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -1079,10 +1052,9 @@ fn serve_args_forward_stream_interval_to_frontend_config() {
 #[test]
 fn serve_args_forward_env_only_settings_to_frontend_config() {
     let parse = |extra_args: &[&str]| {
-        let cli = parse_without_forwarded_env(
-            ["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args),
-        )
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
@@ -2341,7 +2313,7 @@ fn serve_args_reject_unsupported_no_flag_alias() {
 
 #[test]
 fn frontend_args_accept_json() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
         "--listen-fd",
@@ -3435,7 +3407,7 @@ fn serve_args_auto_forward_negative_value_without_separator() {
 
 #[test]
 fn serve_args_accept_handshake_aliases() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -3708,7 +3680,7 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
 
 #[test]
 fn serve_frontend_config_uses_dp_address_as_advertised_host() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -3881,7 +3853,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
 #[test]
 fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
@@ -4126,7 +4098,7 @@ fn frontend_config_excludes_tools_when_tool_choice_none_from_args_json() {
 
 #[test]
 fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
-    let cli = parse_without_forwarded_env([
+    let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
         "--listen-fd",
