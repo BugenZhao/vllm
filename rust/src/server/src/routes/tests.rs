@@ -8590,6 +8590,7 @@ async fn generative_scoring_supports_token_id_item_first_and_true_probabilities(
                     decode_prompt_token_ids(&request).as_deref(),
                     Some(&[3, 4, 1, 2][..])
                 );
+                assert_eq!(request.cache_salt.as_deref(), Some("salt"));
                 let sampling_params = request.sampling_params.as_ref().expect("sampling params");
                 assert_eq!(sampling_params.logprob_token_ids, Some(vec![10, 20]));
 
@@ -8658,7 +8659,8 @@ async fn generative_scoring_supports_token_id_item_first_and_true_probabilities(
                         "items": [[3, 4]],
                         "label_token_ids": [10, 20],
                         "item_first": true,
-                        "apply_softmax": false
+                        "apply_softmax": false,
+                        "cache_salt": "salt"
                     })
                     .to_string(),
                 ))
@@ -8698,6 +8700,28 @@ async fn generative_scoring_empty_items_returns_400() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["error"]["message"].as_str().expect("message").contains("items"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_rejects_unsafe_cache_salt() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/generative_scoring",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "query": "Q",
+            "items": ["A"],
+            "label_token_ids": [10, 20],
+            "cache_salt": "a/b"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["error"]["message"].as_str().expect("message").contains("cache_salt"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

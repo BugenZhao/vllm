@@ -41,6 +41,8 @@ pub struct GenerativeScoringRequest {
     pub item_first: bool,
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,
+    /// Salts the prefix cache of every item's prompt.
+    pub cache_salt: Option<String>,
     #[serde(default)]
     pub priority: i32,
     pub request_id: Option<String>,
@@ -183,6 +185,7 @@ fn prepare_generative_scoring_request(
         .unwrap_or_else(|| lora_resolution.model_names.primary().to_owned());
     let label_token_ids = request.label_token_ids;
     let apply_softmax = request.apply_softmax;
+    let cache_salt = request.cache_salt;
     let prompt_token_ids = build_prompt_token_ids(
         request.query,
         request.items,
@@ -215,7 +218,7 @@ fn prepare_generative_scoring_request(
             intermediate: false,
             prompt_truncation: None,
             priority: request.priority,
-            cache_salt: None,
+            cache_salt: cache_salt.clone(),
             add_special_tokens: false,
             data_parallel_rank: ctx.data_parallel_rank,
             session_id: None,
