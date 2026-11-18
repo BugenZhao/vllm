@@ -8707,6 +8707,58 @@ async fn generative_scoring_empty_items_returns_400() {
     assert!(json["error"]["message"].as_str().expect("message").contains("items"));
 }
 
+/// Like Python, scoring requests use plain sampling defaults: the model's
+/// generation config and watermarking do not reach the engine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_ignores_generation_config_defaults() {
+    let backend = FakeChatBackend {
+        sampling_hints: vllm_text::SamplingHints {
+            default_temperature: Some(0.6),
+            default_top_p: Some(0.95),
+            default_top_k: Some(20),
+            default_min_p: Some(0.1),
+            default_repetition_penalty: Some(1.2),
+            default_presence_penalty: Some(0.5),
+            default_frequency_penalty: Some(0.5),
+            ..Default::default()
+        },
+        ..FakeChatBackend::new()
+    };
+    let engine_params = Arc::new(std::sync::Mutex::new(None));
+    let (mut app, engine_task) =
+        test_app_with_backend_and_engine_request_check(Arc::new(backend), {
+            let engine_params = Arc::clone(&engine_params);
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                *engine_params.lock().unwrap() = Some(format!("{params:?}"));
+            }
+        })
+        .await;
+
+    post_json(
+        &mut app,
+        "/generative_scoring",
+        json!({"query": [11], "items": [[22]], "label_token_ids": [1]}),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+
+    let params = engine_params.lock().unwrap().clone().expect("engine request");
+    for field in [
+        "temperature: 1.0",
+        "top_p: 1.0",
+        "top_k: 0",
+        "min_p: 0.0",
+        "repetition_penalty: 1.0",
+        "presence_penalty: 0.0",
+        "frequency_penalty: 0.0",
+        "watermarking: false",
+    ] {
+        assert!(params.contains(field), "{field} missing from {params}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn generative_scoring_rejects_unsafe_cache_salt() {

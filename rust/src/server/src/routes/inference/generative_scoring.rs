@@ -208,10 +208,22 @@ fn prepare_generative_scoring_request(
             request_id: format!("{request_id}-{index}"),
             prompt: Prompt::TokenIds(prompt_token_ids),
             mm_features: None,
+            // Like Python, plain `SamplingParams` defaults rather than the
+            // model's generation config, and no watermark: under
+            // `--logprobs-mode processed_logprobs` they would change the
+            // scored distribution.
             sampling_params: SamplingParams {
                 max_tokens: Some(1),
                 logprobs: Some(logprobs),
                 logprob_token_ids: Some(label_token_ids.clone()),
+                temperature: Some(1.0),
+                top_p: Some(1.0),
+                top_k: Some(0),
+                min_p: Some(0.0),
+                frequency_penalty: Some(0.0),
+                presence_penalty: Some(0.0),
+                repetition_penalty: Some(1.0),
+                watermarking: Some(false),
                 ..Default::default()
             },
             // Scoring reads only the label logprobs, so the sampled token is
