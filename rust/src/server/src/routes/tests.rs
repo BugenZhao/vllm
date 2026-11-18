@@ -12055,29 +12055,28 @@ async fn tokenize_accepts_loaded_lora_models() {
     state.load_static_lora(&adapter).await.expect("load static lora");
     let mut app = build_router(state);
 
-    let (completion_status, _) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({ "model": "alice", "prompt": "hello" }),
-    )
-    .await;
-    let (chat_status, _) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({ "model": "alice", "messages": [{ "role": "user", "content": "hello" }] }),
-    )
-    .await;
-    let (detokenize_status, _) = post_json(
-        &mut app,
-        "/detokenize",
-        json!({ "model": "alice", "tokens": [72] }),
-    )
-    .await;
-
-    assert_eq!(
-        [completion_status, chat_status, detokenize_status],
-        [StatusCode::OK; 3]
-    );
+    // Python checks the adapter name and still tokenizes with the base
+    // model's tokenizer, so each response equals the base-model one.
+    let requests = [
+        ("/tokenize", json!({ "prompt": "hello" })),
+        (
+            "/tokenize",
+            json!({ "messages": [{ "role": "user", "content": "hello" }] }),
+        ),
+        ("/detokenize", json!({ "tokens": [72] })),
+    ];
+    for (uri, body) in requests {
+        let (base_status, base_json) = post_json(&mut app, uri, body.clone()).await;
+        let mut lora_body = body;
+        lora_body["model"] = json!("alice");
+        let (lora_status, lora_json) = post_json(&mut app, uri, lora_body).await;
+        assert_eq!(
+            (base_status, lora_status),
+            (StatusCode::OK, StatusCode::OK),
+            "{uri}"
+        );
+        assert_eq!(lora_json, base_json, "{uri}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
