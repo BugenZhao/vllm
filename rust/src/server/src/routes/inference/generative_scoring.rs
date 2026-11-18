@@ -180,7 +180,6 @@ fn prepare_generative_scoring_request(
         lora_resolution,
         state.chat.model_vocab_size(),
         max_items,
-        ready.use_spec_decode,
     )?;
 
     let request_id = format!("generative-scoring-{}", ctx.request_id);
@@ -249,7 +248,6 @@ fn validate_generative_scoring_request(
     lora_resolution: &LoraModelResolution,
     model_vocab_size: usize,
     max_items: usize,
-    use_spec_decode: bool,
 ) -> Result<(), ApiError> {
     lora_resolution.model_names.check(request.model.as_deref())?;
 
@@ -268,12 +266,6 @@ fn validate_generative_scoring_request(
         bail_invalid_request!(
             param = "items",
             "items must contain at most {max_items} items for this server."
-        );
-    }
-
-    if use_spec_decode {
-        bail_invalid_request!(
-            "Generative scoring is not supported when speculative decoding is enabled."
         );
     }
 
@@ -562,37 +554,25 @@ mod tests {
             model: Some("missing".to_string()),
             ..base_request()
         };
-        assert!(
-            validate_generative_scoring_request(&wrong_model, &served, 100, 256, false).is_err()
-        );
+        assert!(validate_generative_scoring_request(&wrong_model, &served, 100, 256).is_err());
 
         let empty_labels = GenerativeScoringRequest {
             label_token_ids: Vec::new(),
             ..base_request()
         };
-        assert!(
-            validate_generative_scoring_request(&empty_labels, &served, 100, 256, false).is_err()
-        );
+        assert!(validate_generative_scoring_request(&empty_labels, &served, 100, 256).is_err());
 
         let out_of_vocab = GenerativeScoringRequest {
             label_token_ids: vec![99, 100],
             ..base_request()
         };
-        assert!(
-            validate_generative_scoring_request(&out_of_vocab, &served, 100, 256, false).is_err()
-        );
+        assert!(validate_generative_scoring_request(&out_of_vocab, &served, 100, 256).is_err());
 
         let too_many_items = GenerativeScoringRequest {
             items: GenerativeScoringItems::Text(vec!["one".to_string(), "two".to_string()]),
             ..base_request()
         };
-        assert!(
-            validate_generative_scoring_request(&too_many_items, &served, 100, 1, false).is_err()
-        );
-
-        assert!(
-            validate_generative_scoring_request(&base_request(), &served, 100, 256, true).is_err()
-        );
+        assert!(validate_generative_scoring_request(&too_many_items, &served, 100, 1).is_err());
     }
 
     #[test]

@@ -8728,36 +8728,6 @@ async fn generative_scoring_rejects_items_above_engine_sequence_limit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn generative_scoring_rejects_speculative_decoding() {
-    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-        use_spec_decode: true,
-        ..default_ready_response()
-    };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
-
-    let (status, json) = post_json(
-        &mut app,
-        "/generative_scoring",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "query": "Q",
-            "items": ["A"],
-            "label_token_ids": [10, 20]
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("speculative decoding")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();

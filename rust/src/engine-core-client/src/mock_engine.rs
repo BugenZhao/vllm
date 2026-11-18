@@ -76,7 +76,6 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         enable_sleep_mode: false,
         supports_draft_weight_updates: false,
         effective_attention_block_size: None,
-        use_spec_decode: false,
         vllm_config: None,
         prefix_hash_config: None,
         cache_config_info: None,

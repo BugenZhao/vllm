@@ -126,9 +126,6 @@ pub struct EngineCoreReadyResponse {
     /// Full-attention block size in tokens after initialization, or unavailable.
     #[serde(default)]
     pub effective_attention_block_size: Option<u64>,
-    /// Whether the engine was started with speculative decoding enabled.
-    #[serde(default)]
-    pub use_spec_decode: bool,
     /// JSON-mode dump of this engine's `VllmConfig`, reported only when the
     /// engine runs with `VLLM_SERVER_DEV_MODE` (for `/server_info`).
     #[serde(default)]

@@ -546,7 +546,6 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
-    use_spec_decode: bool = False
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
     cache_config_info: dict[str, str] | None = None
@@ -577,7 +576,6 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
-    use_spec_decode=True,
     prefix_hash_config=PrefixHashConfig(
         hash_algo="sha256",
         hash_block_size=16,
