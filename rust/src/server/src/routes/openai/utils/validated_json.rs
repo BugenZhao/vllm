@@ -48,21 +48,17 @@ where
 }
 
 /// The request field to report as `param`, like Python: the field a field
-/// check failed on, or for a cross-field check, the `<field>` of a
-/// `<field>.<reason>` error code. `None` when several fields failed.
+/// check failed on. `None` for a schema (cross-field) check, which has no
+/// field, and when several fields failed.
 fn error_param(errors: &ValidationErrors) -> Option<&'static str> {
-    let mut fields = errors.field_errors().into_iter();
-    let (field, field_errors) = fields.next()?;
+    let mut fields = errors.field_errors().into_keys();
+    let field = fields.next()?;
     if fields.next().is_some() {
         return None;
     }
     match field {
-        Cow::Borrowed("__all__") => match &field_errors.first()?.code {
-            Cow::Borrowed(code) => code.split_once('.').map(|(field, _)| field),
-            Cow::Owned(_) => None,
-        },
+        Cow::Borrowed("__all__") | Cow::Owned(_) => None,
         Cow::Borrowed(field) => Some(field),
-        Cow::Owned(_) => None,
     }
 }
 

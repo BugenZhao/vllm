@@ -22,6 +22,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
+    // Like Python, `top_logprobs: 0` (the OpenAI default) does not request any
+    // alternatives, so it is allowed without `logprobs`.
     if request.top_logprobs.is_some_and(|n| n != 0) && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
@@ -175,7 +177,6 @@ mod tests {
         ];
         for stream_options in cases {
             let request = non_streaming_request(stream_options.clone());
-            assert!(request.validate().is_err(), "{stream_options}");
             assert!(
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
                 "{stream_options}"
@@ -352,7 +353,6 @@ mod tests {
                 top_logprobs: Some(top_logprobs),
                 ..base_request()
             };
-            assert!(request.validate().is_err(), "{top_logprobs}");
             assert!(
                 validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err(),
                 "{top_logprobs}"
