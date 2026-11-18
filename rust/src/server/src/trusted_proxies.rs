@@ -1,29 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
+use std::convert::Infallible;
+use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::str::FromStr;
 
-use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
-use axum::middleware::Next;
-use axum::response::Response;
+use educe::Educe;
 use ipnet::IpNet;
+use serde_with::SerializeDisplay;
 
-use crate::state::AppState;
-
-/// Uvicorn's `FORWARDED_ALLOW_IPS` trust list, parsed once at startup.
-pub(crate) struct TrustedProxies {
+/// Uvicorn's `FORWARDED_ALLOW_IPS` trust list: the peers whose
+/// `X-Forwarded-For` header names the client. Like Uvicorn, it never fails to
+/// parse: an entry that is neither an IP nor a network is kept as a literal.
+#[derive(Educe, Clone, PartialEq, Eq, SerializeDisplay)]
+#[educe(Debug)]
+pub struct TrustedProxies {
+    /// The configured value, as reported by `/server_info`.
+    source: String,
+    #[educe(Debug(ignore))]
     networks: Vec<IpNet>,
-    literals: HashSet<String>,
+    #[educe(Debug(ignore))]
+    literals: BTreeSet<String>,
+    #[educe(Debug(ignore))]
     always_trust: bool,
 }
 
+impl Default for TrustedProxies {
+    /// Uvicorn's default when `FORWARDED_ALLOW_IPS` is unset.
+    fn default() -> Self {
+        Self::new("127.0.0.1,::1")
+    }
+}
+
+impl FromStr for TrustedProxies {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Infallible> {
+        Ok(Self::new(value))
+    }
+}
+
+impl fmt::Display for TrustedProxies {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.source)
+    }
+}
+
 impl TrustedProxies {
-    pub(crate) fn new(value: &str) -> Self {
+    pub fn new(value: &str) -> Self {
         let mut networks = Vec::new();
-        let mut literals = HashSet::new();
+        let mut literals = BTreeSet::new();
         for host in value.split(',').map(str::trim).filter(|host| !host.is_empty()) {
             if let Ok(ip) = host.parse::<IpAddr>() {
                 networks.push(IpNet::from(ip));
@@ -38,14 +67,31 @@ impl TrustedProxies {
             }
         }
         Self {
+            source: value.to_owned(),
             networks,
             literals,
             always_trust: value == "*",
         }
     }
 
+    /// The client address to log: the forwarded client when the transport
+    /// peer is trusted and the header names one, otherwise the peer itself
+    /// (`None` for Unix sockets).
+    pub(crate) fn client_addr(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+    ) -> Option<SocketAddr> {
+        let trusted_peer =
+            self.always_trust || peer.is_some_and(|peer| self.contains_ip(peer.ip()));
+        if trusted_peer && let Some(client) = self.forwarded_client(headers) {
+            return Some(client);
+        }
+        peer
+    }
+
     fn contains_ip(&self, ip: IpAddr) -> bool {
-        self.always_trust || self.networks.iter().any(|network| network.contains(&ip))
+        self.networks.iter().any(|network| network.contains(&ip))
     }
 
     fn contains_host(&self, host: &[u8]) -> bool {
@@ -56,7 +102,7 @@ impl TrustedProxies {
             })
     }
 
-    fn client_addr(&self, headers: &HeaderMap) -> Option<SocketAddr> {
+    fn forwarded_client(&self, headers: &HeaderMap) -> Option<SocketAddr> {
         let mut hosts = headers
             .get_all("x-forwarded-for")
             .iter()
@@ -79,21 +125,4 @@ fn parse_hop(host: &str) -> Option<SocketAddr> {
     }
     let ip = host.strip_prefix('[')?.strip_suffix(']')?.parse::<Ipv6Addr>().ok()?;
     Some(SocketAddr::new(ip.into(), 0))
-}
-
-/// Resolve the client address before the access log reads it.
-pub(crate) async fn apply_forwarded_client(
-    State(state): State<Arc<AppState>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let peer = request.extensions().get::<ConnectInfo<SocketAddr>>();
-    let proxies = &state.trusted_proxies;
-    if (proxies.always_trust
-        || peer.is_some_and(|ConnectInfo(peer)| proxies.contains_ip(peer.ip())))
-        && let Some(address) = proxies.client_addr(request.headers())
-    {
-        request.extensions_mut().insert(ConnectInfo(address));
-    }
-    next.run(request).await
 }

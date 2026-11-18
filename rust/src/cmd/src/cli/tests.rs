@@ -14,6 +14,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_server::{
     Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
     OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
+    TrustedProxies,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -1090,7 +1091,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
-    assert_eq!(config.forwarded_allow_ips, "127.0.0.1,::1");
+    assert_eq!(config.access_log.trusted_proxies, TrustedProxies::default());
     assert!(!config.disable_request_id_randomization);
     assert!(!config.keep_alive_on_engine_death);
     assert!(!config.api_server_options.skip_model_name_validation);
@@ -1126,7 +1127,10 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         " 8 ",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
-    assert_eq!(config.forwarded_allow_ips, "10.0.0.0/8,::1");
+    assert_eq!(
+        config.access_log.trusted_proxies,
+        TrustedProxies::new("10.0.0.0/8,::1")
+    );
     assert!(config.disable_request_id_randomization);
     assert!(config.keep_alive_on_engine_death);
     assert!(config.api_server_options.skip_model_name_validation);
@@ -1190,7 +1194,10 @@ fn args_json_reads_env_only_settings_from_env() {
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
-    assert_eq!(args.forwarded_allow_ips.as_deref(), Some("10.0.0.0/8,::1"));
+    assert_eq!(
+        args.forwarded_allow_ips,
+        Some(TrustedProxies::new("10.0.0.0/8,::1"))
+    );
     assert!(args.disable_request_id_randomization);
     assert!(args.keep_alive_on_engine_death);
     assert!(args.api_server_options().skip_model_name_validation);
@@ -1204,7 +1211,7 @@ fn args_json_reads_env_only_settings_from_env() {
     assert_eq!(args.api_server_options().request_body_limit_bytes, None);
 
     let args = apply(&[("FORWARDED_ALLOW_IPS", "")]).unwrap();
-    assert_eq!(args.forwarded_allow_ips.as_deref(), Some(""));
+    assert_eq!(args.forwarded_allow_ips, Some(TrustedProxies::new("")));
 
     let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
     assert_eq!(args.log_stats_interval(), None);
@@ -1806,6 +1813,9 @@ fn frontend_args_json_passes_access_log_flags_into_config() {
         AccessLogConfig {
             enabled: true,
             excluded_paths: [],
+            trusted_proxies: TrustedProxies {
+                source: "127.0.0.1,::1",
+            },
         }
     "#]]
     .assert_debug_eq(&config_for(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
@@ -1817,6 +1827,9 @@ fn frontend_args_json_passes_access_log_flags_into_config() {
                 "/health",
                 "/metrics",
             ],
+            trusted_proxies: TrustedProxies {
+                source: "127.0.0.1,::1",
+            },
         }
     "#]]
     .assert_debug_eq(&config_for(
@@ -3829,8 +3842,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             access_log: AccessLogConfig {
                 enabled: true,
                 excluded_paths: [],
+                trusted_proxies: TrustedProxies {
+                    source: "127.0.0.1,::1",
+                },
             },
-            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],
@@ -3967,8 +3982,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             access_log: AccessLogConfig {
                 enabled: true,
                 excluded_paths: [],
+                trusted_proxies: TrustedProxies {
+                    source: "127.0.0.1,::1",
+                },
             },
-            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],
@@ -4218,8 +4235,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             access_log: AccessLogConfig {
                 enabled: true,
                 excluded_paths: [],
+                trusted_proxies: TrustedProxies {
+                    source: "127.0.0.1,::1",
+                },
             },
-            forwarded_allow_ips: "127.0.0.1,::1",
             tls: None,
             root_path: None,
             api_keys: [],

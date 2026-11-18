@@ -20,6 +20,7 @@ mod state;
 mod tls;
 #[cfg(test)]
 mod tls_tests;
+mod trusted_proxies;
 mod utils;
 
 use std::future::Future;
@@ -33,9 +34,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_FORWARDED_ALLOW_IPS, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -53,6 +54,7 @@ use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
+pub use trusted_proxies::TrustedProxies;
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
@@ -203,7 +205,6 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
-            .with_forwarded_allow_ips(&config.forwarded_allow_ips)
             .with_profiler(config.profiler.clone())
             .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );

@@ -71,6 +71,7 @@ use crate::lora::LoadLoraError;
 use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
+use crate::trusted_proxies::TrustedProxies;
 
 mod responses;
 
@@ -13051,19 +13052,16 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
 /// thread-local subscriber sees its events.
 async fn access_log_lines(
     access_log: AccessLogConfig,
-    forwarded_allow_ips: Option<&str>,
     requests: Vec<Request<Body>>,
 ) -> Vec<String> {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let mut state = AppState::new(vec!["test-model".to_string()], chat)
-        .with_api_keys(vec!["secret".to_string()])
-        .with_access_log(access_log);
-    if let Some(forwarded_allow_ips) = forwarded_allow_ips {
-        state = state.with_forwarded_allow_ips(forwarded_allow_ips);
-    }
-    let app = build_router(Arc::new(state));
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat)
+            .with_api_keys(vec!["secret".to_string()])
+            .with_access_log(access_log),
+    ));
     let capture = AccessLogCapture::default();
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
@@ -13101,11 +13099,11 @@ async fn access_log_records_each_response() {
     let access_log = AccessLogConfig {
         enabled: true,
         excluded_paths: vec!["/version".to_string()],
+        ..Default::default()
     };
 
     let lines = access_log_lines(
         access_log,
-        None,
         vec![
             with_client,
             get("/v1/models", false),
@@ -13132,8 +13130,8 @@ async fn access_log_disabled_logs_nothing() {
         AccessLogConfig {
             enabled: false,
             excluded_paths: Vec::new(),
+            ..Default::default()
         },
-        None,
         vec![
             Request::builder()
                 .method("GET")
@@ -13252,8 +13250,12 @@ async fn access_log_uses_forwarded_client_only_from_trusted_proxies() {
                 peer.parse::<std::net::SocketAddr>().expect("parse peer"),
             ));
         }
+        let mut access_log = AccessLogConfig::default();
+        if let Some(allowed_ips) = allowed_ips {
+            access_log.trusted_proxies = TrustedProxies::new(allowed_ips);
+        }
         lines.extend(
-            access_log_lines(AccessLogConfig::default(), allowed_ips, vec![request])
+            access_log_lines(access_log, vec![request])
                 .await
                 .into_iter()
                 .map(|line| format!("{name}: {line}")),
@@ -13335,8 +13337,12 @@ async fn access_log_joins_forwarded_fields_and_preserves_ports() {
                 axum::http::HeaderValue::from_bytes(field).unwrap(),
             );
         }
+        let mut access_log = AccessLogConfig::default();
+        if let Some(allowed_ips) = allowed_ips {
+            access_log.trusted_proxies = TrustedProxies::new(allowed_ips);
+        }
         lines.extend(
-            access_log_lines(AccessLogConfig::default(), *allowed_ips, vec![request])
+            access_log_lines(access_log, vec![request])
                 .await
                 .into_iter()
                 .map(|line| format!("{name}: {line}")),

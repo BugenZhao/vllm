@@ -26,6 +26,7 @@ use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
 use crate::fingerprint::FingerprintMode;
 use crate::routes::openai::utils::types::ReasoningEffort;
+use crate::trusted_proxies::TrustedProxies;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
@@ -33,9 +34,6 @@ pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default interval between periodic engine statistics logs.
 pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Default trusted proxy addresses, as in Uvicorn.
-pub const DEFAULT_FORWARDED_ALLOW_IPS: &str = "127.0.0.1,::1";
 
 /// Default maximum size of an HTTP request body or a decoded gRPC message.
 pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
@@ -171,6 +169,9 @@ pub struct AccessLogConfig {
     /// Request paths whose responses are not logged, matched exactly against
     /// the path without its query string (`--disable-access-log-for-endpoints`).
     pub excluded_paths: Vec<String>,
+    /// Peers whose `X-Forwarded-For` header names the logged client
+    /// (`FORWARDED_ALLOW_IPS`). An empty value trusts none; `*` trusts all.
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl Default for AccessLogConfig {
@@ -178,6 +179,7 @@ impl Default for AccessLogConfig {
         Self {
             enabled: true,
             excluded_paths: Vec::new(),
+            trusted_proxies: TrustedProxies::default(),
         }
     }
 }
@@ -420,9 +422,6 @@ pub struct Config {
     pub cors: CorsConfig,
     /// HTTP access log settings.
     pub access_log: AccessLogConfig,
-    /// Trusted proxy IPs or networks from `FORWARDED_ALLOW_IPS` (default
-    /// `127.0.0.1,::1`). An empty value trusts none; `*` trusts all peers.
-    pub forwarded_allow_ips: String,
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
     /// listener.
     pub tls: Option<TlsConfig>,
