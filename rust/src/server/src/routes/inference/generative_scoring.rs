@@ -98,17 +98,11 @@ pub async fn generative_scoring(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerativeScoringRequest>,
-) -> Response {
-    let request_context = match resolve_request_context(&headers, body.request_id.as_deref()) {
-        Ok(request_context) => request_context,
-        Err(error) => return error.into_response(),
-    };
+) -> Result<Response, ApiError> {
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
     let prepared =
-        match prepare_generative_scoring_request(body, &lora_resolution, request_context, &state) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
+        prepare_generative_scoring_request(body, &lora_resolution, request_context, &state)?;
 
     let request_span = tracing::info_span!(
         "generative_scoring",
@@ -118,42 +112,39 @@ pub async fn generative_scoring(
     let created = unix_timestamp();
     let enable_log_requests = state.api_server_options.enable_log_requests;
 
+    // Prepare every item before submitting any, so that an invalid request
+    // leaves nothing in flight.
     let text = state.chat.text();
-    let streams = match try_join_all(prepared.text_requests.into_iter().map(|text_request| {
-        async {
-            let text_request = text.request_processor().prepare(text_request)?;
-            let mut streams = text.generate_prepared_n(text_request, NonZeroU32::MIN).await?;
-            Ok::<_, vllm_text::Error>(streams.pop().expect("one output stream per sample"))
-        }
-        .instrument(request_span.clone())
+    let text_requests: Vec<_> = request_span
+        .in_scope(|| {
+            prepared
+                .text_requests
+                .into_iter()
+                .map(|text_request| text.request_processor().prepare(text_request))
+                .collect::<Result<_, _>>()
+        })
+        .map_err(|error| {
+            text_submit_error("failed to prepare generative scoring request", error)
+        })?;
+    let streams = try_join_all(text_requests.into_iter().map(|text_request| async {
+        let mut streams = text.generate_prepared_n(text_request, NonZeroU32::MIN).await?;
+        Ok::<_, vllm_text::Error>(streams.pop().expect("one output stream per sample"))
     }))
+    .instrument(request_span.clone())
     .await
-    {
-        Ok(streams) => streams,
-        Err(error) => {
-            return text_submit_error("failed to submit generative scoring request", error)
-                .into_response();
-        }
-    };
+    .map_err(|error| text_submit_error("failed to submit generative scoring request", error))?;
 
-    let collected = match try_join_all(
-        streams
-            .into_iter()
-            .map(|stream| stream.collect_output().instrument(request_span.clone())),
-    )
-    .await
-    {
-        Ok(outputs) => outputs,
-        Err(error) => {
-            return server_error!(
+    let collected = try_join_all(streams.into_iter().map(|stream| stream.collect_output()))
+        .instrument(request_span)
+        .await
+        .map_err(|error| {
+            server_error!(
                 "generative scoring stream failed: {}",
                 error.to_report_string()
             )
-            .into_response();
-        }
-    };
+        })?;
 
-    let response = match collect_generative_scoring(
+    let response = collect_generative_scoring(
         prepared.request_id,
         prepared.response_model,
         created,
@@ -161,12 +152,8 @@ pub async fn generative_scoring(
         prepared.apply_softmax,
         collected,
         enable_log_requests,
-    ) {
-        Ok(response) => response,
-        Err(error) => return error.into_response(),
-    };
-
-    Json(response).into_response()
+    )?;
+    Ok(Json(response).into_response())
 }
 
 fn prepare_generative_scoring_request(
