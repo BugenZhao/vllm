@@ -824,7 +824,8 @@ mod tests {
     use zeromq::RouterSocket;
     use zeromq::prelude::Socket;
 
-    use super::{adopt_listener, bind_local_sockets};
+    use super::{EngineId, adopt_listener, bind_local_sockets, check_parallel_config_hash};
+    use crate::protocol::handshake::ReadyMessage;
 
     #[tokio::test]
     async fn bind_local_sockets_resolves_zero_port_bindings() {
@@ -876,5 +877,26 @@ mod tests {
         assert!(endpoint.to_string().starts_with("ipc://"), "{endpoint}");
         assert!(router.close().await.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parallel_config_hash_check_compares_missing_hashes_in_arrival_order() {
+        let check = |hashes: &[Option<&str>]| {
+            let mut expected = None;
+            hashes.iter().enumerate().try_for_each(|(index, hash)| {
+                let ready = ReadyMessage {
+                    parallel_config_hash: hash.map(str::to_string),
+                    ..ReadyMessage::default()
+                };
+                check_parallel_config_hash(&mut expected, &EngineId::from(&[index as u8]), &ready)
+            })
+        };
+
+        for hashes in [[Some("a"), Some("a")], [None, None]] {
+            check(&hashes).unwrap_or_else(|error| panic!("{hashes:?}: {error}"));
+        }
+        for hashes in [[Some("a"), Some("b")], [Some("a"), None], [None, Some("a")]] {
+            assert!(check(&hashes).is_err(), "{hashes:?} should be rejected");
+        }
     }
 }
