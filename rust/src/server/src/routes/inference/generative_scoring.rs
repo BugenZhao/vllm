@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Json;
@@ -11,9 +12,11 @@ use thiserror_ext::AsReport as _;
 use tracing::info;
 use tracing_futures::Instrument as _;
 use validator::Validate;
-use vllm_engine_core_client::protocol::logprobs::PositionLogprobs;
-use vllm_llm::{CollectedGenerateOutput, FinishReason, GenerateOutputStreamExt as _, TokenUsage};
-use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
+use vllm_llm::{FinishReason, TokenUsage};
+use vllm_text::{
+    CollectedTextOutput, DecodedPositionLogprobs, Prompt, SamplingParams, TextDecodeOptions,
+    TextOutputStreamExt as _, TextRequest,
+};
 
 use crate::error::{ApiError, bail_invalid_request, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
@@ -91,7 +94,10 @@ pub async fn generative_scoring(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerativeScoringRequest>,
 ) -> Response {
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = match resolve_request_context(&headers, body.request_id.as_deref()) {
+        Ok(request_context) => request_context,
+        Err(error) => return error.into_response(),
+    };
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
     let prepared =
         match prepare_generative_scoring_request(body, &lora_resolution, request_context, &state) {
@@ -108,12 +114,14 @@ pub async fn generative_scoring(
     let enable_log_requests = state.api_server_options.enable_log_requests;
 
     let text = state.chat.text();
-    let streams = match try_join_all(
-        prepared
-            .text_requests
-            .into_iter()
-            .map(|text_request| text.generate_raw(text_request).instrument(request_span.clone())),
-    )
+    let streams = match try_join_all(prepared.text_requests.into_iter().map(|text_request| {
+        async {
+            let text_request = text.request_processor().prepare(text_request)?;
+            let mut streams = text.generate_prepared_n(text_request, NonZeroU32::MIN).await?;
+            Ok::<_, vllm_text::Error>(streams.pop().expect("one output stream per sample"))
+        }
+        .instrument(request_span.clone())
+    }))
     .await
     {
         Ok(streams) => streams,
@@ -162,7 +170,7 @@ fn prepare_generative_scoring_request(
     ctx: ResolvedRequestContext,
     state: &AppState,
 ) -> Result<PreparedGenerativeScoringRequest, ApiError> {
-    let ready = state.chat.engine_core_client().ready_response();
+    let ready = state.engine_core_client().ready_response();
     let max_items = usize::try_from(ready.max_num_seqs).unwrap_or(usize::MAX);
     validate_generative_scoring_request(
         &request,
@@ -177,7 +185,7 @@ fn prepare_generative_scoring_request(
         .lora_request
         .as_ref()
         .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+        .unwrap_or_else(|| lora_resolution.model_names.primary().to_owned());
     let label_token_ids = request.label_token_ids;
     let apply_softmax = request.apply_softmax;
     let prompt_token_ids = build_prompt_token_ids(
@@ -240,11 +248,7 @@ fn validate_generative_scoring_request(
     max_items: usize,
     use_spec_decode: bool,
 ) -> Result<(), ApiError> {
-    if let Some(model) = request.model.as_ref()
-        && !lora_resolution.model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    lora_resolution.model_names.check(request.model.as_deref())?;
 
     if request.label_token_ids.is_empty() {
         bail_invalid_request!(
@@ -323,7 +327,7 @@ fn build_prompt_token_ids(
         }
         GenerativeScoringInput::TokenIds(token_ids) => token_ids,
     };
-    let max_prompt_len = state.chat.engine_core_client().max_model_len().saturating_sub(1) as usize;
+    let max_prompt_len = state.engine_core_client().max_model_len().saturating_sub(1) as usize;
 
     match items {
         GenerativeScoringItems::Text(items) => items
@@ -381,14 +385,14 @@ fn collect_generative_scoring(
     created: u64,
     label_token_ids: Vec<u32>,
     apply_softmax: bool,
-    outputs: Vec<CollectedGenerateOutput>,
+    outputs: Vec<CollectedTextOutput>,
     enable_log_requests: bool,
 ) -> Result<GenerativeScoringResponse, ApiError> {
     let mut data = Vec::with_capacity(outputs.len());
     let mut usage = TokenUsage::default();
 
     for (index, output) in outputs.into_iter().enumerate() {
-        if matches!(output.finish_reason, FinishReason::Error) {
+        if matches!(output.finish_reason, FinishReason::Error(_)) {
             return Err(server_error!(
                 "generation error for generative scoring item {index}"
             ));
@@ -415,7 +419,10 @@ fn collect_generative_scoring(
         });
         usage.prompt_token_count += output.usage.prompt_token_count;
         usage.output_token_count += output.usage.output_token_count;
-        usage.cached_token_count += output.usage.cached_token_count;
+        usage.prompt_cache_usage.cached_token_count +=
+            output.usage.prompt_cache_usage.cached_token_count;
+        usage.prompt_cache_usage.cache_creation_token_count +=
+            output.usage.prompt_cache_usage.cache_creation_token_count;
     }
 
     if enable_log_requests {
@@ -432,12 +439,12 @@ fn collect_generative_scoring(
         created,
         model: response_model,
         data,
-        usage: Usage::from_counts(usage.prompt_token_count, usage.output_token_count, None, 0),
+        usage: Usage::from_token_usage(usage, false, None),
     })
 }
 
 fn compute_score(
-    position: &PositionLogprobs,
+    position: &DecodedPositionLogprobs,
     label_token_ids: &[u32],
     apply_softmax: bool,
     item_index: usize,
@@ -479,12 +486,16 @@ fn compute_score(
 
 #[cfg(test)]
 mod tests {
+    use vllm_text::DecodedTokenLogprob;
+
     use super::*;
-    use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
+    use crate::model_names::ServedModelNames;
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|name| (*name).to_string()).collect(),
+            model_names: ServedModelNames::new(
+                names.iter().map(|name| (*name).to_string()).collect(),
+            ),
             lora_request: None,
         }
     }
@@ -599,15 +610,17 @@ mod tests {
 
     #[test]
     fn compute_score_supports_softmax_and_true_probability_modes() {
-        let position = PositionLogprobs {
+        let position = DecodedPositionLogprobs {
             entries: vec![
-                TokenLogprob {
+                DecodedTokenLogprob {
                     token_id: 10,
+                    token: String::new(),
                     logprob: -0.5,
                     rank: 1,
                 },
-                TokenLogprob {
+                DecodedTokenLogprob {
                     token_id: 20,
+                    token: String::new(),
                     logprob: -2.0,
                     rank: 2,
                 },
