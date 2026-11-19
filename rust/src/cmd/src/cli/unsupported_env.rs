@@ -23,12 +23,6 @@ const UNSUPPORTED_ENVS: &[(&str, IsNonDefault)] = &[
     ("VLLM_ENFORCE_STRICT_TOOL_CALLING", |value| {
         !is_truthy(value)
     }),
-    // Store Responses API responses for retrieval, `background` and
-    // `previous_response_id`; the Rust frontend keeps no response store.
-    // Python reads it as `bool(int(value))`.
-    ("VLLM_ENABLE_RESPONSES_API_STORE", |value| {
-        !value.trim().parse::<i64>().is_ok_and(|value| value == 0)
-    }),
     // Media fetching and decoding. The Rust frontend fetches and decodes media
     // through llm-multimodal with its own settings.
     //
@@ -164,7 +158,6 @@ mod tests {
         check_with(&[("VLLM_USE_MODELSCOPE", "0")]).unwrap();
         check_with(&[("VLLM_ENFORCE_STRICT_TOOL_CALLING", "true")]).unwrap();
         check_with(&[("VLLM_REQUEST_BODY_LOG_LEVEL", "debug")]).unwrap();
-        check_with(&[("VLLM_ENABLE_RESPONSES_API_STORE", "0")]).unwrap();
         for (name, value) in [
             ("VLLM_MEDIA_CACHE", ""),
             ("VLLM_MEDIA_FETCH_MAX_RETRIES", "3"),
@@ -187,7 +180,6 @@ mod tests {
             ("VLLM_USE_MODELSCOPE", "True"),
             ("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"),
             ("VLLM_REQUEST_BODY_LOG_LEVEL", "INFO"),
-            ("VLLM_ENABLE_RESPONSES_API_STORE", "1"),
             ("VLLM_MEDIA_CACHE", "/tmp/media"),
             ("VLLM_MEDIA_FETCH_MAX_RETRIES", "5"),
             ("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "0"),
