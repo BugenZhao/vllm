@@ -1422,6 +1422,54 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_replays_assistant_refusal_field_like_refusal_parts() {
+        let lower = |assistant: serde_json::Value| {
+            let request: ChatCompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}, assistant],
+                "echo": true,
+            }))
+            .expect("request parses");
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            (
+                prepared.chat_request.messages[1].clone(),
+                prepared.options.echo,
+            )
+        };
+        let refusal = "I can't help with that.";
+        let explicit_part = lower(json!({"role": "assistant", "content": [
+            {"type": "refusal", "refusal": refusal},
+        ]}));
+        let existing_answer = lower(json!({"role": "assistant", "content": "Here is the answer."}));
+
+        // The OpenAI SDK replays a refused turn without `content`.
+        for empty_content in [None, Some(json!(null)), Some(json!("")), Some(json!([]))] {
+            let mut assistant = json!({"role": "assistant", "refusal": refusal});
+            if let Some(content) = &empty_content {
+                assistant["content"] = content.clone();
+            }
+            assert_eq!(
+                lower(assistant),
+                explicit_part,
+                "content: {empty_content:?}"
+            );
+        }
+        for content in [
+            json!("Here is the answer."),
+            json!([{"type": "text", "text": "Here is the answer."}]),
+        ] {
+            let assistant =
+                json!({"role": "assistant", "content": content, "refusal": "Do not append me."});
+            assert_eq!(lower(assistant), existing_answer, "content: {content}");
+        }
+    }
+
+    #[test]
     fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
