@@ -17,6 +17,7 @@ use vllm_llm::{
 };
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
+use super::DecodedTextEventStream;
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
 };
@@ -112,10 +113,9 @@ pub struct SampledDelta {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedTextEvent {
     /// The request has reached the point where prompt-scoped decoding metadata
-    /// is ready.
+    /// is ready. The prompt token IDs are on the stream,
+    /// [`DecodedTextEventStream::prompt_token_ids`].
     Start {
-        /// The actual prompt token IDs for this request.
-        prompt_token_ids: Arc<[u32]>,
         /// Once-only prompt logprobs metadata, when requested.
         ///
         /// The first prompt token is carried separately because it has no left
@@ -173,19 +173,41 @@ impl IncrementalDecoder for TokenOnlyDecoder {
     }
 }
 
-/// Convert the output token stream from the `vllm_llm` layer into incrementally
-/// decoded text.
-#[try_stream]
-pub async fn decoded_text_event_stream(
+/// Convert the output token stream from the `vllm_llm` layer, for a request
+/// whose prompt is `prompt_token_ids`, into incrementally decoded text.
+pub fn decoded_text_event_stream(
     request_id: String,
     tokenizer: DynTokenizer,
+    prompt_token_ids: Arc<[u32]>,
+    raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Unpin + Send + 'static,
+    decode_options: TextDecodeOptions,
+    intermediate: bool,
+) -> DecodedTextEventStream {
+    DecodedTextEventStream::new(
+        Arc::clone(&prompt_token_ids),
+        decoded_text_events(
+            request_id,
+            tokenizer,
+            prompt_token_ids,
+            raw_stream,
+            decode_options,
+            intermediate,
+        ),
+    )
+}
+
+#[try_stream]
+async fn decoded_text_events(
+    request_id: String,
+    tokenizer: DynTokenizer,
+    prompt_token_ids: Arc<[u32]>,
     mut raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Unpin,
     mut decode_options: TextDecodeOptions,
     intermediate: bool,
     mut y: TryYielder<DecodedTextEvent, Error>,
 ) -> crate::Result<()> {
-    let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
-    let mut prompt_token_count = 0_usize;
+    let mut started = false;
+    let prompt_token_count = prompt_token_ids.len();
     let mut prompt_cache_usage = PromptCacheUsage::default();
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
@@ -196,44 +218,37 @@ pub async fn decoded_text_event_stream(
     let mut sampling_mask_row_count: Option<usize> = None;
     let mut routed_experts = AuxOutputRows::default();
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
+    let mut decoder = match text_tokenizer {
+        Some(tokenizer) => tokenizer.create_decode_stream(
+            &prompt_token_ids,
+            decode_options.skip_special_tokens.unwrap_or(true),
+            decode_options.min_bytes_to_buffer(),
+        ),
+        None => Box::new(TokenOnlyDecoder),
+    };
 
     while let Some(next) = raw_stream.next().await {
         let mut output = next?;
         prompt_cache_usage.merge(output.prompt_cache_usage);
 
-        // If it's the first output, init states and yield `Start` event.
-        if decoder.is_none() {
+        // If it's the first output, yield `Start` event.
+        if !started {
+            started = true;
             let prompt_token_id_logprobs = output
                 .prompt_info
                 .as_mut()
                 .and_then(|info| info.prompt_token_id_logprobs.take());
-            let prompt_token_ids =
-                output.prompt_token_ids().expect("first llm output must carry prompt token ids");
-            prompt_token_count = prompt_token_ids.len();
-
-            let dec = match text_tokenizer {
-                Some(tokenizer) => tokenizer.create_decode_stream(
-                    prompt_token_ids,
-                    decode_options.skip_special_tokens.unwrap_or(true),
-                    decode_options.min_bytes_to_buffer(),
-                ),
-                None => Box::new(TokenOnlyDecoder),
-            };
-            decoder = Some(dec);
-
             y.yield_ok(DecodedTextEvent::Start {
-                prompt_token_ids: prompt_token_ids.clone(),
                 prompt_logprobs: output
                     .prompt_logprobs()
                     .map(|logprobs| {
-                        decode_prompt_logprobs(text_tokenizer, prompt_token_ids, logprobs)
+                        decode_prompt_logprobs(text_tokenizer, &prompt_token_ids, logprobs)
                     })
                     .transpose()?,
                 prompt_token_id_logprobs,
             })
             .await;
         };
-        let decoder = decoder.as_mut().unwrap();
 
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
@@ -460,7 +475,6 @@ mod tests {
     use vllm_tokenizer::{TokenAnchor, TokenAttribution};
 
     use super::*;
-    use crate::output::TextOutputStreamExt as _;
 
     /// Helper: run `decoded_text_event_stream` to completion and return the
     /// collected output.
@@ -468,17 +482,23 @@ mod tests {
         token_ids: Vec<u32>,
         decode_options: TextDecodeOptions,
     ) -> crate::output::CollectedTextOutput {
-        let prompt: Arc<[u32]> = Arc::from([]);
         let raw_stream = stream::iter(vec![Ok(GenerateOutput::for_test(
-            Some(prompt),
+            true,
             token_ids,
             Some(FinishReason::Length),
         ))]);
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
-        decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)
-            .collect_output()
-            .await
-            .unwrap()
+        decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            Arc::from([]),
+            raw_stream,
+            decode_options,
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap()
     }
 
     /// Convert ASCII string to token IDs (one byte per token).
@@ -488,13 +508,12 @@ mod tests {
 
     #[tokio::test]
     async fn sampling_masks_survive_text_decode_and_collection() {
-        let prompt: Arc<[u32]> = Arc::from([]);
-        let mut first = GenerateOutput::for_test(Some(prompt), vec![b'a' as u32], None);
+        let mut first = GenerateOutput::for_test(true, vec![b'a' as u32], None);
         first.sampling_mask = Some(SamplingMask {
             rows: vec![vec![1, b'a' as u32]],
         });
         let mut terminal =
-            GenerateOutput::for_test(None, vec![b'b' as u32], Some(FinishReason::Length));
+            GenerateOutput::for_test(false, vec![b'b' as u32], Some(FinishReason::Length));
         terminal.sampling_mask = Some(SamplingMask {
             rows: vec![vec![2, b'b' as u32]],
         });
@@ -503,6 +522,7 @@ mod tests {
         let collected = decoded_text_event_stream(
             "test-mask".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter([Ok(first), Ok(terminal)]),
             TextDecodeOptions::default(),
             false,
@@ -521,9 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn sampling_mask_mismatch_reuses_llm_error() {
-        let prompt: Arc<[u32]> = Arc::from([]);
         let mut terminal = GenerateOutput::for_test(
-            Some(prompt),
+            true,
             vec![b'a' as u32, b'b' as u32],
             Some(FinishReason::Length),
         );
@@ -535,6 +554,7 @@ mod tests {
         let error = decoded_text_event_stream(
             "test-mask-mismatch".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter([Ok(terminal)]),
             TextDecodeOptions::default(),
             false,
@@ -596,6 +616,7 @@ mod tests {
         decoded_text_event_stream(
             "test".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter(outputs.into_iter().map(Ok)),
             decode_options,
             true,
@@ -615,12 +636,11 @@ mod tests {
             expected: Vec<DecodedTextEvent>,
         }
 
-        let prompt: Arc<[u32]> = Arc::from([]);
         let cases = [
             Case {
                 name: "utf8 byte fallback resolves across engine updates",
                 outputs: vec![
-                    GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
+                    GenerateOutput::for_test(true, vec![0xe4], None),
                     GenerateOutput {
                         spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                             num_spec_tokens: 2,
@@ -635,7 +655,7 @@ mod tests {
                             last_token_ts: 11.5,
                         },
                         ..GenerateOutput::for_test(
-                            None,
+                            false,
                             vec![0xbd, 0xa0],
                             Some(FinishReason::Length),
                         )
@@ -643,7 +663,6 @@ mod tests {
                 ],
                 expected: vec![
                     DecodedTextEvent::Start {
-                        prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
                         prompt_token_id_logprobs: None,
                     },
@@ -682,13 +701,12 @@ mod tests {
             Case {
                 name: "terminal stop token remains sampled and bypasses decoder",
                 outputs: vec![GenerateOutput::for_test(
-                    Some(Arc::clone(&prompt)),
+                    true,
                     ascii_tokens("a!"),
                     Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
                 )],
                 expected: vec![
                     DecodedTextEvent::Start {
-                        prompt_token_ids: Arc::clone(&prompt),
                         prompt_logprobs: None,
                         prompt_token_id_logprobs: None,
                     },
@@ -741,7 +759,7 @@ mod tests {
         };
         let prompt = ascii_tokens("hi");
         let mut output = GenerateOutput::for_test(
-            Some(Arc::from(prompt.clone())),
+            true,
             ascii_tokens("a!"),
             Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
         );
@@ -751,6 +769,7 @@ mod tests {
         let collected = decoded_text_event_stream(
             "test".into(),
             Arc::new(PanickingTokenizer),
+            Arc::from(prompt.clone()),
             stream::iter([Ok(output)]),
             TextDecodeOptions {
                 detokenize: false,
@@ -836,7 +855,7 @@ mod tests {
                     .with_special_token("</s>", EOS),
             );
             let mut output = GenerateOutput::for_test(
-                Some(Arc::from([BOS, b'h' as u32])),
+                true,
                 vec![b'a' as u32, SEP, b'b' as u32, EOS],
                 Some(FinishReason::Stop(Some(StopReason::TokenId(EOS)))),
             );
@@ -855,6 +874,7 @@ mod tests {
             let collected = decoded_text_event_stream(
                 "test".into(),
                 tokenizer,
+                Arc::from([BOS, b'h' as u32]),
                 stream::iter([Ok(output)]),
                 TextDecodeOptions {
                     skip_special_tokens: Some(skip_special_tokens),
@@ -923,7 +943,6 @@ mod tests {
 
     #[tokio::test]
     async fn stream_stop_string_sets_task_local_abort_cause_on_raw_stream_drop() {
-        let prompt: Arc<[u32]> = Arc::from([]);
         let dropped_cause = Arc::new(Mutex::new(None));
         let timestamps = RequestTimestamps {
             queued_ts: 1.0,
@@ -936,7 +955,7 @@ mod tests {
             // request after decoding the configured stop string.
             next: Some(Ok(GenerateOutput {
                 timestamps,
-                ..GenerateOutput::for_test(Some(prompt), ascii_tokens("hello"), None)
+                ..GenerateOutput::for_test(true, ascii_tokens("hello"), None)
             })),
             dropped_cause: Arc::clone(&dropped_cause),
         };
@@ -945,6 +964,7 @@ mod tests {
         let output = decoded_text_event_stream(
             "test".into(),
             tokenizer,
+            Arc::from([]),
             raw_stream,
             opts(&["ll"], 0),
             false,
@@ -972,11 +992,7 @@ mod tests {
     #[tokio::test]
     async fn stream_stop_string_mid_chunk_keeps_token_logprob_mask_alignment() {
         let token_ids = ascii_tokens("abcxyz");
-        let mut raw = GenerateOutput::for_test(
-            Some(Arc::from([])),
-            token_ids.clone(),
-            Some(FinishReason::Length),
-        );
+        let mut raw = GenerateOutput::for_test(true, token_ids.clone(), Some(FinishReason::Length));
         raw.logprobs = Some(Logprobs {
             positions: token_ids
                 .iter()
@@ -997,6 +1013,7 @@ mod tests {
         let output = decoded_text_event_stream(
             "test-mid-chunk-stop".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter([Ok(raw)]),
             opts(&["cx"], 0),
             false,
@@ -1030,11 +1047,11 @@ mod tests {
             start,
             end,
         };
-        let mut first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        let mut first = GenerateOutput::for_test(true, ascii_tokens("ab"), None);
         first.weight_versions = WeightVersions::new(Some("v1".into()), 2);
         // One merged output whose tokens span two more weight versions; the
         // stop string ends inside the `v2` span.
-        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        let mut second = GenerateOutput::for_test(false, ascii_tokens("cxyz"), None);
         second.weight_versions = WeightVersions::new(Some("v2".into()), 3);
         second.weight_versions.append(WeightVersions::new(Some("v3".into()), 1));
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
@@ -1042,6 +1059,7 @@ mod tests {
         let output = decoded_text_event_stream(
             "test-weight-versions-stop".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter([Ok(first), Ok(second)]),
             opts(&["cx"], 0),
             false,
@@ -1059,9 +1077,9 @@ mod tests {
 
     #[tokio::test]
     async fn stream_stop_string_in_unlabelled_tokens_reports_no_spans() {
-        let first = GenerateOutput::for_test(Some(Arc::from([])), ascii_tokens("ab"), None);
+        let first = GenerateOutput::for_test(true, ascii_tokens("ab"), None);
         // The label arrives after the stop string, so no kept token has one.
-        let mut second = GenerateOutput::for_test(None, ascii_tokens("cxyz"), None);
+        let mut second = GenerateOutput::for_test(false, ascii_tokens("cxyz"), None);
         second.weight_versions = WeightVersions::new(None, 1);
         second.weight_versions.append(WeightVersions::new(Some("v1".into()), 3));
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
@@ -1069,6 +1087,7 @@ mod tests {
         let output = decoded_text_event_stream(
             "test-weight-versions-unlabelled-stop".into(),
             tokenizer,
+            Arc::from([]),
             stream::iter([Ok(first), Ok(second)]),
             opts(&["bc"], 0),
             false,

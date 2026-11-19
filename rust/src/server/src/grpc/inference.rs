@@ -14,9 +14,7 @@ use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::current_unix_timestamp_secs;
-use vllm_text::{
-    DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
-};
+use vllm_text::{DecodedTextEvent, DecodedTextEventStream, Prompt, SampledDelta, TextRequest};
 
 use super::convert::{self, ResponseOpts};
 use super::{InferenceServer, pb};
@@ -324,12 +322,13 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
 /// it and aborts the request in the engine, even before any output arrives.
 #[try_stream]
 async fn generate_stream_responses(
-    stream: impl TextOutputStream,
+    stream: DecodedTextEventStream,
     response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
     mut y: TryYielder<pb::GenerateResponse, Status>,
 ) -> Result<(), Status> {
+    let prompt_token_ids = Arc::clone(stream.prompt_token_ids());
     pin_mut!(stream);
     // The terminal output carries the whole request's rows.
     let mut sampling_mask: Option<SamplingMask> = None;
@@ -338,9 +337,7 @@ async fn generate_stream_responses(
         let response = match event {
             Err(error) => Err(log_text_error(&request_span, started_at, "stream", error)),
             Ok(DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-                ..
+                prompt_logprobs, ..
             }) => {
                 let prompt_info = convert::to_prompt_info(
                     &prompt_token_ids,
@@ -451,7 +448,7 @@ mod tests {
         let events = stream::iter([Ok(delta(1, None)), Ok(delta(2, Some(finished)))]);
 
         let masks: Vec<_> = generate_stream_responses(
-            events,
+            DecodedTextEventStream::new(Arc::from([]), events),
             ResponseOpts::default(),
             Span::none(),
             Instant::now(),

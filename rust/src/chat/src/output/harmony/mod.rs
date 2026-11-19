@@ -396,15 +396,9 @@ async fn harmony_assistant_event_stream(
     while let Some(event) = decoded.next().await.transpose()? {
         match event {
             DecodedTextEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-                ..
+                prompt_logprobs, ..
             } => {
-                y.yield_ok(AssistantEvent::Start {
-                    prompt_token_ids,
-                    prompt_logprobs,
-                })
-                .await;
+                y.yield_ok(AssistantEvent::Start { prompt_logprobs }).await;
             }
             DecodedTextEvent::TextDelta {
                 decoded: _, // harmony takes raw token IDs as input, so we ignore decoded text here
@@ -441,7 +435,7 @@ async fn harmony_assistant_event_stream(
                             reasoning_tokens: state.reasoning_tokens,
                         },
                         timestamps: finished.timestamps,
-                        spec_decode_metrics: finished.spec_decode_metrics,
+                        spec_decode_metrics: finished.spec_decode_metrics.map(Box::new),
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
