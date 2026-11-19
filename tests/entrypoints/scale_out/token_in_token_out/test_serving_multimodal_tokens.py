@@ -300,8 +300,14 @@ async def test_content_parts_before_features_is_rejected(client, test_image):
         },
     )
     assert gen_resp.status_code == 400
-    assert "Failed to apply prompt replacement" in gen_resp.text
-    assert "after the last features range" in gen_resp.text
+    # The frontends word the error differently; both name where the last
+    # features range ends.
+    end = max(
+        r["offset"] + r["length"]
+        for rs in features["mm_placeholders"].values()
+        for r in rs[1:]
+    )
+    assert f"offset {end}" in gen_resp.text
 
 
 @pytest.mark.asyncio
