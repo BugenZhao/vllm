@@ -9,7 +9,7 @@ use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam, functi
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::output_grammar::{self, OutputGrammarContext, normalize_tool_choice};
-use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, Tool, ToolCallIdFormat, ToolParser, ToolParserOutput};
 
 /// The control token that starts the call array.
 const TOOL_CALLS: &str = "[TOOL_CALLS]";
@@ -100,6 +100,13 @@ impl ToolParser for MistralJsonArrayToolParser {
             ),
             BuilderToolChoice::Required | BuilderToolChoice::Forced => Format::Tag(calls),
         }))
+    }
+
+    /// The pre-v11 chat templates render each history call's ID and its tool
+    /// result's `tool_call_id`, and accept only 9 alphanumeric characters
+    /// (Python's `MistralToolCall.generate_random_id`).
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        ToolCallIdFormat::Alphanumeric(9)
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {

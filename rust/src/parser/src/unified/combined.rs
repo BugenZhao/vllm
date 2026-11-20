@@ -8,7 +8,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningParser;
-use crate::tool::{Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Tool, ToolCallIdFormat, ToolParser, ToolParserOutput};
 
 /// Unified parser that composes existing reasoning and tool parsers.
 pub struct CombinedParser {
@@ -125,6 +125,12 @@ impl UnifiedParser for CombinedParser {
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
         self.tool.as_ref().and_then(|parser| parser.tool_call_id(tool_index))
+    }
+
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        self.tool.as_ref().map_or_else(ToolCallIdFormat::default, |parser| {
+            parser.tool_call_id_format()
+        })
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {

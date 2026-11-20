@@ -5,12 +5,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
+use rand::Rng as _;
 use trait_set::trait_set;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_parser::output_grammar::BuiltOutputGrammar;
+use vllm_parser::tool::ToolCallIdFormat;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
@@ -112,8 +114,15 @@ trait_set! {
     pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 }
 
-/// Generate the northbound tool-call ID using the OpenAI-style `call_<id>`
-/// format.
-pub(crate) fn generate_tool_call_id() -> String {
-    format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
+/// Generate a northbound tool-call ID in `format`: the OpenAI-style
+/// `call_<id>` unless the model's chat format requires another form.
+pub(crate) fn generate_tool_call_id(format: ToolCallIdFormat) -> String {
+    match format {
+        ToolCallIdFormat::Any => format!("call_{}", &Uuid::new_v4().simple().to_string()[..24]),
+        ToolCallIdFormat::Alphanumeric(len) => rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(len)
+            .map(char::from)
+            .collect(),
+    }
 }
