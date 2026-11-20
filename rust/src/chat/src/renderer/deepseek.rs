@@ -216,12 +216,12 @@ pub(super) fn render_request_with_media_order(
                 // strictly after the last user turn.
                 let emit_thinking_block = thinking_mode == ThinkingMode::Thinking
                     && (!drop_thinking || current_render_index > last_user_render_index);
-                let append_eos = !(message_index + 1 == request.messages.len()
-                    && request.chat_options.continue_final_message());
+                let continue_final = message_index + 1 == request.messages.len()
+                    && request.chat_options.continue_final_message();
                 render_assistant_message(
                     &mut out,
                     emit_thinking_block,
-                    append_eos,
+                    continue_final,
                     content,
                     dialect,
                 )?;
@@ -241,30 +241,39 @@ pub(super) fn render_request_with_media_order(
             }
         }
 
-        if is_user_like_entry(message, current_render_index as usize, dialect)
-            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
-        {
-            // Skip the opener only at the last rendered entry when
-            // add_generation_prompt is off. Inspect the next rendered
-            // entry, not the raw index: V4 merges trailing tool results.
-            let should_write_transition = match next_rendered_entry(
-                request.messages.as_slice(),
-                message_index,
-                drop_historical_developers,
-                last_user_like_message_index,
-            ) {
-                Some(ChatMessage::Assistant { .. }) => true,
-                None => request.chat_options.add_generation_prompt(),
-                Some(_) => false,
+        // Inspect the next rendered entry, not the raw index: V4 merges
+        // trailing tool results.
+        let next_entry = next_rendered_entry(
+            request.messages.as_slice(),
+            message_index,
+            drop_historical_developers,
+            last_user_like_message_index,
+        );
+        let should_write_transition =
+            if is_user_like_entry(message, current_render_index as usize, dialect)
+                || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
+            {
+                // Skip the opener only at the last rendered entry when
+                // add_generation_prompt is off.
+                match next_entry {
+                    Some(ChatMessage::Assistant { .. }) => true,
+                    None => request.chat_options.add_generation_prompt(),
+                    Some(_) => false,
+                }
+            } else {
+                // A final assistant turn also gets the opener under
+                // `StartNewAssistant`; otherwise the prompt ends at EOS.
+                matches!(message, ChatMessage::Assistant { .. })
+                    && next_entry.is_none()
+                    && request.chat_options.add_generation_prompt()
             };
-            if should_write_transition {
-                write_assistant_transition(
-                    &mut out,
-                    thinking_mode,
-                    drop_thinking,
-                    current_render_index >= last_user_render_index,
-                );
-            }
+        if should_write_transition {
+            write_assistant_transition(
+                &mut out,
+                thinking_mode,
+                drop_thinking,
+                current_render_index >= last_user_render_index,
+            );
         }
     }
 
@@ -752,24 +761,34 @@ fn write_assistant_transition(
 }
 
 /// Render one assistant turn, including optional reasoning, DSML tool calls,
-/// and the trailing EOS marker.
+/// and the trailing EOS marker (omitted when `continue_final` is set).
 fn render_assistant_message(
     out: &mut String,
     emit_thinking_block: bool,
-    append_eos: bool,
+    continue_final: bool,
     content: &[AssistantContentBlock],
     dialect: DsDialect,
 ) -> Result<()> {
     let has_tool_calls = content.has_tool_calls();
+    let mut text = String::new();
+    write_assistant_text(&mut text, content);
 
     if emit_thinking_block {
-        if content.has_reasoning() {
+        let has_reasoning = content.has_reasoning();
+        if has_reasoning {
             write_assistant_reasoning(out, content);
         }
-        out.push_str(THINKING_END_TOKEN);
+        // Continuing a reasoning-only message keeps `<think>` open so the
+        // model resumes its reasoning (e.g. `/v1/responses` continuing an
+        // `in_progress` reasoning item).
+        let continues_reasoning =
+            continue_final && has_reasoning && !has_tool_calls && text.is_empty();
+        if !continues_reasoning {
+            out.push_str(THINKING_END_TOKEN);
+        }
     }
 
-    write_assistant_text(out, content);
+    out.push_str(&text);
 
     if has_tool_calls {
         let tool_calls_tag = dialect.tool_calls_tag();
@@ -783,7 +802,7 @@ fn render_assistant_message(
         write!(out, "\n</{DSML_TOKEN}{tool_calls_tag}>").expect("writing to String cannot fail");
     }
 
-    if append_eos {
+    if !continue_final {
         out.push_str(EOS_TOKEN);
     }
     Ok(())
