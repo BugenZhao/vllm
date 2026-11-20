@@ -27,8 +27,9 @@ mod kv_connector;
 pub use kv_connector::KvConnectorHandles;
 use kv_connector::KvConnectorMetrics;
 pub use kv_connector::{
-    KvConnectorStats, MooncakeRecord, MooncakeStats, MooncakeTransferStats, MultiConnectorStats,
-    NixlStats, SimpleCpuOffloadData, SimpleCpuOffloadStats, UmbpOperationCounts, UmbpStats,
+    ConfigInfoValue, KvConnectorStats, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
+    MultiConnectorStats, NixlStats, OffloadingSample, OffloadingStats, SimpleCpuOffloadData,
+    SimpleCpuOffloadStats, UmbpOperationCounts, UmbpStats,
 };
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
