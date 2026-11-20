@@ -26,6 +26,7 @@ const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     delimiter: Some(","),
     name_key: "name",
     arguments_key: &["arguments"],
+    id_key: Some("id"),
 };
 
 /// Tool parser for the pre-v11 Mistral JSON-array tool calls.
@@ -122,7 +123,9 @@ impl ToolParser for MistralJsonArrayToolParser {
     }
 }
 
-/// One call object: the tool's name, then arguments under its parameter schema.
+/// One call object: the tool's name, then arguments under its parameter
+/// schema, then the optional 9-character `"id"` the chat template renders in
+/// history (the parser reads and drops it).
 fn call_tag(tool: &FunctionToolParam) -> TagFormat {
     let name = Value::from(tool.function.name.as_str());
     let arguments = match function_parameters(&tool.function) {
@@ -133,7 +136,10 @@ fn call_tag(tool: &FunctionToolParam) -> TagFormat {
     };
     TagFormat::new(
         format!(r#"{{"name": {name}, "arguments": "#),
-        Format::json_schema(arguments),
+        Format::sequence(vec![
+            Format::json_schema(arguments),
+            Format::optional(Format::regex(r#", "id": "[0-9A-Za-z]{9}""#)),
+        ]),
         "}",
     )
 }
@@ -249,6 +255,32 @@ mod tests {
         .assert_debug_eq(&output);
     }
 
+    /// The chat template renders a history call with its ID after the
+    /// arguments; the ID is dropped, and the next call still parses.
+    #[test]
+    fn mistral_parses_calls_with_their_history_id() {
+        let completion = concat!(
+            r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Tokyo"}, "id": "a1B2c3D4e"}, "#,
+            r#"{"name": "add", "arguments": {"x": 1, "y": 2}, "id": "Z9y8X7w6v"}]"#,
+        );
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
+        let output = parser.parse_complete(completion).unwrap();
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2, "{output:?}");
+        assert_eq!(calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(calls[0].arguments, r#"{"city": "Tokyo"}"#);
+        assert_eq!(calls[1].name.as_deref(), Some("add"));
+        assert_eq!(calls[1].arguments, r#"{"x": 1, "y": 2}"#);
+        assert_eq!(output.normal_text(), "");
+
+        let expected = output.coalesce();
+        for chars in [1, 2, 3, 7] {
+            let mut parser = MistralJsonArrayToolParser::new(&test_tools());
+            let streamed = collect_stream(&mut parser, &split_by_chars(completion, chars));
+            assert_eq!(streamed, expected, "{chars}-character chunks");
+        }
+    }
+
     #[test]
     fn mistral_does_not_validate_or_normalize_arguments() {
         let mut parser = MistralJsonArrayToolParser::new(&test_tools());
@@ -354,11 +386,26 @@ mod tests {
         expect![[r#"
             tag `[TOOL_CALLS] [` .. `]`
               tags_with_separator `, ` at_least_one
-                tag `{"name": "get_weather", "arguments": ` json(object) `}`
-                tag `{"name": "add", "arguments": ` json(object) `}`
-                tag `{"name": "convert", "arguments": ` json(object) `}`
-                tag `{"name": "calculate_area", "arguments": ` json(object) `}`
-                tag `{"name": "update_record", "arguments": ` json(object) `}`
+                tag `{"name": "get_weather", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "add", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "convert", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "calculate_area", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "update_record", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
         "#]]
         .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, true).unwrap());
     }
@@ -368,7 +415,10 @@ mod tests {
         expect![[r#"
             tag `[TOOL_CALLS] [` .. `]`
               tags_with_separator `, ` at_least_one stop_after_first
-                tag `{"name": "add", "arguments": ` json({ x?: integer, y?: integer }) `}`
+                tag `{"name": "add", "arguments": ` .. `}`
+                  sequence
+                    json({ x?: integer, y?: integer })
+                    optional /, "id": "[0-9A-Za-z]{9}"/
         "#]]
         .assert_eq(
             &call_grammar(
@@ -390,11 +440,26 @@ mod tests {
             triggered_tags [`[TOOL_CALLS]`] stop_after_first
               tag `[TOOL_CALLS] [` .. `]`
                 tags_with_separator `, ` at_least_one stop_after_first
-                  tag `{"name": "get_weather", "arguments": ` json(object) `}`
-                  tag `{"name": "add", "arguments": ` json(object) `}`
-                  tag `{"name": "convert", "arguments": ` json(object) `}`
-                  tag `{"name": "calculate_area", "arguments": ` json(object) `}`
-                  tag `{"name": "update_record", "arguments": ` json(object) `}`
+                  tag `{"name": "get_weather", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "add", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "convert", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "calculate_area", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "update_record", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
         "#]]
         .assert_eq(&call_grammar(ToolChoice::auto(), ToolStrictLevel::Function, false).unwrap());
     }
