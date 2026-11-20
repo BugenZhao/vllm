@@ -233,19 +233,20 @@ impl HfChatRenderer {
             .chat_template
             .as_ref()
             .map(|template| self.compile_template(template.clone(), self.request_template_fuel))
-            .transpose()?;
+            .transpose()
+            .map_err(request_template_error)?;
         let model_template = if request.tools().is_empty() {
             None
         } else {
             self.tool_use_template.as_ref()
         }
         .or(self.default_template.as_ref());
-        let template = override_template
-            .as_ref()
-            .or(model_template)
-            .ok_or(Error::MissingChatTemplate)?;
-
-        self.apply_chat_template_inner(template, request)
+        let Some(override_template) = override_template else {
+            let template = model_template.ok_or(Error::MissingChatTemplate)?;
+            return self.apply_chat_template_inner(template, request);
+        };
+        self.apply_chat_template_inner(&override_template, request)
+            .map_err(request_template_error)
     }
 
     fn apply_chat_template_inner(
@@ -324,6 +325,15 @@ impl ChatRenderer for HfChatRenderer {
 
     fn renders_request_chat_template(&self) -> bool {
         true
+    }
+}
+
+/// A request's own chat template that fails to compile or render is the
+/// request's error, where the model's template failing is this process's.
+fn request_template_error(error: Error) -> Error {
+    match error {
+        Error::ChatTemplate(message) => Error::InvalidRequestChatTemplate { message },
+        error => error,
     }
 }
 
@@ -652,12 +662,10 @@ fn append_continue_final_message_tag(message: &mut TemplateMessage<'_>) -> Resul
             | TemplateContentPart::ToolReference { .. } => None,
         }),
     };
-    let text = text.ok_or_else(|| {
-        Error::ChatTemplate(
-            "continue_final_message is set but there is no text to continue \
-             in the final message"
-                .to_string(),
-        )
+    let text = text.ok_or_else(|| Error::InvalidContinueFinalMessage {
+        message: "continue_final_message is set but there is no text to continue \
+                  in the final message"
+            .to_string(),
     })?;
 
     let original = text.clone();
@@ -676,13 +684,15 @@ fn truncate_prompt_at_continue_final_message_tag(
         .rfind(CONTINUE_FINAL_MESSAGE_TAG.trim_end())
         .filter(|_| rendered.contains(final_message_text.trim()));
     let Some(tag_loc) = tag_loc else {
-        return Err(Error::ChatTemplate(format!(
-            "continue_final_message is set but the final message does not appear \
+        return Err(Error::InvalidContinueFinalMessage {
+            message: format!(
+                "continue_final_message is set but the final message does not appear \
              in the prompt after applying the chat template! This can happen if \
              the chat template deletes portions of the final message. Final \
              message to continue: {}",
-            final_message_text.trim(),
-        )));
+                final_message_text.trim(),
+            ),
+        });
     };
 
     if rendered[tag_loc..].starts_with(CONTINUE_FINAL_MESSAGE_TAG) {
@@ -1215,7 +1225,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(error, Error::ChatTemplate(_)));
+        assert!(matches!(error, Error::InvalidContinueFinalMessage { .. }));
+        assert!(error.is_request_validation_error());
     }
 
     #[test]
@@ -1499,6 +1510,28 @@ mod tests {
         );
     }
 
+    /// A request template that does not compile is the request's error, as
+    /// Python answers a Jinja `TemplateError` with 400; the same template as
+    /// the model's own fails the renderer at load instead.
+    #[test]
+    fn malformed_request_template_is_a_request_validation_error() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+        request.chat_options.chat_template = Some("{% if %}".to_string());
+
+        let error = render(None, &request).unwrap_err();
+
+        assert!(
+            matches!(error, Error::InvalidRequestChatTemplate { .. }),
+            "expected an invalid request template, got: {error:?}"
+        );
+        assert!(error.is_request_validation_error());
+        assert_eq!(error.param(), Some("chat_template"));
+        assert!(matches!(
+            render(Some("{% if %}"), &sample_request(vec![])),
+            Err(Error::ChatTemplate(_))
+        ));
+    }
+
     #[test]
     fn only_request_templates_have_a_fuel_budget() {
         // Each message costs a fixed number of instructions, like a chat template's message loop.
@@ -1508,7 +1541,7 @@ mod tests {
         assert!(render(Some(template), &request).is_ok());
 
         request.chat_options.chat_template = Some(template.to_string());
-        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+        let Err(Error::InvalidRequestChatTemplate { message }) = render(None, &request) else {
             panic!("expected the request template to run out of fuel");
         };
         expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);

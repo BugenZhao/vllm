@@ -379,16 +379,9 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // Errors
 // ========================================================================================
 
-/// Media that cannot be fetched or preprocessed is the request's fault, as in
-/// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error()
-        || matches!(
-            error,
-            vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)
-        )
-    {
+    if error.is_request_validation_error() {
         Status::invalid_argument(message)
     } else if error.is_unavailable() {
         Status::unavailable(message)
@@ -405,17 +398,22 @@ mod tests {
 
     use super::*;
 
-    /// A media fetch that failed on the host's side is still the request's
-    /// error here, as in HTTP render; only chat routes tell it apart.
+    /// Render answers a chat error like the chat routes: media the request
+    /// got wrong is `INVALID_ARGUMENT`, a media host that timed out is this
+    /// side's trouble.
     #[test]
-    fn media_fetch_timeout_is_invalid_argument() {
-        let error = vllm_chat::Error::from(MediaConnectorError::Timeout {
-            url: "https://example.com/a.png".to_string(),
-            budget: Duration::from_secs(5),
-        });
-        assert_eq!(
-            chat_error_to_status(error).code(),
-            tonic::Code::InvalidArgument
-        );
+    fn chat_errors_map_to_status_like_the_chat_routes() {
+        let errors = [
+            vllm_chat::Error::from(MediaConnectorError::DataUrl("missing comma".to_string())),
+            vllm_chat::Error::from(MediaConnectorError::Timeout {
+                url: "https://example.com/a.png".to_string(),
+                budget: Duration::from_secs(5),
+            }),
+        ];
+        let codes = errors
+            .into_iter()
+            .map(|error| chat_error_to_status(error).code())
+            .collect::<Vec<_>>();
+        assert_eq!(codes, [tonic::Code::InvalidArgument, tonic::Code::Internal]);
     }
 }

@@ -12,12 +12,11 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, text_submit_error};
+use crate::error::{ApiError, chat_submit_error, text_submit_error};
 use crate::model_names::ServedModelNames;
 use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
@@ -197,7 +196,7 @@ pub(crate) async fn render_chat<S: RenderContext>(
         // its output grammar is the same for every sample.
         .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .map_err(|error| chat_submit_error("failed to prepare render request", error))?
         .text_request;
     Ok(Json(lower_render_request(
         state.as_ref(),
