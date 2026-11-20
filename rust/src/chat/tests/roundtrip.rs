@@ -61,6 +61,17 @@ struct RoundtripCase {
     json_style: JsonStyle,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
+    /// Which tool-call fixture variants without a JSON schema this case runs,
+    /// usually all of them. A template that drops content before tool calls
+    /// cannot run `auto` answered with both.
+    without_schema: &'static [ToolCallMixVariant],
+    /// Tool-call IDs for a template that renders the server-minted IDs of
+    /// history calls and accepts only one form of them. The fixture uses these
+    /// IDs, and the parsed message is re-rendered as returned (the template
+    /// must accept the minted IDs) and then with these IDs restored, which
+    /// must match. `None` keeps the default IDs, which the template either
+    /// ignores or the parser reads back from the completion.
+    minted_tool_call_ids: Option<[&'static str; 2]>,
     /// Which tool-call fixture variants with a JSON schema this case runs;
     /// every case runs the variants without one. The variants answered with
     /// content need a template that renders a final turn without tool calls
@@ -97,6 +108,12 @@ impl ThinkingBehavior {
             Self::ReasoningEffort { default, .. } => default,
             Self::DisableReasoning { default } => default,
         }
+    }
+
+    /// Whether the model can think at all; a model that never thinks answers
+    /// the tool-call fixture without reasoning.
+    fn can_think(self) -> bool {
+        !matches!(self, Self::Always { value: false })
     }
 
     fn fixtures(self) -> Vec<Option<bool>> {
@@ -227,6 +244,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -241,6 +260,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -255,6 +276,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -269,6 +292,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -283,6 +308,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The MiniMax M3 tool parser builds no tool grammar, so the schema
             // excludes the calls.
             with_schema: &[
@@ -302,6 +329,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -316,6 +345,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -330,6 +361,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -344,6 +377,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The GLM-4.5 tool parser builds no tool grammar, so the schema
             // excludes the calls.
             with_schema: &[
@@ -363,6 +398,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -377,6 +414,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -391,6 +430,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: true,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
@@ -415,6 +456,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
@@ -433,6 +476,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_style: JsonStyle::Compact,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -453,6 +498,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::DisableReasoning { default: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The Muse parser builds no tool grammar, so the schema excludes the
             // calls.
             with_schema: &[
@@ -475,6 +522,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The Muse parser builds no tool grammar, so the schema excludes the
             // calls.
             with_schema: &[
@@ -498,6 +547,8 @@ impl RoundtripCase {
             },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
@@ -512,6 +563,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The Seed-OSS tool parser builds no tool grammar, so the schema
             // excludes the calls.
             with_schema: &[
@@ -531,6 +584,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -545,6 +600,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -559,6 +616,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -573,6 +632,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Compact,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
@@ -587,6 +648,8 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Compact,
             sort_json_keys: true,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
@@ -604,12 +667,34 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
+            without_schema: ToolCallMixVariant::WITHOUT_SCHEMA,
+            minted_tool_call_ids: None,
             // The v11+ Mistral tool parser builds no tool grammar, so the
             // schema excludes the calls.
             with_schema: &[
                 ToolCallMixVariant::NoneSchema,
                 ToolCallMixVariant::AutoSchemaContent,
             ],
+        }
+    }
+
+    /// Pre-v11 Mistral `[TOOL_CALLS] [{...}, ...]` tool-call arrays, without
+    /// reasoning.
+    fn mistral_7b_v03() -> Self {
+        Self {
+            model_id: "mistralai/Mistral-7B-Instruct-v0.3",
+            assistant_stop_suffix: "</s>",
+            tool_call_parser: ParserSelection::Explicit("mistral".to_owned()),
+            reasoning_parser: ParserSelection::None,
+            thinking_behavior: ThinkingBehavior::Always { value: false },
+            json_style: JsonStyle::Spaced,
+            sort_json_keys: false,
+            // The template drops the content of a turn with tool calls.
+            without_schema: &[ToolCallMixVariant::Required, ToolCallMixVariant::Named],
+            // The template renders each history call's ID and accepts only 9
+            // alphanumeric characters.
+            minted_tool_call_ids: Some(["a1B2c3D4e", "Z9y8X7w6v"]),
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 }
@@ -663,6 +748,7 @@ roundtrip_tests! {
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
     mistral_large4 => [reasoning_and_content, tool_call_mix],
+    mistral_7b_v03 => [tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -731,7 +817,7 @@ async fn run_roundtrip_tool_call_mix(
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
     let mut results = Vec::new();
-    for &variant in ToolCallMixVariant::WITHOUT_SCHEMA.iter().chain(case.with_schema) {
+    for &variant in case.without_schema.iter().chain(case.with_schema) {
         let result = run_roundtrip_tool_call_mix_inner(case, backends, variant)
             .await
             .with_context(|| format!("variant {}", serde_json::to_value(variant).unwrap()))?;
@@ -745,6 +831,7 @@ async fn run_roundtrip_tool_call_mix_inner(
     backends: &vllm_chat::LoadedModelBackends,
     variant: ToolCallMixVariant,
 ) -> Result<RoundtripResult> {
+    let thinking = case.thinking_behavior.can_think();
     let mut request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
@@ -753,27 +840,34 @@ async fn run_roundtrip_tool_call_mix_inner(
         )],
         test_tools(),
         Some(variant.tool_choice()),
-        Some(true), // always enable thinking in this fixture
+        // Enable thinking in this fixture whenever the model can think.
+        Some(thinking),
         case.thinking_behavior,
     );
     request.sampling_params.structured_outputs = variant.structured_outputs();
-    let expected_reasoning = "Need call the weather and add tools.";
+    let expected_reasoning = thinking.then_some("Need call the weather and add tools.");
     let (expected_text, tool_call_count) = variant.expected();
+    let [weather_id, add_id] = case
+        .minted_tool_call_ids
+        .unwrap_or(["functions.get_weather:0", "functions.add:1"]);
 
-    let mut content = vec![AssistantContentBlock::Reasoning {
-        text: expected_reasoning.to_string(),
-    }];
+    let mut content = Vec::new();
+    content.extend(
+        expected_reasoning.map(|text| AssistantContentBlock::Reasoning {
+            text: text.to_string(),
+        }),
+    );
     content.extend(expected_text.map(|text| AssistantContentBlock::Text {
         text: text.to_string(),
     }));
     let tool_calls = [
         AssistantContentBlock::ToolCall(AssistantToolCall {
-            id: "functions.get_weather:0".to_string(),
+            id: weather_id.to_string(),
             name: "get_weather".to_string(),
             arguments: r#"{"location":"Shanghai"}"#.to_string(),
         }),
         AssistantContentBlock::ToolCall(AssistantToolCall {
-            id: "functions.add:1".to_string(),
+            id: add_id.to_string(),
             name: "add".to_string(),
             // Intentionally use a non-lexical order of keys to verify text-level
             // fidelity of the roundtrip where JSON formatting remains stable. The
@@ -786,7 +880,7 @@ async fn run_roundtrip_tool_call_mix_inner(
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref(),
-        Some(expected_reasoning),
+        expected_reasoning,
         "parsed message: {:#?}",
         result.parsed_message
     );
@@ -925,6 +1019,16 @@ async fn run_roundtrip(
         output_grammar,
     } = parse_completion(case, backends, request, &rendered).await?;
     let rerendered = render_closed_completion(renderer.as_ref(), request, &parsed_message)?;
+    let rerendered = match case.minted_tool_call_ids {
+        // The template accepted the minted IDs above; compare the rest of the
+        // rendering with the fixture's IDs restored.
+        Some(ids) => render_closed_completion(
+            renderer.as_ref(),
+            request,
+            &with_tool_call_ids(parsed_message.clone(), &ids),
+        )?,
+        None => rerendered,
+    };
 
     Ok(RoundtripResult {
         parsed_message,
@@ -932,6 +1036,18 @@ async fn run_roundtrip(
         rerendered_closed_completion: rerendered.completion,
         output_grammar,
     })
+}
+
+/// Replace the tool-call IDs of `message`, in order, with `ids`.
+fn with_tool_call_ids(mut message: AssistantMessage, ids: &[&str]) -> AssistantMessage {
+    let calls = message.content.iter_mut().filter_map(|block| match block {
+        AssistantContentBlock::ToolCall(call) => Some(call),
+        _ => None,
+    });
+    for (call, id) in calls.zip(ids) {
+        call.id = id.to_string();
+    }
+    message
 }
 
 /// Rendered prompt/completion artifacts at the renderer boundary.

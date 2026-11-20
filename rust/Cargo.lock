@@ -5674,6 +5674,7 @@ dependencies = [
  "ndarray",
  "oss-harmony",
  "paste",
+ "rand 0.9.5",
  "reqwest 0.13.4",
  "rmp-serde",
  "serde",

@@ -160,11 +160,10 @@ impl UnifiedParserState {
                 None => true,
             };
             if is_new_tool {
-                let id = self
-                    .parser
-                    .tool_call_id(item.tool_index)
-                    .map(str::to_string)
-                    .unwrap_or_else(generate_tool_call_id);
+                let id =
+                    self.parser.tool_call_id(item.tool_index).map(str::to_string).unwrap_or_else(
+                        || generate_tool_call_id(self.parser.tool_call_id_format()),
+                    );
                 self.open_call_index = Some(item.tool_index);
                 events.push(AssistantEvent::ToolCallStart { id, name });
             }
@@ -516,6 +515,42 @@ mod tests {
         ChatTokenUsage {
             engine: vllm_llm::TokenUsage::default(),
             reasoning_tokens,
+        }
+    }
+
+    /// Pre-v11 Mistral templates accept only 9-character alphanumeric call IDs
+    /// in history, so the IDs assigned to its calls take that form, also for a
+    /// call committed before a later one fails to parse.
+    #[tokio::test]
+    async fn unified_stream_assigns_ids_in_the_parser_format() {
+        use vllm_parser::tool::{MistralToolParser, ToolParser as _};
+
+        for completion in [
+            r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"city":"Tokyo"}}, {"name":"add","arguments":{"x":1}}]"#,
+            r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"city":"Tokyo"}}, {"arguments":{}}]"#,
+        ] {
+            let mistral = MistralToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
+            let parser = vllm_parser::unified::CombinedParser::new(None, Some(mistral));
+            let stream = stream::iter([Ok(finished_delta(completion))]);
+            let events = unified_event_stream(stream, Box::new(parser))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<crate::Result<Vec<_>>>()
+                .unwrap();
+
+            let ids = events
+                .iter()
+                .filter_map(|event| match event {
+                    AssistantEvent::ToolCallStart { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!ids.is_empty(), "{completion}: {events:?}");
+            for id in ids {
+                assert_eq!(id.len(), 9, "{completion}: {id:?}");
+                assert!(id.chars().all(|c| c.is_ascii_alphanumeric()), "{id:?}");
+            }
         }
     }
 

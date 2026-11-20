@@ -80,6 +80,17 @@ pub struct ToolCallDelta {
     pub arguments: String,
 }
 
+/// The form of tool-call ID a model's chat format accepts. The caller assigns
+/// IDs to the calls whose ID the model did not generate, in this form.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolCallIdFormat {
+    /// Any form: the caller's default.
+    #[default]
+    Any,
+    /// Exactly this many ASCII alphanumeric characters.
+    Alphanumeric(usize),
+}
+
 /// One ordered event emitted while parsing assistant text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolParserEvent {
@@ -274,6 +285,12 @@ pub trait ToolParser: Send {
     /// emitted one.
     fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
         None
+    }
+
+    /// The form of tool-call ID the model's chat format accepts, for the IDs
+    /// the caller assigns to calls the model gave none.
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        ToolCallIdFormat::Any
     }
 
     /// Feed one decoded text delta into the parser, appending committed output

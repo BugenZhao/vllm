@@ -229,6 +229,7 @@ fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
         delimiter: None,
         name_key: "name",
         arguments_key: &["arguments"],
+        id_key: None,
     };
 
     match tool_call_header_event(input, CONFIG)? {

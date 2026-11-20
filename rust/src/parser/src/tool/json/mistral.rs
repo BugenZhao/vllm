@@ -1,20 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::{Value, json};
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::NormalizedToolChoice;
+use xgrammar_structural_tag::format::{Format, TagFormat, TriggeredTagsFormat};
+use xgrammar_structural_tag::tool::{BuilderToolChoice, FunctionToolParam, function_parameters};
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::output_grammar::{self, OutputGrammarContext, normalize_tool_choice};
+use crate::tool::{Result, Tool, ToolCallIdFormat, ToolParser, ToolParserOutput};
+
+/// The control token that starts the call array.
+const TOOL_CALLS: &str = "[TOOL_CALLS]";
+
+/// The call array's opener, as the chat template writes it.
+const CALLS_OPEN: &str = "[TOOL_CALLS] [";
 
 const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Mistral",
-    start_marker: "[TOOL_CALLS] [",
+    start_marker: CALLS_OPEN,
     framed_start_marker: None,
     end_marker: "]",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: Some(","),
     name_key: "name",
     arguments_key: &["arguments"],
+    id_key: Some("id"),
 };
 
 /// Tool parser for the pre-v11 Mistral JSON-array tool calls.
@@ -48,6 +60,56 @@ impl ToolParser for MistralJsonArrayToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    /// `[TOOL_CALLS]` is a special token in pre-v11 tokenizers too, so decoding
+    /// must keep it for the start marker to reach the parser.
+    fn preserve_special_tokens(&self) -> bool {
+        true
+    }
+
+    /// Constrain calls to the array this parser reads, `[TOOL_CALLS] [` then
+    /// `{"name": ..., "arguments": ...}` objects joined by `, ` and `]`, as the
+    /// chat template renders them. Python guides `required` and named choices
+    /// to the bare array instead, because its JSON-schema path cannot write
+    /// the control token.
+    fn build_call_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(NormalizedToolChoice {
+            function_tools,
+            choice,
+            ..
+        }) = normalize_tool_choice(ctx)?
+        else {
+            return Ok(None);
+        };
+        let single_call = choice == BuilderToolChoice::Forced || !ctx.parallel_tool_calls;
+        let calls = TagFormat::new(
+            CALLS_OPEN,
+            Format::tags_with_separator(
+                function_tools.iter().map(call_tag).collect(),
+                ", ",
+                true,
+                single_call,
+            ),
+            "]",
+        );
+        Ok(Some(match choice {
+            // The template ends the turn after the array, so there is one.
+            BuilderToolChoice::Auto => Format::TriggeredTags(
+                TriggeredTagsFormat::new(&[TOOL_CALLS], vec![calls]).with_stop_after_first(true),
+            ),
+            BuilderToolChoice::Required | BuilderToolChoice::Forced => Format::Tag(calls),
+        }))
+    }
+
+    /// The pre-v11 chat templates render each history call's ID and its tool
+    /// result's `tool_call_id`, and accept only 9 alphanumeric characters
+    /// (Python's `MistralToolCall.generate_random_id`).
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        ToolCallIdFormat::Alphanumeric(9)
+    }
+
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
@@ -61,14 +123,58 @@ impl ToolParser for MistralJsonArrayToolParser {
     }
 }
 
+/// One call object: the tool's name, then arguments under its parameter
+/// schema, then the optional 9-character `"id"` the chat template renders in
+/// history (the parser reads and drops it).
+fn call_tag(tool: &FunctionToolParam) -> TagFormat {
+    let name = Value::from(tool.function.name.as_str());
+    let arguments = match function_parameters(&tool.function) {
+        // The parser reads the arguments as a JSON object, so an unpinned
+        // schema still admits only objects.
+        Value::Bool(true) => json!({ "type": "object" }),
+        schema => schema,
+    };
+    TagFormat::new(
+        format!(r#"{{"name": {name}, "arguments": "#),
+        Format::sequence(vec![
+            Format::json_schema(arguments),
+            Format::optional(Format::regex(r#", "id": "[0-9A-Za-z]{9}""#)),
+        ]),
+        "}",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
+    use xgrammar_structural_tag::ToolChoice;
 
     use super::MistralJsonArrayToolParser;
+    use crate::output_grammar::test_utils::outline;
+    use crate::output_grammar::{OutputGrammarContext, ToolStrictLevel};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
+
+    /// Outline of the visible grammar for `tool_choice`, or `None`.
+    fn call_grammar(
+        tool_choice: ToolChoice,
+        tool_strict_level: ToolStrictLevel,
+        parallel_tool_calls: bool,
+    ) -> Option<String> {
+        let tools = test_tools();
+        let parser = MistralJsonArrayToolParser::new(&tools);
+        parser
+            .build_visible_format(&OutputGrammarContext {
+                tools: &tools,
+                tool_choice: &tool_choice,
+                tool_strict_level,
+                parallel_tool_calls,
+                answer: None,
+            })
+            .unwrap()
+            .map(|format| outline(&format))
+    }
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
         format!(r#"{{"name":"{function_name}","arguments":{arguments}}}"#)
@@ -147,6 +253,32 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&output);
+    }
+
+    /// The chat template renders a history call with its ID after the
+    /// arguments; the ID is dropped, and the next call still parses.
+    #[test]
+    fn mistral_parses_calls_with_their_history_id() {
+        let completion = concat!(
+            r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Tokyo"}, "id": "a1B2c3D4e"}, "#,
+            r#"{"name": "add", "arguments": {"x": 1, "y": 2}, "id": "Z9y8X7w6v"}]"#,
+        );
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
+        let output = parser.parse_complete(completion).unwrap();
+        let calls = output.calls();
+        assert_eq!(calls.len(), 2, "{output:?}");
+        assert_eq!(calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(calls[0].arguments, r#"{"city": "Tokyo"}"#);
+        assert_eq!(calls[1].name.as_deref(), Some("add"));
+        assert_eq!(calls[1].arguments, r#"{"x": 1, "y": 2}"#);
+        assert_eq!(output.normal_text(), "");
+
+        let expected = output.coalesce();
+        for chars in [1, 2, 3, 7] {
+            let mut parser = MistralJsonArrayToolParser::new(&test_tools());
+            let streamed = collect_stream(&mut parser, &split_by_chars(completion, chars));
+            assert_eq!(streamed, expected, "{chars}-character chunks");
+        }
     }
 
     #[test]
@@ -248,5 +380,102 @@ mod tests {
             tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}]": invalid Mistral
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
+    }
+    #[test]
+    fn mistral_required_grammar_constrains_the_call_array() {
+        expect![[r#"
+            tag `[TOOL_CALLS] [` .. `]`
+              tags_with_separator `, ` at_least_one
+                tag `{"name": "get_weather", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "add", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "convert", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "calculate_area", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+                tag `{"name": "update_record", "arguments": ` .. `}`
+                  sequence
+                    json(object)
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+        "#]]
+        .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, true).unwrap());
+    }
+
+    #[test]
+    fn mistral_named_grammar_allows_one_call_with_pinned_arguments() {
+        expect![[r#"
+            tag `[TOOL_CALLS] [` .. `]`
+              tags_with_separator `, ` at_least_one stop_after_first
+                tag `{"name": "add", "arguments": ` .. `}`
+                  sequence
+                    json({ x?: integer, y?: integer })
+                    optional /, "id": "[0-9A-Za-z]{9}"/
+        "#]]
+        .assert_eq(
+            &call_grammar(
+                ToolChoice::function("add"),
+                ToolStrictLevel::Parameter,
+                true,
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn mistral_auto_grammar_triggers_on_the_control_token() {
+        assert_eq!(
+            call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, true),
+            None
+        );
+        expect![[r#"
+            triggered_tags [`[TOOL_CALLS]`] stop_after_first
+              tag `[TOOL_CALLS] [` .. `]`
+                tags_with_separator `, ` at_least_one stop_after_first
+                  tag `{"name": "get_weather", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "add", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "convert", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "calculate_area", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+                  tag `{"name": "update_record", "arguments": ` .. `}`
+                    sequence
+                      json(object)
+                      optional /, "id": "[0-9A-Za-z]{9}"/
+        "#]]
+        .assert_eq(&call_grammar(ToolChoice::auto(), ToolStrictLevel::Function, false).unwrap());
+    }
+
+    #[test]
+    fn mistral_parses_calls_shaped_like_the_grammar() {
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Paris"}}, {"name": "add", "arguments": {"x": 1}}]"#,
+            )
+            .unwrap();
+
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[1].name.as_deref(), Some("add"));
+        assert_eq!(output.calls()[1].arguments, r#"{"x": 1}"#);
     }
 }

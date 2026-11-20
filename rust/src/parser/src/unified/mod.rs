@@ -26,7 +26,9 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningError;
-use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
+use crate::tool::{
+    Tool, ToolCallDelta, ToolCallIdFormat, ToolParserError, ToolParserEvent, ToolParserOutput,
+};
 use crate::utils::SpecialToken;
 
 /// Result alias for unified parser operations.
@@ -263,6 +265,12 @@ pub trait UnifiedParser: Send {
     /// Return the parser-provided ID for a tool call by index, if the model emitted one.
     fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
         None
+    }
+
+    /// The form of tool-call ID the model's chat format accepts, for the IDs
+    /// the caller assigns to calls the model gave none.
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        ToolCallIdFormat::Any
     }
 
     /// Feed one decoded text delta into the parser, appending committed output into `output`.
