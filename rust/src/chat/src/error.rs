@@ -52,6 +52,8 @@ pub enum Error {
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error("{0}")]
+    LocalMedia(#[message] String),
     #[error(
         "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
     )]
@@ -167,6 +169,7 @@ impl Error {
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
+            | Self::LocalMedia(_)
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.

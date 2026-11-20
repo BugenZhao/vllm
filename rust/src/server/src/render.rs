@@ -12,7 +12,7 @@ use tonic::transport::Server as TonicServer;
 use tonic_health::ServingStatus;
 use tonic_health::server::health_reporter;
 use tracing::info;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MediaFetchPolicy, MmLimitPerPrompt};
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
@@ -77,6 +77,8 @@ pub struct RenderConfig {
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
+    /// Where request media may be fetched from.
+    pub media_fetch_policy: MediaFetchPolicy,
     pub tls: Option<TlsConfig>,
 }
 
@@ -206,6 +208,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
             mm_processor_kwargs: config.mm_processor_kwargs.clone(),
+            media_fetch_policy: config.media_fetch_policy.clone(),
         },
     )
     .await
@@ -437,6 +440,7 @@ mod tests {
                 dtype: None,
                 limit_mm_per_prompt: Default::default(),
                 mm_processor_kwargs: Default::default(),
+                media_fetch_policy: Default::default(),
                 tls: None,
             },
             shutdown,
