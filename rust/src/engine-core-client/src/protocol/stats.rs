@@ -376,6 +376,24 @@ pub mod kv_connector {
         pub info: BTreeMap<[String; 4], u64>,
     }
 
+    /// HiSparse connector telemetry. Each field lists the samples since the
+    /// previous update: deltas for the counters, levels for the gauges (the
+    /// last one is current), and host-block residency observations.
+    ///
+    /// Original Python definition: `HiSparseKVConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/hisparse/stats.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct HiSparseStats {
+        pub cache_hits: Vec<u64>,
+        pub cache_misses: Vec<u64>,
+        pub host_to_device_bytes: Vec<u64>,
+        pub host_cache_usage_perc: Vec<f64>,
+        pub pending_page_transfers: Vec<u64>,
+        pub host_block_lifetime_seconds: Vec<f64>,
+        pub host_block_idle_before_evict_seconds: Vec<f64>,
+        pub host_block_reuse_gap_seconds: Vec<f64>,
+    }
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -394,6 +412,8 @@ pub mod kv_connector {
         pub umbp: Option<UmbpStats>,
         #[serde(rename = "SimpleCPUOffloadConnector")]
         pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
+        #[serde(rename = "HiSparseConnector")]
+        pub hisparse: Option<HiSparseStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -416,6 +436,7 @@ pub mod kv_connector {
         Mooncake(MooncakeStats),
         Umbp(UmbpStats),
         SimpleCpuOffload(SimpleCpuOffloadStats),
+        HiSparse(HiSparseStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }
