@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 // The parts of `SchedulerStats` that only metrics read are defined next to
 // the metric families they feed.
 pub use vllm_metrics::{
-    BaseCacheStats, CachedTokensBySource, CudagraphStats, DebugPerfStats, KvCacheEvictionEvent,
-    KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
-    MultiConnectorStats, NixlStats, PerfStats, PrefixCacheStats, SimpleCpuOffloadData,
-    SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
+    BaseCacheStats, CachedTokensBySource, ConfigInfoValue, CudagraphStats, DebugPerfStats,
+    KvCacheEvictionEvent, KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats,
+    MooncakeTransferStats, MultiConnectorStats, NixlStats, OffloadingSample, OffloadingStats,
+    PerfStats, PrefixCacheStats, SimpleCpuOffloadData, SimpleCpuOffloadStats, SpecDecodingStats,
+    UmbpOperationCounts, UmbpStats,
 };
 
 use super::OpaqueValue;
