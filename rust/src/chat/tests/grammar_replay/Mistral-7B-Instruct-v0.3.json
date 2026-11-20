@@ -1,0 +1,299 @@
+{
+  "model_id": "mistralai/Mistral-7B-Instruct-v0.3",
+  "vocab_size": 32768,
+  "all_stop_token_ids": [2],
+  "grammars": [
+    {
+      "grammar": {
+        "format": {
+          "type": "tag",
+          "begin": "[TOOL_CALLS] [",
+          "content": {
+            "type": "tags_with_separator",
+            "tags": [
+              {
+                "type": "tag",
+                "begin": "{\"name\": \"get_weather\", \"arguments\": ",
+                "content": {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "location": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "location"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": []
+                    },
+                    {
+                      "type": "optional",
+                      "content": {
+                        "type": "regex",
+                        "pattern": ", \"id\": \"[0-9A-Za-z]{9}\""
+                      }
+                    }
+                  ]
+                },
+                "end": "}"
+              },
+              {
+                "type": "tag",
+                "begin": "{\"name\": \"add\", \"arguments\": ",
+                "content": {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "y": {
+                            "type": "number"
+                          },
+                          "x": {
+                            "type": "number"
+                          },
+                          "items": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "y",
+                          "x",
+                          "items"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": []
+                    },
+                    {
+                      "type": "optional",
+                      "content": {
+                        "type": "regex",
+                        "pattern": ", \"id\": \"[0-9A-Za-z]{9}\""
+                      }
+                    }
+                  ]
+                },
+                "end": "}"
+              }
+            ],
+            "separator": ", ",
+            "at_least_one": true,
+            "stop_after_first": false
+          },
+          "end": "]"
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "required": {
+          "completion": "[TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}, \"id\": \"a1B2c3D4e\"}, {\"name\": \"add\", \"arguments\": {\"y\": 1.0, \"x\": 2, \"items\": [\"left\", \"right\"]}, \"id\": \"Z9y8X7w6v\"}]",
+          "generation_token_ids": [5, 1501, 7567, 1629, 2032, 1113, 1295, 29498, 1537, 1991, 1316, 1113, 17452, 2032, 10598, 3501, 2032, 1113, 2749, 1044, 26569, 8474, 1113, 1081, 2032, 1113, 29476, 29508, 29528, 29518, 29485, 29538, 29525, 29549, 29474, 8474, 10598, 1629, 2032, 1113, 1756, 1316, 1113, 17452, 2032, 10598, 29492, 2032, 29473, 29508, 29491, 29502, 29493, 1113, 29512, 2032, 29473, 29518, 29493, 1113, 7717, 2032, 8135, 2596, 1316, 1113, 2014, 3010, 1649, 1113, 1081, 2032, 1113, 29596, 29542, 29492, 29551, 29582, 29555, 29495, 29552, 29496, 29507, 10925, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "tag",
+          "begin": "[TOOL_CALLS] [",
+          "content": {
+            "type": "tags_with_separator",
+            "tags": [
+              {
+                "type": "tag",
+                "begin": "{\"name\": \"get_weather\", \"arguments\": ",
+                "content": {
+                  "type": "sequence",
+                  "elements": [
+                    {
+                      "type": "json_schema",
+                      "json_schema": {
+                        "type": "object",
+                        "properties": {
+                          "location": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "location"
+                        ]
+                      },
+                      "style": "json",
+                      "any_order": false,
+                      "max_whitespace_cnt": null,
+                      "excludes": []
+                    },
+                    {
+                      "type": "optional",
+                      "content": {
+                        "type": "regex",
+                        "pattern": ", \"id\": \"[0-9A-Za-z]{9}\""
+                      }
+                    }
+                  ]
+                },
+                "end": "}"
+              }
+            ],
+            "separator": ", ",
+            "at_least_one": true,
+            "stop_after_first": true
+          },
+          "end": "]"
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "named": {
+          "completion": "[TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}, \"id\": \"a1B2c3D4e\"}]",
+          "generation_token_ids": [5, 1501, 7567, 1629, 2032, 1113, 1295, 29498, 1537, 1991, 1316, 1113, 17452, 2032, 10598, 3501, 2032, 1113, 2749, 1044, 26569, 8474, 1113, 1081, 2032, 1113, 29476, 29508, 29528, 29518, 29485, 29538, 29525, 29549, 29474, 29507, 10925, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "or",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "[TOOL_CALLS] [",
+              "content": {
+                "type": "tags_with_separator",
+                "tags": [
+                  {
+                    "type": "tag",
+                    "begin": "{\"name\": \"get_weather\", \"arguments\": ",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "location": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "location"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": []
+                        },
+                        {
+                          "type": "optional",
+                          "content": {
+                            "type": "regex",
+                            "pattern": ", \"id\": \"[0-9A-Za-z]{9}\""
+                          }
+                        }
+                      ]
+                    },
+                    "end": "}"
+                  },
+                  {
+                    "type": "tag",
+                    "begin": "{\"name\": \"add\", \"arguments\": ",
+                    "content": {
+                      "type": "sequence",
+                      "elements": [
+                        {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "y": {
+                                "type": "number"
+                              },
+                              "x": {
+                                "type": "number"
+                              },
+                              "items": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "required": [
+                              "y",
+                              "x",
+                              "items"
+                            ]
+                          },
+                          "style": "json",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": []
+                        },
+                        {
+                          "type": "optional",
+                          "content": {
+                            "type": "regex",
+                            "pattern": ", \"id\": \"[0-9A-Za-z]{9}\""
+                          }
+                        }
+                      ]
+                    },
+                    "end": "}"
+                  }
+                ],
+                "separator": ", ",
+                "at_least_one": true,
+                "stop_after_first": false
+              },
+              "end": "]"
+            },
+            {
+              "type": "json_schema",
+              "json_schema": {
+                "type": "object",
+                "properties": {
+                  "answer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              },
+              "style": "json",
+              "any_order": false,
+              "max_whitespace_cnt": null,
+              "excludes": []
+            }
+          ]
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "auto_schema_calls": {
+          "completion": "[TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Shanghai\"}, \"id\": \"a1B2c3D4e\"}, {\"name\": \"add\", \"arguments\": {\"y\": 1.0, \"x\": 2, \"items\": [\"left\", \"right\"]}, \"id\": \"Z9y8X7w6v\"}]",
+          "generation_token_ids": [5, 1501, 7567, 1629, 2032, 1113, 1295, 29498, 1537, 1991, 1316, 1113, 17452, 2032, 10598, 3501, 2032, 1113, 2749, 1044, 26569, 8474, 1113, 1081, 2032, 1113, 29476, 29508, 29528, 29518, 29485, 29538, 29525, 29549, 29474, 8474, 10598, 1629, 2032, 1113, 1756, 1316, 1113, 17452, 2032, 10598, 29492, 2032, 29473, 29508, 29491, 29502, 29493, 1113, 29512, 2032, 29473, 29518, 29493, 1113, 7717, 2032, 8135, 2596, 1316, 1113, 2014, 3010, 1649, 1113, 1081, 2032, 1113, 29596, 29542, 29492, 29551, 29582, 29555, 29495, 29552, 29496, 29507, 10925, 2]
+        }
+      }
+    }
+  ]
+}
