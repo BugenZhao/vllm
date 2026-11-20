@@ -4,10 +4,12 @@
 //! Validated JSON extractor for automatic request validation.
 //! Variation of https://github.com/lightseekorg/smg/blob/main/crates/protocols/src/validated.rs
 
+use std::borrow::Cow;
+
 use axum::Json;
 use axum::extract::{FromRequest, Request};
 use serde::de::DeserializeOwned;
-use validator::Validate;
+use validator::{Validate, ValidationErrors};
 
 use super::types::Normalizable;
 use crate::error::{ApiError, invalid_request};
@@ -33,10 +35,30 @@ where
 
         data.normalize();
 
-        data.validate()
-            .map_err(|validation_errors| invalid_request!("{}", validation_errors))?;
+        data.validate().map_err(|validation_errors| {
+            invalid_request!(
+                param = error_param(&validation_errors),
+                "{}",
+                validation_errors
+            )
+        })?;
 
         Ok(ValidatedJson(data))
+    }
+}
+
+/// The request field to report as `param`, like Python: the field a field
+/// check failed on. `None` for a schema (cross-field) check, which has no
+/// field, and when several fields failed.
+fn error_param(errors: &ValidationErrors) -> Option<&'static str> {
+    let mut fields = errors.field_errors().into_keys();
+    let field = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    match field {
+        Cow::Borrowed("__all__") | Cow::Owned(_) => None,
+        Cow::Borrowed(field) => Some(field),
     }
 }
 
