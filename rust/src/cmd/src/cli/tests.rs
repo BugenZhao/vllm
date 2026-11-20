@@ -173,6 +173,7 @@ fn render_args_build_config_with_tls() {
         "/tmp/cert.pem",
         "--ssl-keyfile",
         "/tmp/key.pem",
+        "--enable-ssl-refresh",
     ])
     .unwrap();
 
@@ -184,6 +185,7 @@ fn render_args_build_config_with_tls() {
     let tls = config.tls.expect("TLS should be enabled");
     assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
     assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+    assert!(tls.refresh);
 }
 
 #[test]
@@ -341,6 +343,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             ssl_ca_certs: None,
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
+                            enable_ssl_refresh: false,
                         },
                         root_path: None,
                         profiler_config: None,
@@ -1831,6 +1834,27 @@ fn serve_passes_tls_into_config() {
 }
 
 #[test]
+fn serve_enable_ssl_refresh_flag_sets_tls_refresh() {
+    let refresh = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+        config.tls.map(|tls| tls.refresh)
+    };
+
+    assert_eq!(
+        refresh(&["--ssl-certfile", "/tmp/cert.pem", "--enable-ssl-refresh"]),
+        Some(true)
+    );
+    assert_eq!(refresh(&["--ssl-certfile", "/tmp/cert.pem"]), Some(false));
+    // Without TLS there is nothing to refresh, as in Python.
+    assert_eq!(refresh(&["--enable-ssl-refresh"]), None);
+}
+
+#[test]
 fn serve_without_ssl_flags_has_no_tls() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
@@ -2271,12 +2295,12 @@ fn serve_args_reject_unsupported_no_flag_alias() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--no-enable-ssl-refresh",
+        "--no-enable-elastic-ep",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'true' for '--enable-ssl-refresh [<ENABLE_SSL_REFRESH>]': argument is not implemented in Rust frontend yet
+        error: invalid value 'true' for '--enable-elastic-ep [<ENABLE_ELASTIC_EP>]': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -2406,6 +2430,7 @@ fn frontend_args_accept_json() {
                             ssl_ca_certs: None,
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
+                            enable_ssl_refresh: false,
                         },
                         root_path: None,
                         profiler_config: None,
@@ -3494,6 +3519,7 @@ fn serve_args_accept_handshake_aliases() {
                             ssl_ca_certs: None,
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
+                            enable_ssl_refresh: false,
                         },
                         root_path: None,
                         profiler_config: None,

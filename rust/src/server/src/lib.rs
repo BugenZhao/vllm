@@ -18,6 +18,7 @@ mod runtime;
 mod server_info;
 mod state;
 mod tls;
+mod tls_reload;
 #[cfg(test)]
 mod tls_tests;
 mod utils;
@@ -67,6 +68,7 @@ use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
+use crate::tls_reload::ServerTls;
 
 /// How often the server PINGs an idle gRPC connection to reap a dead peer;
 /// tonic enables no keepalive by default. 2h matches the gRPC-core default.
@@ -239,13 +241,15 @@ where
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
-    // before the (potentially long) engine handshake.
-    let tls_config = config
+    // before the (potentially long) engine handshake. gRPC uses the same TLS
+    // material but its own context (ALPN h2).
+    let server_tls = config
         .tls
         .as_ref()
-        .map(tls::build_server_config)
+        .map(|tls| ServerTls::build(tls, config.grpc_listener_mode.is_some()))
         .transpose()
         .context("invalid TLS configuration")?;
+    let http_cell = server_tls.as_ref().map(|tls| tls.http.clone());
 
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
@@ -274,13 +278,7 @@ where
             .await
             .with_context(|| format!("failed to bind gRPC listener for {grpc_listener_mode:?}"))?;
         let addr = grpc_listener.local_addr_display()?;
-        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
-        let grpc_tls = config
-            .tls
-            .as_ref()
-            .map(tls::build_grpc_server_config)
-            .transpose()
-            .context("invalid gRPC TLS configuration")?;
+        let grpc_cell = server_tls.as_ref().and_then(|tls| tls.grpc.clone());
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
@@ -303,16 +301,12 @@ where
             .add_service(control_service)
             .add_service(inference_service)
             .add_service(render_service);
-        Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
+        Some((addr, grpc_listener, svc, grpc_cell, health_monitor))
     } else {
         None
     };
 
-    let scheme = if tls_config.is_some() {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = if http_cell.is_some() { "https" } else { "http" };
     let model = model.as_str();
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
@@ -366,8 +360,8 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let listener = match tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
+            let listener = match http_cell {
+                Some(cell) => MaybeTlsListener::tls(listener, cell),
                 None => MaybeTlsListener::plain(listener),
             };
             let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
@@ -397,15 +391,15 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((addr, grpc_listener, svc, grpc_tls, health_monitor)) = grpc_setup else {
+            let Some((addr, grpc_listener, svc, grpc_cell, health_monitor)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let tls = grpc_tls.is_some();
-            let incoming = match grpc_tls {
-                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
+            let tls = grpc_cell.is_some();
+            let incoming = match grpc_cell {
+                Some(cell) => MaybeTlsListener::tls(grpc_listener, cell),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
             let server = health_monitor.serve(shutdown, force_shutdown.cancelled(), |stop| {

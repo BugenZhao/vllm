@@ -250,6 +250,9 @@ pub struct TlsConfig {
     /// OpenSSL cipher string for TLS 1.2 and below, mirroring Python's
     /// `ssl.set_ciphers`. `None` keeps the forward-secret AEAD default.
     pub ciphers: Option<String>,
+    /// Reload the certificate, key and CA files when they change, without a
+    /// restart (`--enable-ssl-refresh`).
+    pub refresh: bool,
 }
 
 impl TlsConfig {

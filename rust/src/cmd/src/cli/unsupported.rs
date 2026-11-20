@@ -383,15 +383,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
 
-    /// Refresh SSL Context when SSL certificate files change
-    #[arg(
-        long,
-        visible_alias = "no-enable-ssl-refresh",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_ssl_refresh: Option<Unsupported>,
-
     /// Additional ASGI middleware to apply to the app. We accept multiple
     /// --middleware arguments. The value should be an import path. If a
     /// function is provided, vLLM will add it to the server using

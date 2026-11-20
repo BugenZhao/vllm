@@ -28,7 +28,7 @@ use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
     listener::{Listener, MaybeTlsListener},
-    tls,
+    tls_reload::ServerTls,
 };
 
 /// Configuration for the engine-free text rendering server.
@@ -257,19 +257,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
 /// to an inference engine.
 pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> Result<()> {
     config.validate().context("invalid render server configuration")?;
-    let tls_config = config
+    // gRPC uses the same TLS material but its own context (ALPN h2).
+    let server_tls = config
         .tls
         .as_ref()
-        .map(tls::build_server_config)
+        .map(|tls| ServerTls::build(tls, config.grpc_port.is_some()))
         .transpose()
         .context("invalid TLS configuration")?;
-    // gRPC reuses the HTTP TLS config plus ALPN h2.
-    let grpc_tls_config = match (config.grpc_port, &config.tls) {
-        (Some(_), Some(tls)) => {
-            Some(tls::build_grpc_server_config(tls).context("invalid gRPC TLS configuration")?)
-        }
-        _ => None,
-    };
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -282,13 +276,13 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .await
         .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
     let address = listener.local_addr_display()?;
-    let scheme = if tls_config.is_some() {
+    let scheme = if server_tls.is_some() {
         "https"
     } else {
         "http"
     };
-    let listener = match tls_config {
-        Some(context) => MaybeTlsListener::tls(listener, context),
+    let listener = match &server_tls {
+        Some(tls) => MaybeTlsListener::tls(listener, tls.http.clone()),
         None => MaybeTlsListener::plain(listener),
     };
     let grpc_listener = match config.grpc_port {
@@ -301,8 +295,8 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
                 .await
                 .with_context(|| format!("failed to bind gRPC {}:{port}", config.host))?;
             let address = listener.local_addr_display()?;
-            let listener = match grpc_tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
+            let listener = match server_tls.as_ref().and_then(|tls| tls.grpc.clone()) {
+                Some(cell) => MaybeTlsListener::tls(listener, cell),
                 None => MaybeTlsListener::plain(listener),
             };
             Some((address, listener))
