@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory};
 use serde_json::{Map, Value};
 
+use self::config_file::load_config_file;
 use crate::data_parallel::DataParallelTopology;
 use crate::{ManagedEngineConfig, allocate_handshake_port};
+
+mod config_file;
 
 /// Managed Python headless-engine CLI arguments.
 #[derive(Debug, Clone, Args, PartialEq, Eq)]
@@ -232,39 +235,85 @@ fn repartition_real_managed_engine_args(
     args: &[OsString],
     command: &clap::Command,
 ) -> Result<Vec<OsString>, clap::Error> {
-    let Some(model) = args.first() else {
+    let Some(first) = args.first() else {
         return Ok(args.to_vec());
     };
-
-    let model = model.to_string_lossy();
-    if is_help_flag(&model) {
+    if is_help_flag(&first.to_string_lossy()) {
         return Ok(args.to_vec());
     }
-    if model == "--" || is_option_like(&model) {
-        return Err(build_missing_model_error(command));
-    }
+
+    let (front_args, explicit_passthrough, had_separator) = split_managed_engine_args(args);
+    let config = load_config_file(front_args, command)?;
+    let (model, cli_args) = match front_args.split_first() {
+        Some((model, rest)) if !is_option_like(&model.to_string_lossy()) => (model.clone(), rest),
+        _ => (
+            config.model.ok_or_else(|| build_missing_model_error(command))?,
+            front_args,
+        ),
+    };
 
     let (long_flags, short_flags) = collect_option_names(command);
-    let (front_args, explicit_passthrough, had_separator) = split_managed_engine_args(&args[1..]);
-    let normalized_front_args = merge_dotted_frontend_args(
-        normalize_python_arg_aliases(front_args),
+    let [config_args, cli_args] = merge_dotted_frontend_args(
+        [
+            normalize_python_arg_aliases(&config.args),
+            normalize_python_arg_aliases(cli_args),
+        ],
         &long_flags,
         command,
     )?;
+    let (config_frontend_chunks, config_python_args) =
+        partition_args(config_args, &long_flags, &short_flags);
+    let (frontend_chunks, python_args) = partition_args(cli_args, &long_flags, &short_flags);
 
+    // Command-line options take precedence over the config file. Python
+    // places the config's options first and argparse keeps the last value;
+    // clap rejects a repeated option, so drop the overridden ones here. The
+    // managed engine's options keep that order for Python to resolve.
+    let overridden: HashSet<_> = frontend_chunks
+        .iter()
+        .filter_map(|chunk| frontend_arg(chunk, command))
+        .map(clap::Arg::get_id)
+        .collect();
+    let config_frontend_chunks = config_frontend_chunks.into_iter().filter(|chunk| {
+        frontend_arg(chunk, command).is_none_or(|arg| !overridden.contains(arg.get_id()))
+    });
+
+    let mut repartitioned = vec![model];
+    repartitioned.extend(config_frontend_chunks.chain(frontend_chunks).flatten());
+    if had_separator
+        || !config_python_args.is_empty()
+        || !python_args.is_empty()
+        || !explicit_passthrough.is_empty()
+    {
+        repartitioned.push("--".into());
+        repartitioned.extend(config_python_args);
+        repartitioned.extend(python_args);
+        repartitioned.extend(explicit_passthrough.iter().cloned());
+    }
+
+    Ok(repartitioned)
+}
+
+/// Split options into the chunks (an option and its values) `vllm-rs`
+/// declares and the arguments forwarded to the managed engine.
+fn partition_args(
+    args: Vec<OsString>,
+    long_flags: &HashSet<String>,
+    short_flags: &HashSet<char>,
+) -> (Vec<Vec<OsString>>, Vec<OsString>) {
     let mut frontend_chunks = Vec::new();
-    let mut python_chunks = Vec::new();
+    let mut python_args = Vec::new();
     let mut current_chunk = Vec::new();
 
-    for arg in normalized_front_args {
+    for arg in args {
         let text = arg.to_string_lossy();
         if is_option_like(&text) && !current_chunk.is_empty() {
             push_chunk(
                 &mut frontend_chunks,
-                &mut python_chunks,
+                &mut python_args,
                 std::mem::take(&mut current_chunk),
-                &long_flags,
-                &short_flags,
+                long_flags,
+                short_flags,
             );
         }
         current_chunk.push(arg);
@@ -272,22 +321,34 @@ fn repartition_real_managed_engine_args(
     if !current_chunk.is_empty() {
         push_chunk(
             &mut frontend_chunks,
-            &mut python_chunks,
+            &mut python_args,
             current_chunk,
-            &long_flags,
-            &short_flags,
+            long_flags,
+            short_flags,
         );
     }
 
-    let mut repartitioned = vec![args[0].clone()];
-    repartitioned.extend(frontend_chunks);
-    if had_separator || !python_chunks.is_empty() || !explicit_passthrough.is_empty() {
-        repartitioned.push("--".into());
-        repartitioned.extend(python_chunks);
-        repartitioned.extend(explicit_passthrough.iter().cloned());
-    }
+    (frontend_chunks, python_args)
+}
 
-    Ok(repartitioned)
+/// The declared argument with this long name or visible alias.
+fn find_long_arg<'a>(command: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+    command
+        .get_arguments()
+        .find(|arg| arg.get_long_and_visible_aliases().is_some_and(|names| names.contains(&name)))
+}
+
+/// The declared argument a frontend chunk sets.
+fn frontend_arg<'a>(chunk: &[OsString], command: &'a clap::Command) -> Option<&'a clap::Arg> {
+    let head = chunk.first()?.to_string_lossy();
+    if let Some(rest) = head.strip_prefix("--") {
+        return find_long_arg(command, rest.split_once('=').map_or(rest, |(name, _)| name));
+    }
+    let short = head.strip_prefix('-')?.chars().next()?;
+    command.get_arguments().find(|arg| {
+        arg.get_short_and_visible_aliases()
+            .is_some_and(|shorts| shorts.contains(&short))
+    })
 }
 
 fn matches_subcommand(args: &[OsString], subcommand: &str) -> bool {
@@ -343,47 +404,57 @@ fn find_python_multi_char_alias(arg: &str) -> Option<&'static str> {
 /// arguments. Do the same for flags `vllm-rs serve` declares, so their dotted
 /// forms reach clap instead of only the managed engine; the dotted forms of
 /// every other flag go to Python unchanged, which expands them itself.
-fn merge_dotted_frontend_args(
-    args: Vec<OsString>,
+///
+/// Python merges the dotted forms of the whole argv, config file included, so
+/// the sources (the config file's options, then the command line's) merge
+/// together here too; each merged option goes to the last source that set it.
+fn merge_dotted_frontend_args<const N: usize>(
+    sources: [Vec<OsString>; N],
     long_flags: &HashSet<String>,
     command: &clap::Command,
-) -> Result<Vec<OsString>, clap::Error> {
+) -> Result<[Vec<OsString>; N], clap::Error> {
     let mut merged = Map::new();
-    let mut kept = Vec::with_capacity(args.len());
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        let text = arg.to_string_lossy().into_owned();
-        let Some((flag, path, inline_value)) =
-            split_dotted_flag(&text).filter(|(flag, ..)| long_flags.contains(*flag))
-        else {
-            kept.push(arg);
-            continue;
-        };
-        let value = match inline_value {
-            Some(value) => value.to_owned(),
-            None => {
-                args.next().map(|value| value.to_string_lossy().into_owned()).ok_or_else(|| {
-                    command.clone().error(
-                        ErrorKind::InvalidValue,
-                        format!("a value is required for '{text}'"),
-                    )
-                })?
-            }
-        };
-        // `--<flag>.<key>+ a,b` appends list elements.
-        let (path, value) = match path.strip_suffix('+') {
-            Some(path) => (path, Value::from(value.split(',').collect::<Vec<_>>())),
-            None => (path, parse_dotted_value(&value)),
-        };
-        let nested = path.rsplit('.').fold(value, |value, key| {
-            Value::Object(Map::from_iter([(key.to_owned(), value)]))
-        });
-        let existing = merged.entry(flag).or_insert_with(|| Value::Object(Map::new()));
-        merge_json(existing, nested);
+    let mut last_source = HashMap::new();
+    let mut kept: [Vec<OsString>; N] =
+        std::array::from_fn(|source| Vec::with_capacity(sources[source].len()));
+    for (source, args) in sources.into_iter().enumerate() {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let text = arg.to_string_lossy().into_owned();
+            let Some((flag, path, inline_value)) =
+                split_dotted_flag(&text).filter(|(flag, ..)| long_flags.contains(*flag))
+            else {
+                kept[source].push(arg);
+                continue;
+            };
+            let value = match inline_value {
+                Some(value) => value.to_owned(),
+                None => args.next().map(|value| value.to_string_lossy().into_owned()).ok_or_else(
+                    || {
+                        command.clone().error(
+                            ErrorKind::InvalidValue,
+                            format!("a value is required for '{text}'"),
+                        )
+                    },
+                )?,
+            };
+            // `--<flag>.<key>+ a,b` appends list elements.
+            let (path, value) = match path.strip_suffix('+') {
+                Some(path) => (path, Value::from(value.split(',').collect::<Vec<_>>())),
+                None => (path, parse_dotted_value(&value)),
+            };
+            let nested = path.rsplit('.').fold(value, |value, key| {
+                Value::Object(Map::from_iter([(key.to_owned(), value)]))
+            });
+            let existing = merged.entry(flag).or_insert_with(|| Value::Object(Map::new()));
+            merge_json(existing, nested);
+            last_source.insert(flag.to_owned(), source);
+        }
     }
     for (flag, value) in merged {
-        kept.push(format!("--{flag}").into());
-        kept.push(value.to_string().into());
+        let source = last_source[&flag];
+        kept[source].push(format!("--{flag}").into());
+        kept[source].push(value.to_string().into());
     }
     Ok(kept)
 }
@@ -462,16 +533,16 @@ fn merge_json(original: &mut Value, update: Value) {
 }
 
 fn push_chunk(
-    frontend_chunks: &mut Vec<OsString>,
-    python_chunks: &mut Vec<OsString>,
+    frontend_chunks: &mut Vec<Vec<OsString>>,
+    python_args: &mut Vec<OsString>,
     chunk: Vec<OsString>,
     long_flags: &HashSet<String>,
     short_flags: &HashSet<char>,
 ) {
     if chunk_head_is_frontend_owned(&chunk, long_flags, short_flags) {
-        frontend_chunks.extend(chunk);
+        frontend_chunks.push(chunk);
     } else {
-        python_chunks.extend(chunk);
+        python_args.extend(chunk);
     }
 }
 

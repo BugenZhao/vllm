@@ -1517,6 +1517,15 @@ pub struct ServeArgs {
     #[arg(long)]
     pub grpc_port: Option<u16>,
 
+    /// Read CLI options from a config file. Must be a YAML with the following
+    /// options: https://docs.vllm.ai/en/latest/configuration/serve_args.html
+    ///
+    /// Options given on the command line take precedence. The file is
+    /// expanded into command-line options before parsing (see
+    /// `repartition_managed_engine_args`), so this field only records it.
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
     #[arg(long, hide = true, env = "VLLM_RS_DEBUG_CLI")]
