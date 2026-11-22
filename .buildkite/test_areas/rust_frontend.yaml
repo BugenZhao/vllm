@@ -29,6 +29,7 @@ steps:
   - tests/entrypoints/openai/completion/test_token_in_token_out.py
   - tests/entrypoints/openai/test_chunked_prompt.py
   - tests/entrypoints/openai/completion/test_prompt_validation.py
+  - tests/entrypoints/openai/chat_completion/test_batched_chat_completions.py
   - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
   - tests/entrypoints/openai/test_return_tokens_as_ids.py
@@ -55,6 +56,8 @@ steps:
   - pytest -v -s entrypoints/openai/completion/test_token_in_token_out.py
   - pytest -v -s entrypoints/openai/test_chunked_prompt.py
   - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
+  # The Rust frontend does not serve /v1/chat/completions/batch.
+  - pytest -v -s entrypoints/openai/chat_completion/test_batched_chat_completions.py -k "test_inference_invalid_model_error_is_bounded and not batch-chat"
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
@@ -92,6 +95,7 @@ steps:
       - tests/entrypoints/openai/completion/test_token_in_token_out.py
       - tests/entrypoints/openai/test_chunked_prompt.py
       - tests/entrypoints/openai/completion/test_prompt_validation.py
+      - tests/entrypoints/openai/chat_completion/test_batched_chat_completions.py
       - tests/entrypoints/launchers/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/openai/test_return_tokens_as_ids.py
