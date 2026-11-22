@@ -3,17 +3,21 @@
 
 use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
-use xgrammar_structural_tag::format::{Format, TagFormat};
-use xgrammar_structural_tag::tool::function_parameters;
+use xgrammar_structural_tag::NormalizedToolChoice;
+use xgrammar_structural_tag::format::{Format, TagFormat, TriggeredTagsFormat};
+use xgrammar_structural_tag::tool::{FunctionToolParam, function_parameters};
 
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::output_grammar::{self, OutputGrammarContext};
 use crate::schema::JsonType;
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
+/// The call list's opener.
+const CALLS_OPEN: &str = "functools[";
+
 const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Phi4Mini",
-    start_marker: "functools[",
+    start_marker: CALLS_OPEN,
     framed_start_marker: None,
     end_marker: "]",
     marker_whitespace: JsonToolCallWhitespace::Optional,
@@ -63,43 +67,44 @@ impl ToolParser for Phi4MiniJsonToolParser {
         self.inner.parse_into(chunk, output)
     }
 
-    /// Build the `functools[..]` call list for a tool choice that obliges a call.
-    ///
-    /// `auto` builds no grammar.
+    /// Constrain calls to the `functools[..]` list this parser reads:
+    /// `{"name": ..., "arguments": ...}` objects joined by `, `, as the bundled
+    /// chat template asks for them. Python instead guides `required` to a bare
+    /// JSON array of `{"name": ..., "parameters": ...}` objects and a named
+    /// choice to the arguments object, both read by its generic extraction
+    /// rather than by this parser.
     fn build_call_format(
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<Format>> {
-        let Some(tools) = output_grammar::normalize_tool_choice(ctx)? else {
+        let Some(NormalizedToolChoice {
+            function_tools,
+            choice,
+            ..
+        }) = output_grammar::normalize_tool_choice(ctx)?
+        else {
             return Ok(None);
         };
-        if !tools.choice.requires_tool_call() {
-            return Ok(None);
-        }
-
-        let calls = tools
-            .function_tools
-            .iter()
-            .map(|tool| {
-                // The parser reads arguments only as an object, so free
-                // arguments still have to be one.
-                let arguments = match function_parameters(&tool.function) {
-                    Value::Bool(true) => JsonType::Object.any_schema(),
-                    schema => schema,
-                };
-                TagFormat::new(
-                    format!(r#"{{"name": "{}", "arguments": "#, tool.function.name),
-                    Format::json_schema(arguments),
-                    "}",
-                )
-            })
-            .collect();
-        let single_call = tools.choice.is_forced() || !ctx.parallel_tool_calls;
-        Ok(Some(Format::sequence(vec![
-            Format::const_string("functools["),
-            Format::tags_with_separator(calls, ", ", true, single_call),
-            Format::const_string("]"),
-        ])))
+        let single_call = choice.is_forced() || !ctx.parallel_tool_calls;
+        let calls = TagFormat::new(
+            CALLS_OPEN,
+            Format::tags_with_separator(
+                function_tools.iter().map(call_tag).collect(),
+                ", ",
+                true,
+                single_call,
+            ),
+            "]",
+        );
+        Ok(Some(if choice.requires_tool_call() {
+            Format::Tag(calls)
+        } else {
+            // The template asks for all calls in a single list, so free text
+            // runs until the list opens and the output ends with it.
+            Format::TriggeredTags(
+                TriggeredTagsFormat::new(&[CALLS_OPEN], vec![calls]).with_stop_after_first(true),
+            )
+        }))
     }
 
     /// Flush any buffered partial state at end of stream.
@@ -113,11 +118,27 @@ impl ToolParser for Phi4MiniJsonToolParser {
     }
 }
 
+/// One call object: the tool's name, then arguments under its parameter schema.
+fn call_tag(tool: &FunctionToolParam) -> TagFormat {
+    let name = Value::from(tool.function.name.as_str());
+    let arguments = match function_parameters(&tool.function) {
+        // The parser reads arguments only as an object, so free arguments
+        // still have to be one.
+        Value::Bool(true) => JsonType::Object.any_schema(),
+        schema => schema,
+    };
+    TagFormat::new(
+        format!(r#"{{"name": {name}, "arguments": "#),
+        Format::json_schema(arguments),
+        "}",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
-    use xgrammar_structural_tag::ToolChoice;
+    use xgrammar_structural_tag::{AllowedToolRef, AllowedToolsMode, ToolChoice};
 
     use super::Phi4MiniJsonToolParser;
     use crate::output_grammar::test_utils::outline;
@@ -198,44 +219,92 @@ mod tests {
         // list. A non-strict tool's free arguments must still be an object,
         // the only shape the parser reads.
         expect![[r#"
-            sequence
-              `functools[`
+            tag `functools[` .. `]`
               tags_with_separator `, ` at_least_one
                 tag `{"name": "get_weather", "arguments": ` json({ ... }) `}`
                 tag `{"name": "add", "arguments": ` json({ ... }) `}`
-              `]`
         "#]]
         .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, true).unwrap());
         // A named choice allows one call, as does `parallel_tool_calls: false`.
         expect![[r#"
-            sequence
-              `functools[`
+            tag `functools[` .. `]`
               tags_with_separator `, ` at_least_one stop_after_first
                 tag `{"name": "add", "arguments": ` json({ ... }) `}`
-              `]`
         "#]]
         .assert_eq(
             &call_grammar(ToolChoice::function("add"), ToolStrictLevel::Auto, true).unwrap(),
         );
         expect![[r#"
-            sequence
-              `functools[`
+            tag `functools[` .. `]`
               tags_with_separator `, ` at_least_one stop_after_first
                 tag `{"name": "get_weather", "arguments": ` json({ ... }) `}`
                 tag `{"name": "add", "arguments": ` json({ ... }) `}`
-              `]`
         "#]]
         .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, false).unwrap());
 
-        // `auto` builds no grammar.
+        // `auto` builds no grammar unless a call constraint applies.
         assert_eq!(
             call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, true),
             None
         );
-        assert_eq!(
-            call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, false),
-            None
+        // Pinned argument schemas (strict tools, or `--tool-strict-level
+        // parameter` as here): free text until the list opens, then calls under
+        // the tool schemas, and the output ends.
+        expect![[r#"
+            triggered_tags [`functools[`] stop_after_first
+              tag `functools[` .. `]`
+                tags_with_separator `, ` at_least_one
+                  tag `{"name": "get_weather", "arguments": ` json({ location?: string, city?: string, state?: string, unit?: string, date?: string, days?: integer }) `}`
+                  tag `{"name": "add", "arguments": ` json({ x?: integer, y?: integer }) `}`
+        "#]].assert_eq(
+            &call_grammar(ToolChoice::auto(), ToolStrictLevel::Parameter, true).unwrap(),
         );
+        // `parallel_tool_calls: false` caps `auto` at one call.
+        expect![[r#"
+            triggered_tags [`functools[`] stop_after_first
+              tag `functools[` .. `]`
+                tags_with_separator `, ` at_least_one stop_after_first
+                  tag `{"name": "get_weather", "arguments": ` json({ ... }) `}`
+                  tag `{"name": "add", "arguments": ` json({ ... }) `}`
+        "#]]
+        .assert_eq(&call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, false).unwrap());
+        // `allowed_tools` in `auto` mode admits calls to the allowed tools only.
+        let allowed_auto = ToolChoice::allowed_tools(
+            AllowedToolsMode::Auto,
+            vec![AllowedToolRef::function("add")],
+        );
+        expect![[r#"
+            triggered_tags [`functools[`] stop_after_first
+              tag `functools[` .. `]`
+                tags_with_separator `, ` at_least_one
+                  tag `{"name": "add", "arguments": ` json({ ... }) `}`
+        "#]]
+        .assert_eq(&call_grammar(allowed_auto, ToolStrictLevel::Auto, true).unwrap());
+    }
+
+    /// Tool names are written into the grammar as JSON strings, so a name that
+    /// needs escaping still yields the call object the parser reads.
+    #[test]
+    fn phi4mini_call_grammar_escapes_tool_names() {
+        let mut tool = test_tools().remove(1);
+        tool.name = r#"say "hi""#.to_string();
+        let tools = vec![tool];
+        let format = Phi4MiniJsonToolParser::new(&tools)
+            .build_visible_format(&OutputGrammarContext {
+                tools: &tools,
+                tool_choice: &ToolChoice::required(),
+                tool_strict_level: ToolStrictLevel::Auto,
+                parallel_tool_calls: true,
+                answer: None,
+            })
+            .unwrap()
+            .unwrap();
+        expect![[r#"
+            tag `functools[` .. `]`
+              tags_with_separator `, ` at_least_one
+                tag `{"name": "say \\"hi\\"", "arguments": ` json({ ... }) `}`
+        "#]]
+        .assert_eq(&outline(&format));
     }
 
     #[test]
