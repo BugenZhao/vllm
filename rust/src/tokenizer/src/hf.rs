@@ -998,6 +998,13 @@ mod tests {
             ids.extend(std::iter::repeat_n(EOS_ID, count));
             ids
         };
+        // Ids past the tokenizer vocabulary, which a larger model vocabulary
+        // still admits in a prompt.
+        let with_unknown = |bytes: &[u8]| {
+            let mut ids = ids(bytes);
+            ids.extend([10_000, 10_001, 10_002]);
+            ids
+        };
         // 鑫 is E9 91 AB, 龘 is E9 BE 98.
         let cases = [
             (ids(b"Hi \xE9\x91"), ids(b"\xAB\xE9\xBE\x98!"), "鑫龘!"),
@@ -1005,6 +1012,12 @@ mod tests {
             (ids(b"Hi \xE9"), ids(b"\x91\xAB!"), "鑫!"),
             // Skipped special tokens after the partial bytes decode to nothing.
             (with_eos(b"Hi \xE9", 3), ids(b"\x91\xAB!"), "鑫!"),
+            // So do ids the tokenizer cannot map.
+            (
+                with_unknown(b"Hi \xE9\x91"),
+                ids(b"\xAB\xE9\xBE\x98!"),
+                "鑫龘!",
+            ),
         ];
         let tokenizers = [
             ("hf", HuggingFaceTokenizer::new_hf(&path).expect("load hf")),

@@ -77,7 +77,7 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 /// A UTF-8 character has at most 3 bytes before its last, and every token
-/// other than a skipped special token holds at least one byte.
+/// that decodes to text holds at least one byte.
 const MAX_PARTIAL_CHAR_TOKENS: usize = 3;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
@@ -181,7 +181,12 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
         let mut steps = 0;
         while end > 0 && steps < MAX_PARTIAL_CHAR_TOKENS {
             end -= 1;
-            if self.skip_special_tokens && self.tokenizer.is_special_id(self.ids[end]) {
+            // Skipped special tokens and ids the tokenizer cannot map decode
+            // to nothing, so they hold no byte of the character.
+            let id = self.ids[end];
+            if (self.skip_special_tokens && self.tokenizer.is_special_id(id))
+                || self.tokenizer.id_to_token(id).is_none()
+            {
                 continue;
             }
             steps += 1;
