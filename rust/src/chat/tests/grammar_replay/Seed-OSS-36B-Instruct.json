@@ -6,6 +6,203 @@
     {
       "grammar": {
         "format": {
+          "type": "triggered_tags",
+          "triggers": [
+            "<seed:tool_call>"
+          ],
+          "tags": [
+            {
+              "type": "tag",
+              "begin": "<seed:tool_call>\n<function=get_weather>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function>\n</seed:tool_call>"
+            },
+            {
+              "type": "tag",
+              "begin": "<seed:tool_call>\n<function=add>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "y": {
+                      "type": "number"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "y",
+                    "x",
+                    "items"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function>\n</seed:tool_call>"
+            }
+          ],
+          "at_least_one": false,
+          "stop_after_first": false,
+          "excludes": []
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "auto": {
+          "completion": "<seed:think>Need call the weather and add tools.</seed:think>\nI will call the tools.\n\n<seed:tool_call>\n<function=get_weather>\n<parameter=location>Shanghai</parameter>\n</function>\n</seed:tool_call>\n<seed:tool_call>\n<function=add>\n<parameter=y>1.0</parameter>\n<parameter=x>2</parameter>\n<parameter=items>[\"left\", \"right\"]</parameter>\n</function>\n</seed:tool_call>",
+          "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 168, 961, 2434, 405, 9633, 141, 734, 7, 326, 155, 4823, 156, 1134, 190, 42922, 157, 326, 155, 31764, 156, 25665, 157, 87555, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 326, 7, 326, 155, 4823, 156, 2325, 157, 326, 155, 31764, 113021, 157, 144, 141, 143, 959, 31764, 157, 326, 155, 31764, 95424, 157, 145, 959, 31764, 157, 326, 155, 31764, 156, 12376, 157, 7257, 5162, 1581, 696, 3405, 7935, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "tags_with_separator",
+          "tags": [
+            {
+              "type": "tag",
+              "begin": "\n<seed:tool_call>\n<function=get_weather>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function>\n</seed:tool_call>"
+            },
+            {
+              "type": "tag",
+              "begin": "\n<seed:tool_call>\n<function=add>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "y": {
+                      "type": "number"
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "y",
+                    "x",
+                    "items"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function>\n</seed:tool_call>"
+            }
+          ],
+          "separator": "",
+          "at_least_one": true,
+          "stop_after_first": false
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "required": {
+          "completion": "<seed:think>Need call the weather and add tools.</seed:think>\n<seed:tool_call>\n<function=get_weather>\n<parameter=location>Shanghai</parameter>\n</function>\n</seed:tool_call>\n<seed:tool_call>\n<function=add>\n<parameter=y>1.0</parameter>\n<parameter=x>2</parameter>\n<parameter=items>[\"left\", \"right\"]</parameter>\n</function>\n</seed:tool_call>",
+          "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 7, 326, 155, 4823, 156, 1134, 190, 42922, 157, 326, 155, 31764, 156, 25665, 157, 87555, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 326, 7, 326, 155, 4823, 156, 2325, 157, 326, 155, 31764, 113021, 157, 144, 141, 143, 959, 31764, 157, 326, 155, 31764, 95424, 157, 145, 959, 31764, 157, 326, 155, 31764, 156, 12376, 157, 7257, 5162, 1581, 696, 3405, 7935, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "tags_with_separator",
+          "tags": [
+            {
+              "type": "tag",
+              "begin": "\n<seed:tool_call>\n<function=get_weather>\n",
+              "content": {
+                "type": "json_schema",
+                "json_schema": {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "location"
+                  ]
+                },
+                "style": "qwen_xml",
+                "any_order": false,
+                "max_whitespace_cnt": null,
+                "excludes": []
+              },
+              "end": "</function>\n</seed:tool_call>"
+            }
+          ],
+          "separator": "",
+          "at_least_one": true,
+          "stop_after_first": true
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "named": {
+          "completion": "<seed:think>Need call the weather and add tools.</seed:think>\n<seed:tool_call>\n<function=get_weather>\n<parameter=location>Shanghai</parameter>\n</function>\n</seed:tool_call>",
+          "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 7, 326, 155, 4823, 156, 1134, 190, 42922, 157, 326, 155, 31764, 156, 25665, 157, 87555, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
           "type": "json_schema",
           "json_schema": {
             "type": "object",
@@ -29,10 +226,109 @@
         "none_schema": {
           "completion": "<seed:think>Need call the weather and add tools.</seed:think>\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 13059, 35733, 15301, 40841, 2313, 16320, 2]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "or",
+          "elements": [
+            {
+              "type": "tags_with_separator",
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "\n<seed:tool_call>\n<function=get_weather>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "</function>\n</seed:tool_call>"
+                },
+                {
+                  "type": "tag",
+                  "begin": "\n<seed:tool_call>\n<function=add>\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "y": {
+                          "type": "number"
+                        },
+                        "x": {
+                          "type": "number"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "y",
+                        "x",
+                        "items"
+                      ]
+                    },
+                    "style": "qwen_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "</function>\n</seed:tool_call>"
+                }
+              ],
+              "separator": "",
+              "at_least_one": true,
+              "stop_after_first": false
+            },
+            {
+              "type": "json_schema",
+              "json_schema": {
+                "type": "object",
+                "properties": {
+                  "answer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              },
+              "style": "json",
+              "any_order": false,
+              "max_whitespace_cnt": null,
+              "excludes": []
+            }
+          ]
         },
+        "coverage": "final_output_only"
+      },
+      "generations": {
         "auto_schema_content": {
           "completion": "<seed:think>Need call the weather and add tools.</seed:think>\n{\"answer\":\"sunny\"}",
           "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 13059, 35733, 15301, 40841, 2313, 16320, 2]
+        },
+        "auto_schema_calls": {
+          "completion": "<seed:think>Need call the weather and add tools.</seed:think>\n<seed:tool_call>\n<function=get_weather>\n<parameter=location>Shanghai</parameter>\n</function>\n</seed:tool_call>\n<seed:tool_call>\n<function=add>\n<parameter=y>1.0</parameter>\n<parameter=x>2</parameter>\n<parameter=items>[\"left\", \"right\"]</parameter>\n</function>\n</seed:tool_call>",
+          "generation_token_ids": [3, 40143, 2434, 405, 11785, 440, 1731, 9633, 141, 4, 326, 7, 326, 155, 4823, 156, 1134, 190, 42922, 157, 326, 155, 31764, 156, 25665, 157, 87555, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 326, 7, 326, 155, 4823, 156, 2325, 157, 326, 155, 31764, 113021, 157, 144, 141, 143, 959, 31764, 157, 326, 155, 31764, 95424, 157, 145, 959, 31764, 157, 326, 155, 31764, 156, 12376, 157, 7257, 5162, 1581, 696, 3405, 7935, 959, 31764, 157, 326, 959, 4823, 157, 326, 8, 2]
         }
       }
     }

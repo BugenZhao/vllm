@@ -512,12 +512,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_style: JsonStyle::Spaced,
             sort_json_keys: false,
-            // The Seed-OSS tool parser builds no tool grammar, so the schema
-            // excludes the calls.
-            with_schema: &[
-                ToolCallMixVariant::NoneSchema,
-                ToolCallMixVariant::AutoSchemaContent,
-            ],
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
