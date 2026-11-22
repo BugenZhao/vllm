@@ -40,6 +40,10 @@ pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
 pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
 
+/// Default upper bound on the prompts in one completions request, like
+/// Python's `VLLM_MAX_COMPLETION_PROMPTS`.
+pub const DEFAULT_MAX_COMPLETION_PROMPTS: i64 = 1024;
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -109,6 +113,10 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// Upper bound on the prompts in one completions request
+    /// (`VLLM_MAX_COMPLETION_PROMPTS`, default 1024).
+    #[educe(Default(expression = DEFAULT_MAX_COMPLETION_PROMPTS))]
+    pub max_completion_prompts: i64,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and

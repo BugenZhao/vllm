@@ -2845,37 +2845,6 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
-/// Like Python's `VLLM_MAX_COMPLETION_PROMPTS` check, a batch of more than
-/// 1024 prompts is a 400. A flat token-ID list is one prompt, however long.
-#[tokio::test]
-async fn completions_reject_batches_above_max_completion_prompts() {
-    let mut app = test_render_app_with_max_model_len(Some(2048));
-
-    let mut errors = Vec::new();
-    for prompt in [json!(vec!["hi"; 1025]), json!(vec![vec![1]; 1025])] {
-        let (status, json) = post_json(
-            &mut app,
-            "/v1/completions/render",
-            json!({"model": "render-model", "prompt": prompt}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        errors.push(json.to_string());
-    }
-    assert_eq!(errors[0], errors[1]);
-    expect_test::expect![[r#"{"error":{"message":"prompt list length 1025 exceeds the maximum allowed count of 1024. To increase this limit, set the VLLM_MAX_COMPLETION_PROMPTS environment variable.","type":"BadRequestError","param":"prompt","code":400}}"#]].assert_eq(&errors[0]);
-
-    for prompt in [json!(vec!["hi"; 1024]), json!(vec![1; 1025])] {
-        let (status, json) = post_json(
-            &mut app,
-            "/v1/completions/render",
-            json!({"model": "render-model", "prompt": prompt}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{json}");
-    }
-}
-
 /// Python renders an empty user turn, so the render route must accept empty
 /// message content instead of rejecting it.
 #[tokio::test]
@@ -14840,6 +14809,81 @@ async fn n_is_checked_like_python_sampling_params() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
         assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
     }
+}
+
+/// Like Python's `VLLM_MAX_COMPLETION_PROMPTS` check, a completions batch of more
+/// prompts than the server allows is a 400 before anything is submitted. A
+/// single prompt, a flat token-ID list included, is never counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_prompt_batch_follows_max_completion_prompts_option() {
+    // Each mock engine answers one request; a bounded wait turns a batch that
+    // reaches it by mistake into a failure instead of a hang.
+    async fn post(
+        app: &mut axum::Router,
+        uri: &str,
+        prompt: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": prompt});
+        tokio::time::timeout(Duration::from_secs(10), post_json(app, uri, body))
+            .await
+            .expect("the request completes")
+    }
+    async fn app_with_limit(max_completion_prompts: i64) -> (axum::Router, MockEngineTask) {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+            format!("engine-openai-max-completion-prompts-{max_completion_prompts}").into_bytes(),
+            default_stream_output_specs(),
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_api_server_options(ApiServerOptions {
+                    max_completion_prompts,
+                    enable_scale_out: true,
+                    ..Default::default()
+                }),
+        ));
+        (app, engine_task)
+    }
+
+    let (mut app, _engine_task) = test_app().await;
+    let (status, json) = post(&mut app, "/v1/completions", json!(vec!["hi"; 1025])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    expect_test::expect![[r#"{"error":{"message":"prompt list length 1025 exceeds the maximum allowed count of 1024. To increase this limit, set the VLLM_MAX_COMPLETION_PROMPTS environment variable.","type":"BadRequestError","param":"prompt","code":400}}"#]].assert_eq(&json.to_string());
+
+    let (mut app, _engine_task) = app_with_limit(1).await;
+    for prompt in [json!(["hello", "world"]), json!([[104, 105], [33]])] {
+        let (status, json) = post(&mut app, "/v1/completions", prompt.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{prompt}");
+        assert_eq!(json["error"]["param"], "prompt", "{prompt}");
+        assert_eq!(
+            json["error"]["message"],
+            "prompt list length 2 exceeds the maximum allowed count of 1. To increase this \
+             limit, set the VLLM_MAX_COMPLETION_PROMPTS environment variable.",
+            "{prompt}"
+        );
+    }
+    // Render leaves the bound to `/v1/completions`, which fans the prompts out
+    // to the engine; each rendered request carries one prompt.
+    let (status, json) = post(
+        &mut app,
+        "/v1/completions/render",
+        json!(["hello", "world"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json.as_array().map(Vec::len), Some(2), "{json}");
+    // A batch at the limit is served.
+    let (status, json) = post(&mut app, "/v1/completions", json!(["hello"])).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    // Like Python, a limit of 0 rejects every batch but no single prompt.
+    let (mut app, _engine_task) = app_with_limit(0).await;
+    let (status, json) = post(&mut app, "/v1/completions", json!(["hello"])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let (status, json) = post(&mut app, "/v1/completions", json!([104, 105, 33])).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
