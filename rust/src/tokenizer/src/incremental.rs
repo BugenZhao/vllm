@@ -144,10 +144,12 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
     }
 
     /// Seed `self.prefix` from the shortest trailing prompt suffix whose
-    /// filtered context is still long enough and whose decoded text has no
-    /// U+FFFD. A clean decode means the suffix starts and ends at valid
-    /// UTF-8/token boundaries, so priming from it is equivalent to priming from
-    /// the full prompt.
+    /// filtered context is still long enough and whose decoded text is
+    /// non-empty and has no U+FFFD. A clean decode means the suffix starts and
+    /// ends at valid UTF-8/token boundaries, so priming from it is equivalent to
+    /// priming from the full prompt. An empty decode (only skipped special
+    /// tokens) says nothing about the text before it, which may end partway
+    /// through a character.
     fn seed_prefix(&mut self) -> Result<()> {
         let prompt_len = self.ids.len();
         if prompt_len > SAFE_SUFFIX_MIN {
@@ -155,7 +157,10 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
                 let (decoded, context_ids) = self.decode_prompt_context(&self.ids[start..])?;
-                if !decoded.contains('\u{FFFD}') && context_ids.len() >= SAFE_SUFFIX_MIN {
+                if !decoded.is_empty()
+                    && !decoded.contains('\u{FFFD}')
+                    && context_ids.len() >= SAFE_SUFFIX_MIN
+                {
                     self.prefix = decoded;
                     self.ids = context_ids;
                     self.prefix_index = self.ids.len();

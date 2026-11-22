@@ -1012,7 +1012,9 @@ mod tests {
             (ids(b"Hi \xE9"), ids(b"\x91\xAB!"), "鑫!"),
             // Skipped special tokens after the partial bytes decode to nothing.
             (with_eos(b"Hi \xE9", 3), ids(b"\x91\xAB!"), "鑫!"),
-            // So do ids the tokenizer cannot map.
+            // Enough of them to fill a short prompt suffix on their own.
+            (with_eos(b"Hi \xE9", 6), ids(b"\x91\xAB!"), "鑫!"),
+            // Ids the tokenizer cannot map decode to nothing as well.
             (
                 with_unknown(b"Hi \xE9\x91"),
                 ids(b"\xAB\xE9\xBE\x98!"),
