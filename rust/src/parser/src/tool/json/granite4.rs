@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, peek, seq};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::token::{any, literal};
+use xgrammar_structural_tag::format::{Format, TagFormat, TriggeredTagsFormat};
+use xgrammar_structural_tag::tool::function_parameters;
 
 use super::{
     JsonToolCallConfig, JsonToolCallEvent, JsonToolCallWhitespace, JsonToolInput,
     tool_call_header_event,
 };
+use crate::output_grammar::{self, OutputGrammarContext};
+use crate::schema::JsonType;
 use crate::tool::utils::{
     JsonObjectScanState, JsonStringScanState, decode_json_str, parse_buffered_event, safe_text_len,
     take_json_object, take_json_string,
@@ -158,6 +163,49 @@ impl ToolParser for Granite4ToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    /// Build the `<tool_call>` blocks the chat template renders: one or more
+    /// for a tool choice that obliges a call, or any number amid free text
+    /// when `auto` still asks for a grammar (a strict tool,
+    /// `--tool-strict-level`, `parallel_tool_calls: false`).
+    fn build_call_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(tools) = output_grammar::normalize_tool_choice(ctx)? else {
+            return Ok(None);
+        };
+
+        let calls = tools
+            .function_tools
+            .iter()
+            .map(|tool| {
+                // The template renders arguments as an object, so free
+                // arguments still have to be one.
+                let arguments = match function_parameters(&tool.function) {
+                    Value::Bool(true) => JsonType::Object.any_schema(),
+                    schema => schema,
+                };
+                TagFormat::new(
+                    format!(
+                        "{TOOL_CALL_START}\n{{\"name\": {}, \"arguments\": ",
+                        Value::from(tool.function.name.as_str())
+                    ),
+                    Format::json_schema(arguments),
+                    format!("}}\n{TOOL_CALL_END}"),
+                )
+            })
+            .collect();
+        let single_call = tools.choice.is_forced() || !ctx.parallel_tool_calls;
+        Ok(Some(if tools.choice.requires_tool_call() {
+            Format::tags_with_separator(calls, "\n", true, single_call)
+        } else {
+            Format::TriggeredTags(
+                TriggeredTagsFormat::new(&[TOOL_CALL_START], calls)
+                    .with_stop_after_first(single_call),
+            )
+        }))
     }
 
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
@@ -308,11 +356,16 @@ fn close_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use serde_json::json;
     use thiserror_ext::AsReport;
+    use xgrammar_structural_tag::ToolChoice;
+    use xgrammar_structural_tag::format::Format;
 
     use super::Granite4ToolParser;
+    use crate::output_grammar::test_utils::outline;
+    use crate::output_grammar::{OutputGrammarContext, ToolStrictLevel};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
+    use crate::tool::{Tool, ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     #[test]
     fn granite4_parse_complete_without_tool_call_keeps_text() {
@@ -554,5 +607,75 @@ mod tests {
     fn granite4_preserve_special_tokens_is_false() {
         let parser = Granite4ToolParser::new(&test_tools());
         assert!(!parser.preserve_special_tokens());
+    }
+
+    #[test]
+    fn granite4_builds_the_template_call_grammar() {
+        let mut strict_tools = test_tools()[..2].to_vec();
+        strict_tools[0].strict = Some(true);
+        let build = |tools: &[Tool],
+                     tool_choice: ToolChoice,
+                     parallel_tool_calls,
+                     answer: Option<&Format>| {
+            Granite4ToolParser::new(tools)
+                .build_visible_format(&OutputGrammarContext {
+                    tools,
+                    tool_choice: &tool_choice,
+                    tool_strict_level: ToolStrictLevel::Auto,
+                    parallel_tool_calls,
+                    answer,
+                })
+                .unwrap()
+                .map(|format| outline(&format))
+        };
+
+        // `required` holds the model to one or more calls as the template
+        // renders them; a strict tool pins its arguments.
+        expect![[r#"
+            tags_with_separator `\n` at_least_one
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location?: string, city?: string, state?: string, unit?: string, date?: string, days?: integer }) `}\n</tool_call>`
+              tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+        "#]]
+            .assert_eq(&build(&strict_tools, ToolChoice::required(), true, None).unwrap());
+        // A named tool allows exactly that one call.
+        expect![[r#"
+            tags_with_separator `\n` at_least_one stop_after_first
+              tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+        "#]]
+        .assert_eq(&build(&strict_tools, ToolChoice::function("add"), true, None).unwrap());
+
+        // `auto` builds no grammar unless something asks for one, such as a
+        // strict tool, and then leaves text free around the calls.
+        assert!(build(&test_tools()[..2], ToolChoice::auto(), true, None).is_none());
+        expect![[r#"
+            triggered_tags [`<tool_call>`]
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ location?: string, city?: string, state?: string, unit?: string, date?: string, days?: integer }) `}\n</tool_call>`
+              tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+        "#]].assert_eq(&build(&strict_tools, ToolChoice::auto(), true, None).unwrap());
+        // Without parallel calls, both stop after the first call.
+        expect![[r#"
+            tags_with_separator `\n` at_least_one stop_after_first
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ ... }) `}\n</tool_call>`
+              tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+        "#]]
+            .assert_eq(&build(&test_tools()[..2], ToolChoice::required(), false, None).unwrap());
+        expect![[r#"
+            triggered_tags [`<tool_call>`] stop_after_first
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ ... }) `}\n</tool_call>`
+              tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+        "#]]
+            .assert_eq(&build(&test_tools()[..2], ToolChoice::auto(), false, None).unwrap());
+
+        // With an answer constraint, `auto` holds either the calls or the answer.
+        let answer = Format::json_schema(json!({"type": "object"}));
+        expect![[r#"
+            or
+              tags_with_separator `\n` at_least_one
+                tag `<tool_call>\n{"name": "get_weather", "arguments": ` json({ ... }) `}\n</tool_call>`
+                tag `<tool_call>\n{"name": "add", "arguments": ` json({ ... }) `}\n</tool_call>`
+              json(object)
+        "#]].assert_eq(
+            &build(&test_tools()[..2], ToolChoice::auto(), true, Some(&answer)).unwrap(),
+        );
     }
 }
