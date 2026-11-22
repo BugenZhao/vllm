@@ -150,6 +150,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to create chat/text backends")?;
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
+    chat_backend
+        .check_parser_selections(&config.tool_call_parser, &config.reasoning_parser)
+        .context("the selected parsers cannot be used with this model")?;
 
     let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
     info!(

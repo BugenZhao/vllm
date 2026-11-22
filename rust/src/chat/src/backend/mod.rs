@@ -45,6 +45,18 @@ pub trait ChatBackend: Send + Sync {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<DynChatOutputProcessor>;
+
+    /// Build the explicitly selected parsers once for this model, so that a
+    /// selection that would fail every chat request fails at startup instead.
+    ///
+    /// Backends without output parsers have nothing to check.
+    fn check_parser_selections(
+        &self,
+        _tool_call_parser: &ParserSelection,
+        _reasoning_parser: &ParserSelection,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Shared trait-object form of [`ChatBackend`].

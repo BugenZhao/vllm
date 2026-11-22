@@ -30,7 +30,7 @@ use crate::renderer::{
     KimiK3Variant,
 };
 use crate::request::ChatRequest;
-use crate::{DynChatOutputProcessor, RendererSelection};
+use crate::{DynChatOutputProcessor, ParserSelection, RendererSelection};
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
@@ -198,6 +198,24 @@ impl ChatBackend for HfChatBackend {
                 options.tool_strict_level,
             )?,
         ))
+    }
+
+    fn check_parser_selections(
+        &self,
+        tool_call_parser: &ParserSelection,
+        reasoning_parser: &ParserSelection,
+    ) -> Result<()> {
+        if self.model_type == "gpt_oss" {
+            return validate_harmony_parser_overrides(tool_call_parser, reasoning_parser);
+        }
+
+        DefaultChatOutputProcessor::check_parser_selections(
+            &self.model_id,
+            self.tokenizer.clone(),
+            &self.response_template,
+            tool_call_parser,
+            reasoning_parser,
+        )
     }
 }
 
@@ -568,6 +586,105 @@ mod tests {
         assert_eq!(error.param(), Some("chat_template"));
         expect_test::expect!["chat_template is not supported by this chat renderer"]
             .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn check_parser_selections_builds_explicit_parsers_only() {
+        const HF_CONFIG: &str = r#"{"model_type":"qwen2"}"#;
+        const TOKENIZER_CONFIG: &str = r#"{"chat_template":"{{ messages[0].content }}"}"#;
+        let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
+        let check = |model_id: &str,
+                     config_json: &str,
+                     tokenizer: TestTokenizer,
+                     tool_call_parser: ParserSelection,
+                     reasoning_parser: ParserSelection| {
+            HfChatBackend::from_resolved_model_files(
+                resolved_files(config_json, TOKENIZER_CONFIG),
+                model_id.to_string(),
+                LoadModelBackendsOptions::default(),
+                Arc::new(tokenizer),
+            )
+            .unwrap()
+            .check_parser_selections(&tool_call_parser, &reasoning_parser)
+            .map_err(|error| error.to_report_string())
+        };
+        let think_tokenizer = || {
+            TestTokenizer::new()
+                .with_regular_token("<think>", 1000)
+                .with_regular_token("</think>", 1001)
+        };
+
+        let results = [
+            // The tokenizer lacks the explicit reasoning parser's markers.
+            check(
+                "test-model",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                ParserSelection::Auto,
+                explicit("qwen3"),
+            ),
+            check(
+                "test-model",
+                HF_CONFIG,
+                think_tokenizer(),
+                ParserSelection::Auto,
+                explicit("qwen3"),
+            ),
+            // An automatic match by model name is not built.
+            check(
+                "Qwen/Qwen3-8B",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                ParserSelection::Auto,
+                ParserSelection::Auto,
+            ),
+            // `hf` needs the checkpoint's `response_template`.
+            check(
+                "test-model",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                explicit("hf"),
+                explicit("hf"),
+            ),
+            // The automatic reasoning match is a different unified parser.
+            check(
+                "google/gemma-4-test",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                explicit("hermes"),
+                ParserSelection::Auto,
+            ),
+            check(
+                "test-model",
+                r#"{"model_type":"gpt_oss"}"#,
+                TestTokenizer::new(),
+                explicit("json"),
+                ParserSelection::Auto,
+            ),
+        ];
+
+        expect_test::expect![[r#"
+            [
+                Err(
+                    "failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`",
+                ),
+                Ok(
+                    (),
+                ),
+                Ok(
+                    (),
+                ),
+                Err(
+                    "failed to initialize unified parser `hf`: the model's tokenizer_config.json provides no response_template",
+                ),
+                Err(
+                    "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hermes, reasoning=gemma4",
+                ),
+                Err(
+                    "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported",
+                ),
+            ]
+        "#]].assert_debug_eq(&results);
     }
 
     #[test]

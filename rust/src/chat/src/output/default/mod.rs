@@ -149,6 +149,47 @@ impl DefaultChatOutputProcessor {
         })
     }
 
+    /// Build the explicitly selected parsers against the model's tokenizer.
+    ///
+    /// Requests build their parsers one by one, so a selection that cannot be
+    /// built for this model (a tokenizer without the parser's markers, `hf`
+    /// without a usable `response_template`, or selections that resolve to
+    /// different unified parsers) would fail every chat request. Only explicit
+    /// selections are built: an automatic match by model name must not refuse
+    /// the start.
+    pub(crate) fn check_parser_selections(
+        model_id: &str,
+        tokenizer: DynTokenizer,
+        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+        tool_call_parser: &ParserSelection,
+        reasoning_parser: &ParserSelection,
+    ) -> ChatResult<()> {
+        let explicit = |selection| matches!(selection, &ParserSelection::Explicit(_));
+        if !explicit(tool_call_parser) && !explicit(reasoning_parser) {
+            return Ok(());
+        }
+
+        // A unified parser is built from both selections, as requests do.
+        if Self::resolve_optional_unified_parser(
+            &[],
+            tokenizer.clone(),
+            response_template,
+            tool_call_parser.resolve_tool_name(model_id),
+            reasoning_parser.resolve_reasoning_name(model_id),
+        )?
+        .is_some()
+        {
+            return Ok(());
+        }
+        if let ParserSelection::Explicit(name) = tool_call_parser {
+            ToolParserFactory::global().create(name, &[], tokenizer.clone())?;
+        }
+        if let ParserSelection::Explicit(name) = reasoning_parser {
+            ReasoningParserFactory::global().create(name, tokenizer)?;
+        }
+        Ok(())
+    }
+
     /// Build the plain-text-only default output processor.
     ///
     /// This keeps the default structured chat-event assembly but disables both
