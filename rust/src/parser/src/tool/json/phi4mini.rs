@@ -120,6 +120,7 @@ mod tests {
     use xgrammar_structural_tag::ToolChoice;
 
     use super::Phi4MiniJsonToolParser;
+    use crate::output_grammar::test_utils::outline;
     use crate::output_grammar::{OutputGrammarContext, ToolStrictLevel};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
@@ -170,135 +171,71 @@ mod tests {
         assert_eq!(result.calls()[0].arguments, arguments);
     }
 
-    #[test]
-    fn phi4mini_forced_tool_choice_builds_the_call_list_grammar() {
+    /// Outline of the visible grammar for `tool_choice` over the first two test
+    /// tools, or `None` when no tool grammar applies.
+    fn call_grammar(
+        tool_choice: ToolChoice,
+        tool_strict_level: ToolStrictLevel,
+        parallel_tool_calls: bool,
+    ) -> Option<String> {
         let tools = test_tools()[..2].to_vec();
         let parser = Phi4MiniJsonToolParser::new(&tools);
-        let build = |tool_choice: ToolChoice, parallel_tool_calls| {
-            parser
-                .build_visible_format(&OutputGrammarContext {
-                    tools: &tools,
-                    tool_choice: &tool_choice,
-                    tool_strict_level: ToolStrictLevel::Auto,
-                    parallel_tool_calls,
-                    answer: None,
-                })
-                .unwrap()
-                .map(|format| serde_json::to_string_pretty(&format).unwrap())
-        };
+        parser
+            .build_visible_format(&OutputGrammarContext {
+                tools: &tools,
+                tool_choice: &tool_choice,
+                tool_strict_level,
+                parallel_tool_calls,
+                answer: None,
+            })
+            .unwrap()
+            .map(|format| outline(&format))
+    }
 
-        // A choice that obliges a call holds the model to the `functools[..]` list.
+    #[test]
+    fn phi4mini_forced_tool_choice_builds_the_call_list_grammar() {
+        // A choice that obliges a call holds the model to the `functools[..]`
+        // list. A non-strict tool's free arguments must still be an object,
+        // the only shape the parser reads.
         expect![[r#"
-            {
-              "type": "sequence",
-              "elements": [
-                {
-                  "type": "const_string",
-                  "value": "functools["
-                },
-                {
-                  "type": "tags_with_separator",
-                  "tags": [
-                    {
-                      "type": "tag",
-                      "begin": "{\"name\": \"get_weather\", \"arguments\": ",
-                      "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                          "type": "object",
-                          "additionalProperties": true
-                        },
-                        "style": "json",
-                        "any_order": false,
-                        "max_whitespace_cnt": null,
-                        "excludes": []
-                      },
-                      "end": "}"
-                    },
-                    {
-                      "type": "tag",
-                      "begin": "{\"name\": \"add\", \"arguments\": ",
-                      "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                          "type": "object",
-                          "additionalProperties": true
-                        },
-                        "style": "json",
-                        "any_order": false,
-                        "max_whitespace_cnt": null,
-                        "excludes": []
-                      },
-                      "end": "}"
-                    }
-                  ],
-                  "separator": ", ",
-                  "at_least_one": true,
-                  "stop_after_first": false
-                },
-                {
-                  "type": "const_string",
-                  "value": "]"
-                }
-              ]
-            }"#]]
-        .assert_eq(&build(ToolChoice::required(), true).unwrap());
+            sequence
+              `functools[`
+              tags_with_separator `, ` at_least_one
+                tag `{"name": "get_weather", "arguments": ` json({ ... }) `}`
+                tag `{"name": "add", "arguments": ` json({ ... }) `}`
+              `]`
+        "#]]
+        .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, true).unwrap());
+        // A named choice allows one call, as does `parallel_tool_calls: false`.
         expect![[r#"
-            {
-              "type": "sequence",
-              "elements": [
-                {
-                  "type": "const_string",
-                  "value": "functools["
-                },
-                {
-                  "type": "tags_with_separator",
-                  "tags": [
-                    {
-                      "type": "tag",
-                      "begin": "{\"name\": \"add\", \"arguments\": ",
-                      "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                          "type": "object",
-                          "additionalProperties": true
-                        },
-                        "style": "json",
-                        "any_order": false,
-                        "max_whitespace_cnt": null,
-                        "excludes": []
-                      },
-                      "end": "}"
-                    }
-                  ],
-                  "separator": ", ",
-                  "at_least_one": true,
-                  "stop_after_first": true
-                },
-                {
-                  "type": "const_string",
-                  "value": "]"
-                }
-              ]
-            }"#]]
-        .assert_eq(&build(ToolChoice::function("add"), true).unwrap());
-        assert_ne!(
-            build(ToolChoice::required(), false),
-            build(ToolChoice::required(), true)
+            sequence
+              `functools[`
+              tags_with_separator `, ` at_least_one stop_after_first
+                tag `{"name": "add", "arguments": ` json({ ... }) `}`
+              `]`
+        "#]]
+        .assert_eq(
+            &call_grammar(ToolChoice::function("add"), ToolStrictLevel::Auto, true).unwrap(),
         );
+        expect![[r#"
+            sequence
+              `functools[`
+              tags_with_separator `, ` at_least_one stop_after_first
+                tag `{"name": "get_weather", "arguments": ` json({ ... }) `}`
+                tag `{"name": "add", "arguments": ` json({ ... }) `}`
+              `]`
+        "#]]
+        .assert_eq(&call_grammar(ToolChoice::required(), ToolStrictLevel::Auto, false).unwrap());
 
-        // A non-strict tool's free arguments must still be an object, the only
-        // shape the parser reads.
-        let required: serde_json::Value =
-            serde_json::from_str(&build(ToolChoice::required(), true).unwrap()).unwrap();
+        // `auto` builds no grammar.
         assert_eq!(
-            required["elements"][1]["tags"][0]["content"]["json_schema"]["type"],
-            "object"
+            call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, true),
+            None
         );
-
-        // `auto` builds no grammar, as before.
-        assert!(build(ToolChoice::auto(), true).is_none());
-        assert!(build(ToolChoice::auto(), false).is_none());
+        assert_eq!(
+            call_grammar(ToolChoice::auto(), ToolStrictLevel::Auto, false),
+            None
+        );
     }
 
     #[test]
