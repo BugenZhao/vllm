@@ -282,6 +282,8 @@ steps:
     tool_use
     --ignore=tool_use/mistral
     --models=llama3.2
+  # Hermes 3's chat template takes the length of an undefined `tools`.
+  - pytest -v -s tool_use/test_chat_completions.py --models=hermes -k "without_tools or with_empty_tools"
   - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py
