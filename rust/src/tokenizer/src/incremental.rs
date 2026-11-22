@@ -180,8 +180,11 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
         // fallback decodes a byte run only as a whole), and keep the prompt
         // text before it out of the output. A byte-level BPE token can hold
         // text and partial bytes together, so trimming may give the longer
-        // prefix.
+        // prefix. Without a clean boundary within reach (a literal U+FFFD
+        // right before the partial character looks the same), the whole
+        // prompt stays in the context so no byte of the character is lost.
         let mut prefix = decoded.trim_end_matches('\u{FFFD}').to_owned();
+        self.prefix_index = 0;
         let mut end = self.ids.len();
         let mut steps = 0;
         while end > 0 && steps < MAX_PARTIAL_CHAR_TOKENS {

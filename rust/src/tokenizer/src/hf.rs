@@ -1020,6 +1020,14 @@ mod tests {
                 ids(b"\xAB\xE9\xBE\x98!"),
                 "鑫龘!",
             ),
+            // A literal U+FFFD before the partial character hides the boundary.
+            // This tokenizer decodes the prompt as one invalid byte run, so no
+            // prompt text can be told apart; the generated text stays intact.
+            (
+                ids(b"Hi \xEF\xBF\xBD\xE9\x91"),
+                ids(b"\xAB\xE9\xBE\x98!"),
+                "Hi \u{FFFD}鑫龘!",
+            ),
         ];
         let tokenizers = [
             ("hf", HuggingFaceTokenizer::new_hf(&path).expect("load hf")),
