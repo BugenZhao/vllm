@@ -403,18 +403,30 @@ impl UnifiedParser for MuseUnifiedParser {
 /// Map an emitted ATEM invoke name back to a registered tool name.
 ///
 /// The Muse Glimmer template lists a registered bare name `NAME` as the
-/// namespace recipient `"NAME.*"`, so the model may call it as `NAME.NAME`.
-/// Collapse only that doubled form, and only when `NAME` is registered and the
-/// emitted name is not: matching on the trailing segment alone could dispatch
-/// `weather.get` to a registered `calendar.get`.
+/// namespace recipient `"NAME.*"`, so the model may fill in any suffix
+/// (`Bash.Bash`, `Bash.command`, `Glob.`). Map such a name back to `NAME`, only
+/// when `NAME` is registered and the emitted name is not: matching on the
+/// trailing segment alone could dispatch `weather.get` to a registered
+/// `calendar.get`. The doubled form always collapses; other suffixes collapse
+/// only when no registered name lives under `NAME.`, where the suffix may name
+/// a missing sibling.
 fn normalize_tool_name(name: String, tool_names: &HashSet<String>) -> String {
     if tool_names.contains(&name) {
         return name;
     }
-    match name.split_once('.') {
-        Some((head, tail)) if head == tail && tool_names.contains(head) => head.to_string(),
-        _ => name,
+    let Some((head, tail)) = name.split_once('.') else {
+        return name;
+    };
+    if !tool_names.contains(head) {
+        return name;
     }
+    let has_sibling = tool_names
+        .iter()
+        .any(|registered| registered.strip_prefix(head).is_some_and(|rest| rest.starts_with('.')));
+    if head != tail && has_sibling {
+        return name;
+    }
+    head.to_string()
 }
 
 /// Parse one Muse event from buffered streaming input.
@@ -1631,37 +1643,76 @@ mod tests {
     }
 
     #[test]
-    fn muse_collapses_doubled_namespace_tool_name() {
-        let tools = ["get_weather", "calendar.get"].map(|name| Tool {
+    fn muse_collapses_namespace_tool_name_suffix() {
+        let tools = ["get_weather", "calendar.get", "Bash", "Bash.run"].map(|name| Tool {
             name: name.to_string(),
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
             defer_loading: None,
         });
+        // (emitted name, resolved name)
+        let cases = [
+            ("get_weather.get_weather", "get_weather"),
+            ("get_weather.command", "get_weather"),
+            ("get_weather.", "get_weather"),
+            ("calendar.get", "calendar.get"),
+            ("weather.get", "weather.get"),
+            ("calendar.calendar", "calendar.calendar"),
+            // `Bash.run` lives under `Bash.`, so only the doubled form collapses.
+            ("Bash.Bash", "Bash"),
+            ("Bash.fetch", "Bash.fetch"),
+            ("Bash.run", "Bash.run"),
+        ];
         let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
-        let text = format!(
-            " to=get_weather.get_weather{MESSAGE}{}",
-            atem(&[
-                ("get_weather.get_weather", &[][..]),
-                ("calendar.get", &[][..]),
-                ("weather.get", &[][..]),
-                ("calendar.calendar", &[][..]),
-            ])
-        );
+        let invokes: Vec<_> = cases.iter().map(|(emitted, _)| (*emitted, &[][..])).collect();
+        let text = format!(" to=get_weather.get_weather{MESSAGE}{}", atem(&invokes));
 
         let output = parser.parse_complete(&text).unwrap();
 
         let names: Vec<_> = output.calls().into_iter().filter_map(|call| call.name).collect();
-        assert_eq!(
-            names,
-            [
-                "get_weather",
-                "calendar.get",
-                "weather.get",
-                "calendar.calendar"
-            ]
-        );
+        let resolved: Vec<_> = cases.iter().map(|(_, resolved)| *resolved).collect();
+        assert_eq!(names, resolved);
+    }
+
+    #[test]
+    fn muse_suffixed_tool_name_arguments_follow_the_registered_tool() {
+        let tools = [Tool {
+            name: "Bash".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {"timeout": {"type": "integer"}, "label": {"type": "string"}}
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        for emitted in ["Bash.command", "Bash.execute", "Bash."] {
+            let text = format!(
+                " to={emitted}{MESSAGE}{}{EOT}",
+                atem(&[(emitted, &[("timeout", "5"), ("label", "5")][..])])
+            );
+            let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+            let batch = parser.parse_complete(&text).unwrap();
+            let calls = batch.calls();
+            assert_eq!(calls.len(), 1, "{emitted}");
+            assert_eq!(calls[0].name.as_deref(), Some("Bash"), "{emitted}");
+            assert_eq!(
+                serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+                json!({"timeout": 5, "label": "5"}),
+                "{emitted}"
+            );
+            for size in [1, 3] {
+                parser.reset();
+                let chunks = char_chunks(&text, size);
+                let chunks: Vec<_> = chunks.iter().map(String::as_str).collect();
+                assert_eq!(
+                    collect_stream(&mut parser, &chunks).merged_events(),
+                    batch.merged_events(),
+                    "{emitted} {size}"
+                );
+            }
+        }
     }
 
     #[test]
