@@ -21,7 +21,8 @@ use crate::mm_wire;
 /// Mirrors the Python vLLM `MultiModalFeatures` class.
 ///
 /// Each modality maps to parallel lists, one entry per item in placeholder
-/// order.
+/// order. As the render docs specify, unset `kwargs_data` and `mm_metadata`
+/// are `null` rather than absent.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiModalFeatures {
@@ -29,10 +30,13 @@ pub struct MultiModalFeatures {
     /// else its content hash tagged `content:`.
     pub mm_hashes: HashMap<MmModality, Vec<String>>,
     pub mm_placeholders: HashMap<MmModality, Vec<PlaceholderRangeInfo>>,
-    /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Unset when render
-    /// was asked for `mm_payload: "none"`.
+    /// Base64-encoded MessagePack `MultiModalKwargsItem`s. Render sets it only
+    /// for `mm_payload: "tensors"`.
     #[serialize_always]
     pub kwargs_data: Option<HashMap<MmModality, Vec<Option<String>>>>,
+    /// Each item's `keep_on_cpu` fields, encoded like `kwargs_data`, which
+    /// prefill still needs when the embeddings arrive through the EC
+    /// connector. Unset for `mm_payload: "none"` or when a modality has none.
     #[serialize_always]
     pub mm_metadata: Option<HashMap<MmModality, Vec<Option<String>>>>,
 }
@@ -41,9 +45,11 @@ pub struct MultiModalFeatures {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MmPayload {
-    /// Hashes, placeholders and processed tensors.
+    /// Hashes, placeholders, processed tensors and `mm_metadata`.
     #[default]
     Tensors,
+    /// Hashes, placeholders and `mm_metadata`, for prefill that loads the
+    /// embeddings through the EC connector.
     Metadata,
     /// Hashes and placeholders only, for callers that route on the prompt
     /// layout. Such features cannot be sent to generate.
@@ -104,6 +110,8 @@ impl MultiModalFeatures {
         })
     }
 
+    /// Whether some item has metadata but no kwargs, so that its embedding
+    /// has to come through the EC connector.
     pub(crate) fn has_metadata_only_items(&self) -> bool {
         let Some(mm_metadata) = &self.mm_metadata else {
             return false;
@@ -118,6 +126,10 @@ impl MultiModalFeatures {
     }
 
     /// Rebuild the prepared features, ordered by placeholder offset.
+    ///
+    /// Every item must carry kwargs or metadata: the Rust frontend has no
+    /// multimodal processor cache to resolve a missing item from. As in
+    /// Python, an item's metadata fields override its kwargs fields.
     pub(crate) fn into_prepared(self) -> Result<MmFeatures, ApiError> {
         let Self {
             mm_hashes,
