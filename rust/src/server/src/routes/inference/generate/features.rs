@@ -467,6 +467,49 @@ mod tests {
         assert_eq!(features.into_prepared().unwrap(), prepared);
     }
 
+    /// Like Python's `merge_mm_kwargs_items`, an item's metadata fields
+    /// override its kwargs fields, and its other kwargs fields stay.
+    #[test]
+    fn metadata_overrides_kwargs_fields_on_merge() {
+        let prepared = vec![metadata_feature(MmModality::Image, 1, true)];
+        let mut features = MultiModalFeatures::from_prepared(prepared, MmPayload::Tensors).unwrap();
+        let metadata = MmKwargsItem::from([(
+            "image_grid_thw".to_owned(),
+            field(true, vec![1.0, 4.0, 4.0]),
+        )]);
+        features.mm_metadata.as_mut().unwrap().get_mut(&MmModality::Image).unwrap()[0] =
+            Some(encode_kwargs(&metadata).unwrap());
+
+        let rebuilt = features.into_prepared().unwrap();
+        let data = rebuilt[0].data.as_ref().unwrap();
+        assert_eq!(data["image_grid_thw"], metadata["image_grid_thw"]);
+        assert!(data.contains_key("pixel_values"));
+    }
+
+    /// Like Python, a full item does not let another item skip the EC
+    /// requirement, while an item with neither kwargs nor metadata is not
+    /// metadata-only.
+    #[test]
+    fn metadata_only_items_are_checked_per_item() {
+        let mixed = |second_has_metadata: bool| {
+            let prepared = vec![
+                metadata_feature(MmModality::Image, 1, true),
+                metadata_feature(MmModality::Image, 4, true),
+            ];
+            let mut features =
+                MultiModalFeatures::from_prepared(prepared, MmPayload::Tensors).unwrap();
+            features.kwargs_data.as_mut().unwrap().get_mut(&MmModality::Image).unwrap()[1] = None;
+            if !second_has_metadata {
+                features.mm_metadata.as_mut().unwrap().get_mut(&MmModality::Image).unwrap()[1] =
+                    None;
+            }
+            features.has_metadata_only_items()
+        };
+
+        assert!(mixed(true));
+        assert!(!mixed(false));
+    }
+
     #[test]
     fn modality_without_metadata_nulls_mm_metadata() {
         let prepared = || {
@@ -478,6 +521,8 @@ mod tests {
         let tensors = MultiModalFeatures::from_prepared(prepared(), MmPayload::Tensors).unwrap();
         assert_eq!(tensors.mm_metadata, None);
         assert!(tensors.kwargs_data.is_some());
+        let json = serde_json::to_value(&tensors).unwrap();
+        assert_eq!(json.get("mm_metadata"), Some(&serde_json::Value::Null));
 
         let error = MultiModalFeatures::from_prepared(prepared(), MmPayload::Metadata).unwrap_err();
         let response = error.to_error_response();
