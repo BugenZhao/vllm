@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
-use vllm_chat::multimodal::MmModality;
+use vllm_chat::multimodal::{MediaFetchPolicy, MmModality};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
@@ -91,6 +91,11 @@ fn render_args_build_config_without_tls() {
         "-1",
         "--limit-mm-per-prompt",
         r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
+        "--allowed-local-media-path",
+        "/srv/media",
+        "--allowed-media-domains",
+        "media.internal",
+        "127.0.0.1",
         // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
         // hidden flag.
         "--skip-model-name-validation",
@@ -129,6 +134,13 @@ fn render_args_build_config_without_tls() {
     let limit = |modality| config.limit_mm_per_prompt[&modality].count();
     assert_eq!(limit(MmModality::Image), Some(2));
     assert_eq!(limit(MmModality::Video), Some(1));
+    assert_eq!(
+        config.media_fetch_policy,
+        MediaFetchPolicy {
+            allowed_local_media_path: Some("/srv/media".into()),
+            allowed_media_domains: Some(vec!["media.internal".into(), "127.0.0.1".into()]),
+        }
+    );
     assert!(config.tls.is_none());
 }
 
@@ -288,6 +300,10 @@ fn serve_args_forward_python_flags_with_separator() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media_fetch: MediaFetchArgs {
+                            allowed_local_media_path: None,
+                            allowed_media_domains: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2288,6 +2304,43 @@ fn serve_args_reject_unsupported_no_flag_alias() {
     .assert_eq(&error.to_string());
 }
 
+/// The Python supervisor sends the media fetch flags in `--args-json`; an
+/// empty path, Python's default, disables local media.
+#[test]
+fn frontend_args_json_carry_media_fetch_policy() {
+    for (json, expected) in [
+        (
+            r#"{"model_tag":"m","allowed_local_media_path":"/srv/media","allowed_media_domains":["127.0.0.1"]}"#,
+            MediaFetchPolicy {
+                allowed_local_media_path: Some("/srv/media".into()),
+                allowed_media_domains: Some(vec!["127.0.0.1".into()]),
+            },
+        ),
+        (
+            r#"{"model_tag":"m","allowed_local_media_path":""}"#,
+            MediaFetchPolicy::default(),
+        ),
+    ] {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "4",
+            "--output-listener-fd",
+            "5",
+            "--args-json",
+            json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        assert_eq!(args.runtime.media_fetch.policy(), expected, "{json}");
+    }
+}
+
 #[test]
 fn frontend_args_accept_json() {
     let cli = Cli::try_parse_from([
@@ -2353,6 +2406,10 @@ fn frontend_args_accept_json() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media_fetch: MediaFetchArgs {
+                            allowed_local_media_path: None,
+                            allowed_media_domains: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3445,6 +3502,10 @@ fn serve_args_accept_handshake_aliases() {
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
                         mm_processor_kwargs: {},
+                        media_fetch: MediaFetchArgs {
+                            allowed_local_media_path: None,
+                            allowed_media_domains: None,
+                        },
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3757,6 +3818,10 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             mm_processor_kwargs: {},
+            media_fetch_policy: MediaFetchPolicy {
+                allowed_local_media_path: None,
+                allowed_media_domains: None,
+            },
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -3895,6 +3960,10 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             mm_processor_kwargs: {},
+            media_fetch_policy: MediaFetchPolicy {
+                allowed_local_media_path: None,
+                allowed_media_domains: None,
+            },
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4146,6 +4215,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
             mm_processor_kwargs: {},
+            media_fetch_policy: MediaFetchPolicy {
+                allowed_local_media_path: None,
+                allowed_media_domains: None,
+            },
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,

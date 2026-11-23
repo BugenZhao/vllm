@@ -13,7 +13,7 @@ use educe::Educe;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MediaFetchPolicy, MmLimitPerPrompt};
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
@@ -395,6 +395,8 @@ pub struct Config {
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
+    /// Where request media may be fetched from.
+    pub media_fetch_policy: MediaFetchPolicy,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,

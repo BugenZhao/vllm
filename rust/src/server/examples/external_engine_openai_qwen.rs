@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
         exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
         mm_processor_kwargs: HashMap::new(),
+        media_fetch_policy: Default::default(),
         lora_modules: Vec::new(),
         default_mm_loras: Default::default(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,

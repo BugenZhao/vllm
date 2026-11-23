@@ -70,6 +70,8 @@ impl HfChatBackend {
                 options.limit_mm_per_prompt.clone(),
                 &options.mm_processor_kwargs,
             )?
+            .map(|info| info.with_media_fetch_policy(&options.media_fetch_policy))
+            .transpose()?
         };
         if multimodal_model_info.is_none() && !options.mm_processor_kwargs.is_empty() {
             bail_multimodal!("mm_processor_kwargs requires a supported multimodal processor");
@@ -343,6 +345,7 @@ mod tests {
                 mm_processor_kwargs: HashMap::new(),
                 skip_tokenizer_init: false,
                 hf_token: None,
+                media_fetch_policy: Default::default(),
             },
             test_tokenizer(),
         )

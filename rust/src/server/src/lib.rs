@@ -144,6 +144,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .unwrap_or_default(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
             mm_processor_kwargs: config.mm_processor_kwargs.clone(),
+            media_fetch_policy: config.media_fetch_policy.clone(),
         },
     )
     .await

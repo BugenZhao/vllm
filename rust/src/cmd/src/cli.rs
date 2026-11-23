@@ -8,6 +8,7 @@
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
 mod logging;
+mod media;
 mod model;
 mod ssl;
 mod unsupported;
@@ -47,6 +48,7 @@ use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
 
 use crate::cli::logging::LoggingConfig;
+use crate::cli::media::MediaFetchArgs;
 use crate::cli::model::ModelArgs;
 use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
@@ -252,6 +254,9 @@ pub struct RenderArgs {
     /// checkpoint configuration before its processor is constructed.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
     mm_processor_kwargs: HashMap<String, Value>,
+    /// Where request media may be fetched from.
+    #[command(flatten)]
+    media_fetch: MediaFetchArgs,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -298,6 +303,7 @@ impl RenderArgs {
             dtype: self.dtype.model_dtype(),
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             mm_processor_kwargs: self.mm_processor_kwargs,
+            media_fetch_policy: self.media_fetch.policy(),
             tls,
         }
     }
@@ -500,6 +506,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub mm_processor_kwargs: HashMap<String, Value>,
+    /// Where request media may be fetched from.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub media_fetch: MediaFetchArgs,
 
     /// LoRA adapters to load before serving, each as `name=path` or a JSON
     /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
@@ -1056,6 +1066,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
+        let media_fetch_policy = self.media_fetch.policy();
         let ModelFileSources {
             model,
             tokenizer,
@@ -1102,6 +1113,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             mm_processor_kwargs: self.mm_processor_kwargs,
+            media_fetch_policy,
             lora_modules: self.lora_modules,
             default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,
@@ -1151,6 +1163,7 @@ impl SharedRuntimeArgs {
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
+        let media_fetch_policy = self.media_fetch.policy();
         let ModelFileSources {
             model,
             tokenizer,
@@ -1196,6 +1209,7 @@ impl SharedRuntimeArgs {
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
             mm_processor_kwargs: self.mm_processor_kwargs,
+            media_fetch_policy,
             lora_modules: self.lora_modules,
             default_mm_loras: self.default_mm_loras,
             chat_template_content_format: self.chat_template_content_format,

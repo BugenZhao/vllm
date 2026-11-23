@@ -9,7 +9,7 @@ use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
+use crate::multimodal::{MediaFetchPolicy, MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -104,6 +104,8 @@ pub struct LoadModelBackendsOptions {
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
+    /// Where request media may be fetched from.
+    pub media_fetch_policy: MediaFetchPolicy,
 }
 
 /// Shared backends loaded from a model id.
