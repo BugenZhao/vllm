@@ -39,9 +39,9 @@ use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopolog
 use vllm_server::{
     AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
-    ReasoningEffort, RenderConfig, RendererSelection,
+    DEFAULT_MAX_COMPLETION_PROMPTS, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    DefaultMmLoras, FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -773,6 +773,12 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub max_n_sequences: Option<i64>,
 
+    /// Upper bound on the prompts in one completions request (default 1024).
+    /// Like Python, it is set only through `VLLM_MAX_COMPLETION_PROMPTS`.
+    #[arg(long, hide = true, env = "VLLM_MAX_COMPLETION_PROMPTS", value_parser = parse_int)]
+    #[serde(skip)]
+    pub max_completion_prompts: Option<i64>,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -1027,6 +1033,11 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
             self.max_n_sequences = Some(max_n_sequences);
         }
+        if let Some(value) = lookup("VLLM_MAX_COMPLETION_PROMPTS") {
+            let max_completion_prompts = parse_int(&value)
+                .map_err(|error| format!("invalid VLLM_MAX_COMPLETION_PROMPTS: {error}"))?;
+            self.max_completion_prompts = Some(max_completion_prompts);
+        }
         Ok(())
     }
 
@@ -1259,6 +1270,9 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            max_completion_prompts: self
+                .max_completion_prompts
+                .unwrap_or(DEFAULT_MAX_COMPLETION_PROMPTS),
         }
     }
 

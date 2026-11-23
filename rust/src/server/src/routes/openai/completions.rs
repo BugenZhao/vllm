@@ -78,6 +78,12 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
+    // Each prompt of a batch becomes its own engine request, so the bound sits
+    // here, where they fan out; render leaves it to this route, like `n`.
+    validate::validate_prompt_count(
+        body.prompt.as_ref(),
+        state.api_server_options.max_completion_prompts,
+    )?;
     let prepared = prepare_completion_request(
         body,
         &lora_resolution,

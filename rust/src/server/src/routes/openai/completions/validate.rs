@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::types::CompletionRequest;
+use super::types::{CompletionPrompt, CompletionRequest};
 use crate::error::{ApiError, bail_invalid_request};
 use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
@@ -103,6 +103,29 @@ pub(super) fn validate_request_compat(
     }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
+    Ok(())
+}
+
+/// Reject a prompt batch larger than the server's `VLLM_MAX_COMPLETION_PROMPTS`
+/// allows, like Python. A single prompt, a flat token-ID list included, is not
+/// a batch and is never counted.
+pub(super) fn validate_prompt_count(
+    prompt: Option<&CompletionPrompt>,
+    max_completion_prompts: i64,
+) -> Result<(), ApiError> {
+    let prompt_count = match prompt {
+        Some(CompletionPrompt::Texts(texts)) => texts.len(),
+        Some(CompletionPrompt::TokenIds(token_ids)) => token_ids.len(),
+        Some(CompletionPrompt::Single(_)) | None => return Ok(()),
+    };
+    if i64::try_from(prompt_count).map_or(true, |count| count > max_completion_prompts) {
+        bail_invalid_request!(
+            param = "prompt",
+            "prompt list length {prompt_count} exceeds the maximum allowed count of \
+             {max_completion_prompts}. To increase this limit, set the \
+             VLLM_MAX_COMPLETION_PROMPTS environment variable."
+        );
+    }
     Ok(())
 }
 
