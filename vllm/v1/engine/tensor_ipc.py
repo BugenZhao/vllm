@@ -11,8 +11,10 @@ and cleanup lives here.
 """
 
 import dataclasses
+import queue
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import field
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any
@@ -100,6 +102,10 @@ class TensorIpcSender(OOBTensorConsumer):
 @dataclasses.dataclass(slots=True)
 class _Sender:
     current_message_id: int = -1
+    # Tensor ids of `current_message_id` already returned.
+    received: set[int] = field(default_factory=set)
+    # Messages up to this one failed to decode; their tensors are dropped.
+    discarded_through: int = -1
     tensors: dict[int, dict[int, torch.Tensor]] = field(default_factory=dict)
 
 
@@ -144,6 +150,8 @@ class TensorIpcReceiver:
                                     sender_id,
                                 )
                         sender.current_message_id = message_id
+                        sender.received.clear()
+                    sender.received.add(tensor_id)
                     logger.debug(
                         "Received tensor %s from sender %s for (shape=%s, device=%s) "
                         "via IPC queue (shared memory)",
@@ -154,16 +162,53 @@ class TensorIpcReceiver:
                     )
                     return tensor
 
-            ipc_data: TensorIpcData = self.queue.get(timeout=10.0)
+            self._store(self.queue.get(timeout=10.0))
 
-            # Store tensor
-            sender = self._tensor_buffers[ipc_data.sender_id]
-            if sender.current_message_id > ipc_data.message_id:
+    def discard_message(
+        self, sender_id: str, message_id: int, tensor_ids: Iterable[int]
+    ) -> None:
+        """Release the tensors `tensor_ids` of a message that will not be
+        decoded (its request failed to decode), and older ones from the same
+        sender.
+
+        The sender puts a message's tensors on the queue before it sends the
+        message, so the ones not taken yet arrive as they would for a decode;
+        wait for them the same way, then drop them.
+        """
+        sender = self._tensor_buffers[sender_id]
+        sender.discarded_through = max(sender.discarded_through, message_id)
+        pending = set(tensor_ids)
+        if sender.current_message_id == message_id:
+            pending -= sender.received
+        for mid in [mid for mid in sender.tensors if mid <= message_id]:
+            if mid == message_id:
+                pending -= sender.tensors[mid].keys()
+            del sender.tensors[mid]
+        while pending:
+            try:
+                ipc_data = self.queue.get(timeout=10.0)
+            except queue.Empty:
+                # Later arrivals are still dropped by `discarded_through`.
                 logger.warning(
-                    "Ignoring stale tensor from sender %s", ipc_data.sender_id
+                    "Timed out waiting for %d tensors of discarded message %s "
+                    "from sender %s",
+                    len(pending),
+                    message_id,
+                    sender_id,
                 )
-                continue
+                return
+            if ipc_data.sender_id == sender_id and ipc_data.message_id == message_id:
+                pending.discard(ipc_data.tensor_id)
+            else:
+                self._store(ipc_data)
 
-            sender.tensors.setdefault(ipc_data.message_id, {})[ipc_data.tensor_id] = (
-                ipc_data.tensor
-            )
+    def _store(self, ipc_data: TensorIpcData) -> None:
+        sender = self._tensor_buffers[ipc_data.sender_id]
+        if ipc_data.message_id <= sender.discarded_through:
+            return
+        if sender.current_message_id > ipc_data.message_id:
+            logger.warning("Ignoring stale tensor from sender %s", ipc_data.sender_id)
+            return
+        sender.tensors.setdefault(ipc_data.message_id, {})[ipc_data.tensor_id] = (
+            ipc_data.tensor
+        )

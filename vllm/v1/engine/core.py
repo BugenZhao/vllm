@@ -126,6 +126,58 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+# Positions in the array form of an encoded `EngineCoreRequest`.
+_REQUEST_FIELD_POS = {
+    name: pos for pos, name in enumerate(EngineCoreRequest.__struct_fields__)
+}
+
+
+def _add_request_ids(fields: Any) -> tuple[str, int] | None:
+    """The request id and client index of an `EngineCoreRequest` in its raw
+    msgpack array form, or None if `fields` does not hold them."""
+    if not isinstance(fields, list) or len(fields) <= _REQUEST_FIELD_POS["request_id"]:
+        return None
+    request_id = fields[_REQUEST_FIELD_POS["request_id"]]
+    pos = _REQUEST_FIELD_POS["client_index"]
+    # An encoder may leave out trailing fields that hold their default.
+    client_index = fields[pos] if len(fields) > pos else 0
+    if not isinstance(request_id, str) or type(client_index) is not int:
+        return None
+    return request_id, client_index
+
+
+def _oob_tensor_handles(fields: Any) -> dict[tuple[str, int], set[int]]:
+    """The tensor ids, per (sender id, message id), of the out-of-band tensors
+    an `EngineCoreRequest` in its raw msgpack array form refers to."""
+    if not isinstance(fields, list):
+        return {}
+    found = defaultdict[tuple[str, int], set[int]](set)
+    pending = [
+        fields[pos]
+        for pos in (
+            _REQUEST_FIELD_POS["mm_features"],
+            _REQUEST_FIELD_POS["prompt_embeds"],
+        )
+        if pos < len(fields)
+    ]
+    while pending:
+        obj = pending.pop()
+        if isinstance(obj, list):
+            pending.extend(obj)
+        elif isinstance(obj, dict):
+            if obj.keys() == {"sender_id", "message_id", "tensor_id"}:
+                sender_id = obj["sender_id"]
+                message_id, tensor_id = obj["message_id"], obj["tensor_id"]
+                if (
+                    isinstance(sender_id, str)
+                    and type(message_id) is int
+                    and type(tensor_id) is int
+                ):
+                    found[sender_id, message_id].add(tensor_id)
+            else:
+                pending.extend(obj.values())
+    return found
+
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -2265,7 +2317,18 @@ class EngineCoreProc(EngineCore):
                     # Deserialize the request data.
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
-                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        try:
+                            req: EngineCoreRequest = add_request_decoder.decode(
+                                data_frames
+                            )
+                        except Exception as e:
+                            # Decoding runs the params' `__post_init__` checks
+                            # again, so a request can fail here; fail just that
+                            # request instead of ending this thread.
+                            self._handle_add_request_decode_error(
+                                data_frames, e, num_clients=len(input_sockets)
+                            )
+                            continue
                         try:
                             request = self.preprocess_add_request(req)
                         except MultiModalCacheMissError as e:
@@ -2276,7 +2339,9 @@ class EngineCoreProc(EngineCore):
                         except VLLMValidationError as e:
                             # Report request validation errors without terminating
                             # the engine.
-                            self._handle_request_validation_error(req, e)
+                            self._handle_request_validation_error(
+                                req.request_id, req.client_index, e
+                            )
                             continue
                         except Exception:
                             self._handle_request_preproc_error(req)
@@ -2431,15 +2496,49 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def _handle_request_validation_error(
-        self, request: EngineCoreRequest, error: VLLMValidationError
+        self,
+        request_id: str,
+        client_index: int,
+        error: VLLMValidationError | msgspec.ValidationError,
     ) -> None:
-        logger.info("Request %s failed validation: %s", request.request_id, error)
+        logger.info("Request %s failed validation: %s", request_id, error)
         self._send_finish_outputs_to_client(
-            [request.request_id],
-            request.client_index,
+            [request_id],
+            client_index,
             FinishReason.ERROR,
             RequestError(code="validation_error", message=str(error)),
         )
+
+    def _handle_add_request_decode_error(
+        self, data_frames: Sequence[bytestr], error: Exception, num_clients: int
+    ) -> None:
+        """Release what an add request that failed to decode holds, and return
+        a request-scoped error for it, or log and drop it when its request id
+        and client index cannot be recovered. Must be called from the `except`
+        block.
+        """
+        try:
+            fields = msgspec.msgpack.decode(data_frames[0])
+        except Exception:
+            fields = None
+        if self.tensor_ipc_receiver is not None:
+            # The decode may have stopped before taking these off the queue.
+            for (sender_id, message_id), tensor_ids in _oob_tensor_handles(
+                fields
+            ).items():
+                self.tensor_ipc_receiver.discard_message(
+                    sender_id, message_id, tensor_ids
+                )
+        ids = _add_request_ids(fields)
+        if ids is None or not 0 <= ids[1] < num_clients:
+            logger.exception("Dropping an add request that failed to decode")
+            return
+        request_id, client_index = ids
+        if isinstance(error, (VLLMValidationError, msgspec.ValidationError)):
+            self._handle_request_validation_error(request_id, client_index, error)
+        else:
+            logger.exception("Unexpected error decoding request %s", request_id)
+            self._send_error_outputs_to_client([request_id], client_index)
 
     def pause_scheduler(
         self,

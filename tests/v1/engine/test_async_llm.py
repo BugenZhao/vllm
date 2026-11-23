@@ -888,6 +888,39 @@ async def test_dp_rank_argument():
 
 
 @pytest.mark.asyncio(scope="module")
+async def test_engine_decode_validation_error():
+    """Llama 3's generation config adds two EOS ids to `stop_token_ids` after
+    the frontend's count check, so 128 ids reach the engine as 130 and fail the
+    check that reruns when the engine decodes the request. The caller gets the
+    validation error and the engine keeps serving."""
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        with pytest.raises(VLLMValidationError, match="Too many stop_token_ids: 130"):
+            async for _ in engine.generate(
+                request_id="request-0",
+                prompt=TEXT_PROMPT,
+                sampling_params=SamplingParams(
+                    max_tokens=10, stop_token_ids=list(range(128))
+                ),
+            ):
+                pass
+
+        outputs = [
+            output
+            async for output in engine.generate(
+                request_id="request-1",
+                prompt=TEXT_PROMPT,
+                sampling_params=SamplingParams(max_tokens=10),
+            )
+        ]
+        assert outputs[-1].finished
+        assert len(outputs[-1].outputs[0].token_ids) > 0
+
+
+@pytest.mark.asyncio(scope="module")
 async def test_header_dp_rank_argument():
     with ExitStack() as after:
         with set_default_torch_num_threads(1):

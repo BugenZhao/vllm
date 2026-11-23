@@ -4,19 +4,26 @@
 """Tests for tensor IPC queue functionality."""
 
 import multiprocessing as mp
+import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue as MPQueue
 from multiprocessing.synchronize import Barrier as BarrierType
 from multiprocessing.synchronize import Event as EventType
 from queue import Empty
 from typing import Any
 
+import msgspec
 import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.core import _oob_tensor_handles
 from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
     TensorIpcReceiver,
@@ -974,6 +981,105 @@ def test_concurrent_senders_interleaved_buffer():
     for sid in ("A", "B"):
         tensors = receiver._tensor_buffers[sid].tensors.get(1, {})
         assert len(tensors) == 0, f"Sender {sid} buffer not empty: {tensors}"
+
+
+def _embeds_request(prompt_embeds: torch.Tensor, stop_token_ids: list[int]):
+    params = SamplingParams(max_tokens=4)
+    # Set after construction, as the frontend's generation-config EOS merge
+    # does, so only the engine's decode checks the count.
+    params.stop_token_ids = stop_token_ids
+    return EngineCoreRequest(
+        request_id="req",
+        prompt_token_ids=None,
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        prompt_embeds=prompt_embeds,
+    )
+
+
+def test_discarded_message_releases_its_tensors():
+    """A request whose typed decode fails before its `prompt_embeds` leaves the
+    tensor unclaimed on the queue; once the engine discards the message, the
+    tensor is dropped instead of buffered when the queue is next drained."""
+    tensor_queue = _MP_CTX.Queue()
+    receiver = TensorIpcReceiver(tensor_queue)
+    decoder = MsgpackDecoder(EngineCoreRequest, oob_tensor_provider=receiver)
+    encoder_a = MsgpackEncoder(
+        size_threshold=0, oob_tensor_consumer=TensorIpcSender(tensor_queue)
+    )
+    encoder_b = MsgpackEncoder(
+        size_threshold=0, oob_tensor_consumer=TensorIpcSender(tensor_queue)
+    )
+
+    bad = encoder_a.encode(_embeds_request(torch.randn(4, 8), list(range(200))))
+    with pytest.raises(VLLMValidationError, match="Too many stop_token_ids"):
+        decoder.decode(bad)
+    [((sender_a, message_id), tensor_ids)] = _oob_tensor_handles(
+        msgspec.msgpack.decode(bad[0])
+    ).items()
+    assert tensor_ids == {0}
+    receiver.discard_message(sender_a, message_id, tensor_ids)
+
+    # Another sender's request drains the queue past sender A's tensor.
+    embeds = torch.randn(4, 8)
+    good = decoder.decode(encoder_b.encode(_embeds_request(embeds, [])))
+    assert torch.equal(good.prompt_embeds, embeds)
+    assert not receiver._tensor_buffers[sender_a].tensors
+
+
+class _BlockingGetSignalQueue(MPQueue):
+    """A real queue that signals when a caller starts a blocking `get`."""
+
+    def __init__(self):
+        super().__init__(ctx=_MP_CTX)
+        self.blocking_get_started = threading.Event()
+
+    def get(self, block=True, timeout=None):
+        if block:
+            self.blocking_get_started.set()
+        return super().get(block, timeout)
+
+
+def test_discard_message_takes_late_tensors():
+    """A discarded message's tensor that reaches the queue only after the
+    discard starts waiting is still taken off, with no later traffic."""
+    tensor_queue = _BlockingGetSignalQueue()
+    receiver = TensorIpcReceiver(tensor_queue)
+    discard = threading.Thread(target=receiver.discard_message, args=("A", 1, {0}))
+    discard.start()
+    assert tensor_queue.blocking_get_started.wait(timeout=5.0)
+    tensor_queue.put(TensorIpcData("A", 1, 0, torch.randn(2, 3)))
+    discard.join(timeout=15.0)
+    assert not discard.is_alive()
+
+    with pytest.raises(Empty):
+        tensor_queue.get(timeout=1.0)
+    assert not receiver._tensor_buffers["A"].tensors
+
+
+def test_discard_message_skips_tensors_already_taken():
+    """The tensors a failed decode already took (e.g. `mm_features`, decoded
+    before `sampling_params`) are not waited for again."""
+    tensor_queue = _MP_CTX.Queue()
+    taken = torch.randn(2, 3)
+    for tensor_id, tensor in enumerate([taken, torch.randn(4, 5)]):
+        tensor_queue.put(TensorIpcData("A", 1, tensor_id, tensor))
+    receiver = TensorIpcReceiver(tensor_queue)
+    handle = {"sender_id": "A", "message_id": 1, "tensor_id": 0}
+    assert torch.equal(receiver("float32", (2, 3), handle), taken)
+
+    start = time.monotonic()
+    receiver.discard_message("A", 1, {0, 1})
+    # Waiting for the taken tensor would block for the 10 s queue timeout.
+    assert time.monotonic() - start < 5.0
+    with pytest.raises(Empty):
+        tensor_queue.get(timeout=1.0)
+    assert not receiver._tensor_buffers["A"].tensors
 
 
 def test_mixed_cpu_cuda_with_ipc_enabled():
