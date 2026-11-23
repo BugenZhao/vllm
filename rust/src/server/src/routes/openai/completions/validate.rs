@@ -124,17 +124,19 @@ pub(super) fn validate_request_compat(
 }
 
 fn max_completion_prompts() -> usize {
-    std::env::var("VLLM_MAX_COMPLETION_PROMPTS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1024)
+    parse_max_completion_prompts(std::env::var("VLLM_MAX_COMPLETION_PROMPTS").ok().as_deref())
+}
+
+/// Python reads the value with `int()`, which ignores surrounding whitespace.
+fn parse_max_completion_prompts(value: Option<&str>) -> usize {
+    value.and_then(|value| value.trim().parse().ok()).unwrap_or(1024)
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::validate_request_compat;
+    use super::{parse_max_completion_prompts, validate_request_compat};
     use crate::model_names::ServedModelNames;
     use crate::routes::openai::completions::types::CompletionRequest;
 
@@ -359,5 +361,18 @@ mod tests {
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
+    }
+
+    #[test]
+    fn max_completion_prompts_parses_like_python_int() {
+        for (value, expected) in [
+            (None, 1024),
+            (Some("2"), 2),
+            (Some("2 "), 2),
+            (Some(" 2\n"), 2),
+            (Some("not a number"), 1024),
+        ] {
+            assert_eq!(parse_max_completion_prompts(value), expected, "{value:?}");
+        }
     }
 }
