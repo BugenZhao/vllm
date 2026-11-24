@@ -13,11 +13,8 @@ use vllm_text::tokenizer::DynTokenizer;
 use crate::parser::ParserSelection;
 use crate::parser::reasoning::ReasoningParserFactory;
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::parser::unified::{
-    BeamUnifiedParser, HfTemplateError, HfUnifiedParser, ResponseTemplate, UnifiedParserFactory,
-    names,
-};
-use crate::request::{ChatRequest, ChatTool, ResolvedToolContext};
+use crate::parser::unified::{HfTemplateError, ResponseTemplate, UnifiedParserFactory};
+use crate::request::{ChatRequest, ResolvedToolContext};
 use crate::{Error, Result};
 
 /// The output parsers of one model, resolved from the server's tool-call and
@@ -32,28 +29,21 @@ use crate::{Error, Result};
 pub struct ResolvedParsers {
     model_id: String,
     tokenizer: DynTokenizer,
+    /// `response_template` from `tokenizer_config.json` for the parsers driven
+    /// by it, or why it is unavailable.
+    response_template: std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
     parsers: Parsers,
 }
 
 #[derive(Clone)]
 enum Parsers {
     /// One parser handles both reasoning and tool calls.
-    Unified(UnifiedParserSpec),
+    Unified(String),
     /// Separate, optional reasoning and tool-call parsers.
     Split {
         tool: ToolParserSlot,
         reasoning: Option<String>,
     },
-}
-
-#[derive(Clone)]
-enum UnifiedParserSpec {
-    /// Built by its registry constructor.
-    Registered(String),
-    // Parsers driven by the model's template are built from it, never by
-    // their registry constructors.
-    Hf(Arc<ResponseTemplate>),
-    Beam(Arc<ResponseTemplate>),
 }
 
 /// The tool parser of [`Parsers::Split`], or why there is none.
@@ -119,10 +109,9 @@ impl ResolvedParsers {
             let reasoning_canonical =
                 reasoning_name.map(|name| unified_factory.canonical_name(name));
             let unified = if tool_canonical == reasoning_canonical {
-                UnifiedParserSpec::resolve(unified_name, response_template).and_then(|spec| {
-                    spec.create(&[], tokenizer.clone())?;
-                    Ok(spec)
-                })
+                unified_factory
+                    .create(unified_name, &[], tokenizer.clone(), response_template)
+                    .map(|_| unified_name)
             } else {
                 Err(Error::IncompatibleParserSelections {
                     tool: tool_name.unwrap_or("none").to_owned(),
@@ -130,9 +119,9 @@ impl ResolvedParsers {
                 })
             };
             match unified {
-                Ok(spec) => {
-                    info!(parser_name = spec.name(), "using unified parser");
-                    Parsers::Unified(spec)
+                Ok(name) => {
+                    info!(parser_name = name, "using unified parser");
+                    Parsers::Unified(name.to_owned())
                 }
                 Err(error) if tool_auto && reasoning_auto => {
                     warn_unusable_auto_parser("unified", unified_name, model_id, &error);
@@ -188,6 +177,7 @@ impl ResolvedParsers {
         Ok(Self {
             model_id: model_id.to_owned(),
             tokenizer,
+            response_template: response_template.clone(),
             parsers,
         })
     }
@@ -195,7 +185,7 @@ impl ResolvedParsers {
     /// Effective tool-call parser name, if tool calls are parsed.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
         match &self.parsers {
-            Parsers::Unified(spec) => Some(spec.name()),
+            Parsers::Unified(name) => Some(name),
             Parsers::Split {
                 tool: ToolParserSlot::Parser(name),
                 ..
@@ -207,7 +197,7 @@ impl ResolvedParsers {
     /// Effective reasoning parser name, if reasoning is parsed.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
         match &self.parsers {
-            Parsers::Unified(spec) => Some(spec.name()),
+            Parsers::Unified(name) => Some(name),
             Parsers::Split { reasoning, .. } => reasoning.as_deref(),
         }
     }
@@ -215,7 +205,12 @@ impl ResolvedParsers {
     /// Build the parser for one request, given its tools.
     pub(super) fn create(&self, request: &ChatRequest) -> Result<Box<dyn UnifiedParser>> {
         match &self.parsers {
-            Parsers::Unified(spec) => spec.create(request.tools(), self.tokenizer.clone()),
+            Parsers::Unified(name) => UnifiedParserFactory::global().create(
+                name,
+                request.tools(),
+                self.tokenizer.clone(),
+                &self.response_template,
+            ),
             Parsers::Split { tool, reasoning } => {
                 let tool_parser = self.create_tool_parser(tool, &request.tool_context)?;
                 let reasoning_parser = reasoning
@@ -261,52 +256,6 @@ impl ResolvedParsers {
         ToolParserFactory::global()
             .create(parser_name, tools, self.tokenizer.clone())
             .map(Some)
-    }
-}
-
-impl UnifiedParserSpec {
-    fn resolve(
-        name: &str,
-        response_template: &std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
-    ) -> Result<Self> {
-        let template = || {
-            response_template.clone().map_err(|error| Error::ParserInitialization {
-                kind: "unified",
-                name: name.to_string(),
-                error: Box::new(error),
-            })
-        };
-        Ok(match name {
-            names::HF => Self::Hf(template()?),
-            names::BEAM => Self::Beam(template()?),
-            _ => Self::Registered(name.to_owned()),
-        })
-    }
-
-    fn name(&self) -> &str {
-        match self {
-            Self::Registered(name) => name,
-            Self::Hf(_) => names::HF,
-            Self::Beam(_) => names::BEAM,
-        }
-    }
-
-    fn create(
-        &self,
-        tools: &[ChatTool],
-        tokenizer: DynTokenizer,
-    ) -> Result<Box<dyn UnifiedParser>> {
-        Ok(match self {
-            Self::Registered(name) => {
-                UnifiedParserFactory::global().create(name, tools, tokenizer)?
-            }
-            Self::Hf(template) => {
-                Box::new(HfUnifiedParser::new(template.clone(), tools, tokenizer))
-            }
-            Self::Beam(template) => {
-                Box::new(BeamUnifiedParser::new(template.clone(), tools, tokenizer))
-            }
-        })
     }
 }
 
