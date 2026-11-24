@@ -376,6 +376,22 @@ pub mod kv_connector {
         pub info: BTreeMap<[String; 4], u64>,
     }
 
+    /// HF3FS connector telemetry.
+    ///
+    /// Original Python definition: `HF3FSKVConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/hf3fs/hf3fs_connector.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct Hf3fsStats {
+        /// Time spent on each successful save.
+        pub save_duration: Vec<f64>,
+        /// Time spent on each successful load.
+        pub load_duration: Vec<f64>,
+        /// Failed saves since the previous update.
+        pub num_failed_save: u64,
+        /// Failed loads since the previous update.
+        pub num_failed_load: u64,
+    }
+
     /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
     #[serde_with::skip_serializing_none]
     #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -394,6 +410,8 @@ pub mod kv_connector {
         pub umbp: Option<UmbpStats>,
         #[serde(rename = "SimpleCPUOffloadConnector")]
         pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
+        #[serde(rename = "HF3FSKVConnector")]
+        pub hf3fs: Option<Hf3fsStats>,
         /// Child connector payloads without a Rust telemetry implementation.
         #[serde(flatten)]
         pub other: BTreeMap<String, OpaqueValue>,
@@ -416,6 +434,7 @@ pub mod kv_connector {
         Mooncake(MooncakeStats),
         Umbp(UmbpStats),
         SimpleCpuOffload(SimpleCpuOffloadStats),
+        Hf3fs(Hf3fsStats),
         Multi(Box<MultiConnectorStats>),
         Other(BTreeMap<String, OpaqueValue>),
     }

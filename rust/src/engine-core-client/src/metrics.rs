@@ -15,7 +15,7 @@ use vllm_metrics::{
 };
 
 use crate::protocol::stats::{
-    CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
+    CachedTokensBySource, Hf3fsStats, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
     MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats, SimpleCpuOffloadStats,
     UmbpStats,
 };
@@ -150,6 +150,12 @@ struct SchedulerStatsHandles {
     simple_kv_offload_used_blocks: Family<EngineLabels, U64Gauge>,
     simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
     simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
+
+    // HF3FS connector telemetry, decoded from `kv_connector_stats`.
+    hf3fs_save_duration_seconds: HistogramMetric,
+    hf3fs_load_duration_seconds: HistogramMetric,
+    hf3fs_num_failed_save: U64Counter,
+    hf3fs_num_failed_load: U64Counter,
 
     // NIXL connector telemetry, decoded from `kv_connector_stats`.
     nixl_xfer_time_seconds: HistogramMetric,
@@ -342,6 +348,14 @@ fn resolve_scheduler_stats_handles(
             .simple_kv_offload_pending_store_blocks
             .clone(),
         simple_kv_offload_info: metrics.simple_kv_offload_info.clone(),
+        hf3fs_save_duration_seconds: metrics
+            .hf3fs_save_duration_seconds
+            .get_or_create_owned(&labels),
+        hf3fs_load_duration_seconds: metrics
+            .hf3fs_load_duration_seconds
+            .get_or_create_owned(&labels),
+        hf3fs_num_failed_save: metrics.hf3fs_num_failed_save.get_or_create_owned(&labels),
+        hf3fs_num_failed_load: metrics.hf3fs_num_failed_load.get_or_create_owned(&labels),
         nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
         nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
         nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
@@ -483,6 +497,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
             KvConnectorStats::SimpleCpuOffload(stats) => {
                 record_simple_cpu_offload_stats(handles, stats)
             }
+            KvConnectorStats::Hf3fs(stats) => record_hf3fs_stats(handles, stats),
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -504,6 +519,9 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
     }
     if let Some(simple_cpu_offload) = &stats.simple_cpu_offload {
         record_simple_cpu_offload_stats(handles, simple_cpu_offload);
+    }
+    if let Some(hf3fs) = &stats.hf3fs {
+        record_hf3fs_stats(handles, hf3fs);
     }
 }
 
@@ -613,6 +631,17 @@ fn record_simple_cpu_offload_stats(handles: &SchedulerStatsHandles, stats: &Simp
         };
         handles.simple_kv_offload_info.get_or_create(&info_labels).set(*value);
     }
+}
+
+fn record_hf3fs_stats(handles: &SchedulerStatsHandles, stats: &Hf3fsStats) {
+    for value in &stats.save_duration {
+        handles.hf3fs_save_duration_seconds.observe(*value);
+    }
+    for value in &stats.load_duration {
+        handles.hf3fs_load_duration_seconds.observe(*value);
+    }
+    handles.hf3fs_num_failed_save.inc_by(stats.num_failed_save);
+    handles.hf3fs_num_failed_load.inc_by(stats.num_failed_load);
 }
 
 fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
@@ -940,6 +969,65 @@ mod tests {
             vllm:simple_kv_offload_save_outcomes_total{model_name="model",engine="0",outcome="dropped_cpu_full"} 4
             vllm:simple_kv_offload_save_outcomes_total{model_name="model",engine="0",outcome="stored"} 4
             vllm:simple_kv_offload_used_blocks{model_name="model",engine="0"} 5"#]].assert_eq(&simple_kv_offload_series());
+    }
+
+    /// Records `HF3FSKVConnectorStats` payloads into the `vllm:hf3fs_*` families,
+    /// as the only connector and as a `MultiConnector` child.
+    #[test]
+    fn hf3fs_stats_are_recorded_into_hf3fs_metrics() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+
+        let payload = serde_json::json!({
+            "save_duration": [0.002, 0.003],
+            "load_duration": [0.5],
+            "num_failed_save": 1,
+            "num_failed_load": 0,
+            "num_transfer_task": 4,
+        });
+        for kv_connector_stats in [
+            payload.clone(),
+            serde_json::json!({ "HF3FSKVConnector": payload }),
+        ] {
+            let stats = SchedulerStats {
+                kv_connector_stats: Some(serde_json::from_value(kv_connector_stats).unwrap()),
+                ..Default::default()
+            };
+            super::record_scheduler_stats_with_handles(&handles, &stats);
+        }
+
+        let hf3fs_series = metrics
+            .render()
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.starts_with("vllm:hf3fs_")
+                    && (!line.contains("_bucket{")
+                        || line.starts_with("vllm:hf3fs_save_duration_seconds_bucket{"))
+            })
+            .join("\n");
+        expect![[r#"
+            vllm:hf3fs_save_duration_seconds_sum{model_name="model",engine="0"} 0.01
+            vllm:hf3fs_save_duration_seconds_count{model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.001",model_name="model",engine="0"} 0
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.005",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.01",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.025",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.05",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.075",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.1",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.2",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.3",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.5",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="0.75",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="1.0",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="5.0",model_name="model",engine="0"} 4
+            vllm:hf3fs_save_duration_seconds_bucket{le="+Inf",model_name="model",engine="0"} 4
+            vllm:hf3fs_load_duration_seconds_sum{model_name="model",engine="0"} 1.0
+            vllm:hf3fs_load_duration_seconds_count{model_name="model",engine="0"} 2
+            vllm:hf3fs_num_failed_save_total{model_name="model",engine="0"} 2
+            vllm:hf3fs_num_failed_load_total{model_name="model",engine="0"} 0"#]]
+        .assert_eq(&hf3fs_series);
     }
 
     /// Exports every engine's KV fetch stage gauges from startup and sets them
