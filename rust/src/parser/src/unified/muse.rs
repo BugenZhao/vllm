@@ -1721,14 +1721,25 @@ mod tests {
         }];
         let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
         let text = format!(
-            " to=Bash.command{MESSAGE}{}",
+            " to=Bash.command{MESSAGE}{}{EOT}",
             atem(&[("Bash.command", &[("command", "007"), ("n", "7")][..])])
         );
 
-        let calls = parser.parse_complete(&text).unwrap().calls();
+        let batch = parser.parse_complete(&text).unwrap();
+        let calls = batch.calls();
 
         assert_eq!(calls[0].name.as_deref(), Some("Bash"));
         assert_eq!(calls[0].arguments, r#"{"command": "007", "n": 7}"#);
+        for size in [1, 3] {
+            parser.reset();
+            let chunks = char_chunks(&text, size);
+            let chunks: Vec<_> = chunks.iter().map(String::as_str).collect();
+            assert_eq!(
+                collect_stream(&mut parser, &chunks).merged_events(),
+                batch.merged_events(),
+                "chunk size {size}"
+            );
+        }
     }
 
     #[test]
