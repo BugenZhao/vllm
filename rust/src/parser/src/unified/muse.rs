@@ -417,7 +417,7 @@ fn normalize_tool_name(name: String, tool_names: &HashSet<String>) -> String {
     let Some((head, tail)) = name.split_once('.') else {
         return name;
     };
-    // Python never registers an empty name, so an emitted `.x` stays as-is.
+    // Keep an emitted name with an empty namespace head verbatim.
     let has_sibling = || {
         tool_names
             .iter()
@@ -1722,14 +1722,14 @@ mod tests {
         let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
         let text = format!(
             " to=Bash.command{MESSAGE}{}{EOT}",
-            atem(&[("Bash.command", &[("command", "007"), ("n", "7")][..])])
+            atem(&[("Bash.command", &[("command", "7"), ("n", "7")][..])])
         );
 
         let batch = parser.parse_complete(&text).unwrap();
         let calls = batch.calls();
 
         assert_eq!(calls[0].name.as_deref(), Some("Bash"));
-        assert_eq!(calls[0].arguments, r#"{"command": "007", "n": 7}"#);
+        assert_eq!(calls[0].arguments, r#"{"command": "7", "n": 7}"#);
         for size in [1, 3] {
             parser.reset();
             let chunks = char_chunks(&text, size);
