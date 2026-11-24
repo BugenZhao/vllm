@@ -4218,6 +4218,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.mooncake.is_some());
     assert!(multi_connector_stats.umbp.is_some());
     assert!(multi_connector_stats.simple_cpu_offload.is_some());
+    assert!(multi_connector_stats.hisparse.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -4272,6 +4273,10 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         "vllm:simple_kv_offload_save_outcomes_total{model_name=\"test-model\",engine=\"0\",\
          outcome=\"stored\"} 3"
     ));
+    assert!(
+        rendered_metrics
+            .contains("vllm:hisparse_cache_hits_total{model_name=\"test-model\",engine=\"0\"} 3")
+    );
 
     let simple_cpu_offload_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(simple_cpu_offload_stats_hex).unwrap()).unwrap();

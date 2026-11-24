@@ -347,6 +347,16 @@ pub struct SchedulerMetrics {
     pub simple_kv_offload_pending_store_blocks: Family<EngineLabels, U64Gauge>,
     pub simple_kv_offload_info: Family<SimpleCpuOffloadInfoLabels, U64Gauge>,
 
+    // HiSparse connector telemetry. Mirrors `HiSparsePromMetrics`.
+    pub hisparse_cache_hits: Family<EngineLabels, U64Counter>,
+    pub hisparse_cache_misses: Family<EngineLabels, U64Counter>,
+    pub hisparse_host_to_device_bytes: Family<EngineLabels, U64Counter>,
+    pub hisparse_host_cache_usage_perc: Family<EngineLabels, F64Gauge>,
+    pub hisparse_pending_page_transfers: Family<EngineLabels, U64Gauge>,
+    pub hisparse_host_block_lifetime_seconds: BucketHistogramFamily,
+    pub hisparse_host_block_idle_before_evict_seconds: BucketHistogramFamily,
+    pub hisparse_host_block_reuse_gap_seconds: BucketHistogramFamily,
+
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
@@ -782,6 +792,73 @@ impl SchedulerMetrics {
             simple_kv_offload_info.clone(),
         );
 
+        // HiSparse connector telemetry.
+        let hisparse_cache_hits = Family::default();
+        registry.register(
+            "vllm:hisparse_cache_hits",
+            "Number of HiSparse device hot-buffer hits",
+            hisparse_cache_hits.clone(),
+        );
+
+        let hisparse_cache_misses = Family::default();
+        registry.register(
+            "vllm:hisparse_cache_misses",
+            "Number of HiSparse device hot-buffer misses",
+            hisparse_cache_misses.clone(),
+        );
+
+        let hisparse_host_to_device_bytes = Family::default();
+        registry.register(
+            "vllm:hisparse_host_to_device_bytes",
+            "Bytes transferred from host KV storage to HiSparse hot buffers",
+            hisparse_host_to_device_bytes.clone(),
+        );
+
+        let hisparse_host_cache_usage_perc = Family::default();
+        registry.register(
+            "vllm:hisparse_host_cache_usage_perc",
+            "HiSparse host KV-cache usage. 1 means 100 percent usage. Evictable cached blocks \
+             count as free",
+            hisparse_host_cache_usage_perc.clone(),
+        );
+
+        let hisparse_pending_page_transfers = Family::default();
+        registry.register(
+            "vllm:hisparse_pending_page_transfers",
+            "HiSparse page transfers (write-backs and restores) not yet completed",
+            hisparse_pending_page_transfers.clone(),
+        );
+
+        let hisparse_host_block_lifetime_seconds = Family::new_with_constructor(
+            FamilyHistogram::new(BucketFamily::KvCacheResidency, buckets),
+        );
+        registry.register(
+            "vllm:hisparse_host_block_lifetime_seconds",
+            "Histogram of HiSparse host KV block lifetime from allocation to eviction. Sampled \
+             metrics (controlled by --kv-cache-metrics-sample)",
+            hisparse_host_block_lifetime_seconds.clone(),
+        );
+
+        let hisparse_host_block_idle_before_evict_seconds = Family::new_with_constructor(
+            FamilyHistogram::new(BucketFamily::KvCacheResidency, buckets),
+        );
+        registry.register(
+            "vllm:hisparse_host_block_idle_before_evict_seconds",
+            "Histogram of HiSparse host KV block idle time before eviction. Sampled metrics \
+             (controlled by --kv-cache-metrics-sample)",
+            hisparse_host_block_idle_before_evict_seconds.clone(),
+        );
+
+        let hisparse_host_block_reuse_gap_seconds = Family::new_with_constructor(
+            FamilyHistogram::new(BucketFamily::KvCacheResidency, buckets),
+        );
+        registry.register(
+            "vllm:hisparse_host_block_reuse_gap_seconds",
+            "Histogram of time gaps between consecutive HiSparse host KV block accesses. \
+             Sampled metrics (controlled by --kv-cache-metrics-sample)",
+            hisparse_host_block_reuse_gap_seconds.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -836,6 +913,14 @@ impl SchedulerMetrics {
             simple_kv_offload_used_blocks,
             simple_kv_offload_pending_store_blocks,
             simple_kv_offload_info,
+            hisparse_cache_hits,
+            hisparse_cache_misses,
+            hisparse_host_to_device_bytes,
+            hisparse_host_cache_usage_perc,
+            hisparse_pending_page_transfers,
+            hisparse_host_block_lifetime_seconds,
+            hisparse_host_block_idle_before_evict_seconds,
+            hisparse_host_block_reuse_gap_seconds,
             log_stats: Family::default(),
         }
     }
