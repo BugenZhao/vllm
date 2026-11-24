@@ -30,11 +30,12 @@ pub async fn log_access(
         return next.run(request).await;
     }
 
-    // Absent for Unix-domain sockets.
-    let client = request
+    // Unix sockets have no peer IP, but a trusted header can supply a client.
+    let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
+    let client = (state.access_log.trusted_proxies).client_addr(peer, request.headers());
     let method = request.method().clone();
     let uri = request
         .uri()

@@ -41,7 +41,7 @@ use vllm_server::{
     CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
     HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
-    ReasoningEffort, RenderConfig, RendererSelection,
+    ReasoningEffort, RenderConfig, RendererSelection, TrustedProxies,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -699,6 +699,12 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
+    /// Trusted proxy IPs or networks for forwarded client addresses (default
+    /// `127.0.0.1,::1`). Like Python, set through `FORWARDED_ALLOW_IPS`.
+    #[arg(long, hide = true, env = "FORWARDED_ALLOW_IPS")]
+    #[serde(skip)]
+    pub forwarded_allow_ips: Option<TrustedProxies>,
+
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix. Like Python, it is set only through the deprecated
     /// `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`.
@@ -1001,6 +1007,9 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_LOG_STATS_INTERVAL: {error}"))?;
             self.log_stats_interval = Some(interval);
         }
+        if let Some(value) = lookup("FORWARDED_ALLOW_IPS") {
+            self.forwarded_allow_ips = Some(TrustedProxies::new(&value));
+        }
         if let Some(value) = lookup("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION") {
             self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
@@ -1282,6 +1291,7 @@ impl SharedRuntimeArgs {
                 .filter(|path| !path.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            trusted_proxies: self.forwarded_allow_ips.clone().unwrap_or_default(),
         }
     }
 

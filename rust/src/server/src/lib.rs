@@ -20,6 +20,7 @@ mod state;
 mod tls;
 #[cfg(test)]
 mod tls_tests;
+mod trusted_proxies;
 mod utils;
 
 use std::future::Future;
@@ -53,6 +54,7 @@ use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
+pub use trusted_proxies::TrustedProxies;
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
