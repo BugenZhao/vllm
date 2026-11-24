@@ -20,7 +20,8 @@ use crate::backend::{
 use crate::error::{Error, Result, bail_multimodal};
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
-    DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
+    DefaultChatOutputProcessor, HarmonyChatOutputProcessor, ResolvedParsers,
+    validate_harmony_parser_overrides,
 };
 use crate::parser::unified::{HfTemplateError, ResponseTemplate};
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
@@ -30,18 +31,21 @@ use crate::renderer::{
     KimiK3Variant,
 };
 use crate::request::ChatRequest;
-use crate::{DynChatOutputProcessor, ParserSelection, RendererSelection};
+use crate::{DynChatOutputProcessor, RendererSelection};
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
-    model_id: String,
-    model_type: String,
-    tokenizer: DynTokenizer,
     chat_renderer: DynChatRenderer,
     multimodal_model_info: Option<MultimodalModelInfo>,
-    /// `response_template` from `tokenizer_config.json` for the `hf` parser, or
-    /// why it is unavailable.
-    response_template: std::result::Result<Arc<ResponseTemplate>, HfTemplateError>,
+    /// How model output is parsed, resolved from the parser selections.
+    output_parsers: OutputParsers,
+}
+
+/// How [`HfChatBackend`] parses model output.
+enum OutputParsers {
+    /// `gpt_oss` uses native Harmony output parsing.
+    Harmony,
+    Default(ResolvedParsers),
 }
 
 impl HfChatBackend {
@@ -76,6 +80,21 @@ impl HfChatBackend {
         }
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
+        let output_parsers = if model_type == "gpt_oss" {
+            validate_harmony_parser_overrides(
+                &options.tool_call_parser,
+                &options.reasoning_parser,
+            )?;
+            OutputParsers::Harmony
+        } else {
+            OutputParsers::Default(ResolvedParsers::with_response_template(
+                &model_id,
+                tokenizer.clone(),
+                &response_template,
+                &options.tool_call_parser,
+                &options.reasoning_parser,
+            )?)
+        };
 
         let renderer = options.renderer.resolve(model_type);
         // Only the HF renderer renders Jinja templates.
@@ -134,12 +153,9 @@ impl HfChatBackend {
         );
 
         Ok(Self {
-            model_id,
-            model_type: model_type.to_string(),
-            tokenizer,
             chat_renderer,
             multimodal_model_info,
-            response_template,
+            output_parsers,
         })
     }
 }
@@ -180,42 +196,30 @@ impl ChatBackend for HfChatBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> Result<DynChatOutputProcessor> {
-        if self.model_type == "gpt_oss" {
-            validate_harmony_parser_overrides(options.tool_call_parser, options.reasoning_parser)?;
-            return Ok(Box::new(HarmonyChatOutputProcessor::new(request)?));
-        }
-
-        Ok(Box::new(
-            DefaultChatOutputProcessor::with_response_template(
+        Ok(match &self.output_parsers {
+            OutputParsers::Harmony => Box::new(HarmonyChatOutputProcessor::new(request)?),
+            OutputParsers::Default(parsers) => Box::new(DefaultChatOutputProcessor::new(
                 request,
-                &self.model_id,
-                self.tokenizer.clone(),
-                &self.response_template,
-                options.tool_call_parser,
-                options.reasoning_parser,
+                parsers,
                 options.tool_strict_level,
-            )?,
-        ))
+            )?),
+        })
     }
 
-    fn check_parser_selections(
-        &self,
-        tool_call_parser: &ParserSelection,
-        reasoning_parser: &ParserSelection,
-    ) -> Result<()> {
-        if self.model_type == "gpt_oss" {
-            return validate_harmony_parser_overrides(tool_call_parser, reasoning_parser);
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        match &self.output_parsers {
+            OutputParsers::Harmony => None,
+            OutputParsers::Default(parsers) => parsers.tool_call_parser_name(),
         }
+    }
 
-        DefaultChatOutputProcessor::check_parser_selections(
-            &self.model_id,
-            self.tokenizer.clone(),
-            &self.response_template,
-            tool_call_parser,
-            reasoning_parser,
-        )
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        match &self.output_parsers {
+            OutputParsers::Harmony => None,
+            OutputParsers::Default(parsers) => parsers.reasoning_parser_name(),
+        }
     }
 }
 
@@ -352,6 +356,8 @@ mod tests {
                 generation_config: Default::default(),
                 override_generation_config: Default::default(),
                 renderer,
+                tool_call_parser: ParserSelection::Auto,
+                reasoning_parser: ParserSelection::Auto,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: chat_template.map(str::to_string),
@@ -589,23 +595,32 @@ mod tests {
     }
 
     #[test]
-    fn check_parser_selections_builds_explicit_parsers_only() {
+    fn parser_selections_are_resolved_and_built_at_load() {
         const HF_CONFIG: &str = r#"{"model_type":"qwen2"}"#;
         const TOKENIZER_CONFIG: &str = r#"{"chat_template":"{{ messages[0].content }}"}"#;
         let explicit = |name: &str| ParserSelection::Explicit(name.to_string());
-        let check = |model_id: &str,
-                     config_json: &str,
-                     tokenizer: TestTokenizer,
-                     tool_call_parser: ParserSelection,
-                     reasoning_parser: ParserSelection| {
+        // The effective parser names, or why the model cannot be loaded.
+        let load = |model_id: &str,
+                    config_json: &str,
+                    tokenizer: TestTokenizer,
+                    tool_call_parser: ParserSelection,
+                    reasoning_parser: ParserSelection| {
             HfChatBackend::from_resolved_model_files(
                 resolved_files(config_json, TOKENIZER_CONFIG),
                 model_id.to_string(),
-                LoadModelBackendsOptions::default(),
+                LoadModelBackendsOptions {
+                    tool_call_parser,
+                    reasoning_parser,
+                    ..Default::default()
+                },
                 Arc::new(tokenizer),
             )
-            .unwrap()
-            .check_parser_selections(&tool_call_parser, &reasoning_parser)
+            .map(|backend| {
+                (
+                    backend.tool_call_parser_name().map(str::to_string),
+                    backend.reasoning_parser_name().map(str::to_string),
+                )
+            })
             .map_err(|error| error.to_report_string())
         };
         let think_tokenizer = || {
@@ -616,30 +631,46 @@ mod tests {
 
         let results = [
             // The tokenizer lacks the explicit reasoning parser's markers.
-            check(
+            load(
                 "test-model",
                 HF_CONFIG,
                 TestTokenizer::new(),
                 ParserSelection::Auto,
                 explicit("qwen3"),
             ),
-            check(
+            load(
                 "test-model",
                 HF_CONFIG,
                 think_tokenizer(),
                 ParserSelection::Auto,
                 explicit("qwen3"),
             ),
-            // An automatic match by model name is not built.
-            check(
+            // An automatic match by model name that the tokenizer cannot
+            // support is disabled; the other automatic match stays.
+            load(
                 "Qwen/Qwen3-8B",
                 HF_CONFIG,
                 TestTokenizer::new(),
                 ParserSelection::Auto,
                 ParserSelection::Auto,
             ),
+            load(
+                "Qwen/Qwen3-8B",
+                HF_CONFIG,
+                think_tokenizer(),
+                ParserSelection::Auto,
+                ParserSelection::Auto,
+            ),
+            // An automatic unified match disables both.
+            load(
+                "google/gemma-4-test",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                ParserSelection::Auto,
+                ParserSelection::Auto,
+            ),
             // `hf` needs the checkpoint's `response_template`.
-            check(
+            load(
                 "test-model",
                 HF_CONFIG,
                 TestTokenizer::new(),
@@ -647,14 +678,34 @@ mod tests {
                 explicit("hf"),
             ),
             // The automatic reasoning match is a different unified parser.
-            check(
+            load(
                 "google/gemma-4-test",
                 HF_CONFIG,
                 TestTokenizer::new(),
                 explicit("hermes"),
                 ParserSelection::Auto,
             ),
-            check(
+            // So is turning reasoning parsing off.
+            load(
+                "google/gemma-4-test",
+                HF_CONFIG,
+                TestTokenizer::new(),
+                ParserSelection::Auto,
+                ParserSelection::None,
+            ),
+            // Another name of the automatic unified match is the same parser.
+            load(
+                "test/Muse-Spark",
+                HF_CONFIG,
+                TestTokenizer::new()
+                    .with_special_token("<|start|>", 1000)
+                    .with_special_token("<|message|>", 1001)
+                    .with_special_token("<|eom|>", 1002)
+                    .with_special_token("<|eot|>", 1003),
+                explicit("musespark"),
+                ParserSelection::Auto,
+            ),
+            load(
                 "test-model",
                 r#"{"model_type":"gpt_oss"}"#,
                 TestTokenizer::new(),
@@ -669,16 +720,55 @@ mod tests {
                     "failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`",
                 ),
                 Ok(
-                    (),
+                    (
+                        None,
+                        Some(
+                            "qwen3",
+                        ),
+                    ),
                 ),
                 Ok(
-                    (),
+                    (
+                        Some(
+                            "qwen3_json",
+                        ),
+                        None,
+                    ),
+                ),
+                Ok(
+                    (
+                        Some(
+                            "qwen3_json",
+                        ),
+                        Some(
+                            "qwen3",
+                        ),
+                    ),
+                ),
+                Ok(
+                    (
+                        None,
+                        None,
+                    ),
                 ),
                 Err(
                     "failed to initialize unified parser `hf`: the model's tokenizer_config.json provides no response_template",
                 ),
                 Err(
                     "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hermes, reasoning=gemma4",
+                ),
+                Err(
+                    "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=gemma4, reasoning=none",
+                ),
+                Ok(
+                    (
+                        Some(
+                            "musespark",
+                        ),
+                        Some(
+                            "musespark",
+                        ),
+                    ),
                 ),
                 Err(
                     "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported",
@@ -699,22 +789,17 @@ mod tests {
             backend.chat_renderer().render(&request_with_user_text("hello")).unwrap().prompt;
         assert!(matches!(prompt, Prompt::TokenIds(_)));
 
-        let mut request = request_with_user_text("hello");
-        let error = match backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_strict_level: None,
-                tool_call_parser: &ParserSelection::Explicit("json".to_string()),
-                reasoning_parser: &ParserSelection::Auto,
-            },
-        ) {
-            Ok(_) => panic!("gpt_oss should reject generic parser overrides"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.to_report_string(),
-            "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
-        );
+        backend
+            .new_chat_output_processor(
+                &mut request_with_user_text("hello"),
+                NewChatOutputProcessorOptions {
+                    tool_strict_level: None,
+                },
+            )
+            .unwrap();
+        // Harmony parses the output itself, so no selectable parser is reported.
+        assert_eq!(backend.tool_call_parser_name(), None);
+        assert_eq!(backend.reasoning_parser_name(), None);
     }
 
     #[test]
@@ -834,8 +919,6 @@ mod tests {
                 .new_chat_output_processor(
                     &mut request,
                     NewChatOutputProcessorOptions {
-                        tool_call_parser: &ParserSelection::Auto,
-                        reasoning_parser: &ParserSelection::Auto,
                         tool_strict_level: None,
                     },
                 )

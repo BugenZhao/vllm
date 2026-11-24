@@ -864,6 +864,8 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            tool_call_parser: case.tool_call_parser.clone(),
+            reasoning_parser: case.reasoning_parser.clone(),
             ..Default::default()
         },
     )
@@ -1041,8 +1043,6 @@ async fn parse_completion(
             // Pin every tool schema so that builder-backed parsers build an
             // output grammar for replay. The strict level does not affect parsing.
             tool_strict_level: Some(ToolStrictLevel::Parameter),
-            tool_call_parser: &case.tool_call_parser,
-            reasoning_parser: &case.reasoning_parser,
         },
     )?;
     processor.initialize(&prompt_token_ids)?;

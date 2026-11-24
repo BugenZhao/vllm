@@ -61,7 +61,7 @@ impl UnifiedParserFactory {
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
         factory.register_parser::<MuseUnifiedParser>(names::MUSE);
-        factory.register_parser::<MuseUnifiedParser>(names::MUSE_SPARK);
+        factory.register_alias(names::MUSE_SPARK, names::MUSE);
         // Opt-in only: no model patterns map to it.
         factory.register_parser::<HfUnifiedParser>(names::HF);
         factory.register_parser::<BeamUnifiedParser>(names::BEAM);

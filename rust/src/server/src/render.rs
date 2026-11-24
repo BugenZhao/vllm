@@ -199,6 +199,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             generation_config: Default::default(),
             override_generation_config: Default::default(),
             renderer: config.renderer,
+            tool_call_parser: config.tool_call_parser.clone(),
+            reasoning_parser: config.reasoning_parser.clone(),
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
@@ -210,10 +212,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    loaded
-        .chat_backend
-        .check_parser_selections(&config.tool_call_parser, &config.reasoning_parser)
-        .context("the selected parsers cannot be used with this model")?;
     let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
         &config.model,
         &config.served_model_name,
@@ -234,10 +232,6 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
-        .with_parser_selections(
-            config.tool_call_parser.clone(),
-            config.reasoning_parser.clone(),
-        )
         .with_tool_strict_level(config.tool_strict_level)
         .with_reasoning_effort_map(
             config
@@ -497,6 +491,6 @@ mod tests {
         .err()
         .unwrap();
 
-        expect_test::expect!["the selected parsers cannot be used with this model: failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`"].assert_eq(&format!("{error:#}"));
+        expect_test::expect!["failed to load renderer/tokenizer backends: failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`"].assert_eq(&format!("{error:#}"));
     }
 }

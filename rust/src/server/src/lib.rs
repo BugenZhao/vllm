@@ -134,6 +134,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             generation_config: config.generation_config,
             override_generation_config: config.override_generation_config.clone(),
             renderer: config.renderer,
+            tool_call_parser: config.tool_call_parser.clone(),
+            reasoning_parser: config.reasoning_parser.clone(),
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
@@ -150,9 +152,6 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to create chat/text backends")?;
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
-    chat_backend
-        .check_parser_selections(&config.tool_call_parser, &config.reasoning_parser)
-        .context("the selected parsers cannot be used with this model")?;
 
     let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
     info!(
@@ -186,8 +185,6 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)
-        .with_tool_call_parser(config.tool_call_parser.clone())
-        .with_reasoning_parser(config.reasoning_parser.clone())
         .with_tool_strict_level(config.tool_strict_level)
         .with_reasoning_effort_map(
             config
