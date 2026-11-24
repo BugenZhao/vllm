@@ -46,6 +46,10 @@ pub struct PromptCacheUsage {
     pub cached_token_count: usize,
     /// Number of prompt tokens newly written to the local prefix cache.
     pub cache_creation_token_count: usize,
+    /// Whether the engine reported the prefill stats. A request finished
+    /// before its first output, such as one aborted while queued, has none,
+    /// so its counts describe no prefill.
+    pub prefill_reported: bool,
 }
 
 impl PromptCacheUsage {
@@ -57,6 +61,7 @@ impl PromptCacheUsage {
         self.cached_token_count = self.cached_token_count.max(later.cached_token_count);
         self.cache_creation_token_count =
             self.cache_creation_token_count.max(later.cache_creation_token_count);
+        self.prefill_reported |= later.prefill_reported;
     }
 }
 
@@ -414,6 +419,7 @@ impl GenerateOutputStream {
                 .prefill_stats
                 .as_ref()
                 .map_or(0, |stats| stats.num_cache_creation_tokens as usize),
+            prefill_reported: raw.prefill_stats.is_some(),
         };
 
         // An engine error means the request was rejected before it ran.

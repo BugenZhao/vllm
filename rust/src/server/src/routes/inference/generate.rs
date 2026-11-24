@@ -831,6 +831,7 @@ mod tests {
         terminal.prompt_cache_usage = PromptCacheUsage {
             cached_token_count: 2,
             cache_creation_token_count: 0,
+            prefill_reported: true,
         };
         let outputs = vec![stream_output(Some(&[11, 22]), vec![33], None), terminal];
 
@@ -1508,6 +1509,7 @@ mod tests {
         output.usage.prompt_cache_usage = PromptCacheUsage {
             cached_token_count: 3,
             cache_creation_token_count: 1,
+            prefill_reported: true,
         };
 
         let response = collect_generate(

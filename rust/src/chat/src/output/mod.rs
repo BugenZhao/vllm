@@ -32,6 +32,10 @@ pub(crate) use structural_tag::apply_output_grammar;
 /// Unified parsing produces these events, and structured assembly consumes
 /// them to build public chat events.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "`Done` comes once per request; boxing it would allocate for every request"
+)]
 pub(crate) enum AssistantEvent {
     Start {
         prompt_token_ids: Arc<[u32]>,

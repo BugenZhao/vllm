@@ -730,6 +730,7 @@ impl Usage {
                 PromptCacheUsage {
                     cached_token_count,
                     cache_creation_token_count,
+                    prefill_reported,
                 },
         } = usage;
         Self {
@@ -739,6 +740,7 @@ impl Usage {
             prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
                 cached_tokens: cached_token_count,
                 created_cache_tokens: cache_creation_token_count,
+                prefill_reported,
             }),
             completion_tokens_details: reasoning_tokens
                 .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
@@ -747,8 +749,38 @@ impl Usage {
 
     /// Fold in the usage of another choice of the same prompt. Like Python
     /// for `n > 1`, the prompt counts once, while completion and reasoning
-    /// tokens add up over the choices.
+    /// tokens add up over the choices. The prompt's cache usage is that of
+    /// the prefilled choice with the fewest cached tokens, the first folded on
+    /// ties: a sample prefilled after a sibling can hit the prefix the sibling
+    /// just cached.
     pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(details), Some(other)) = (
+            &mut self.prompt_tokens_details,
+            &other.prompt_tokens_details,
+        ) && other.prefill_reported
+            && (!details.prefill_reported || other.cached_tokens < details.cached_tokens)
+        {
+            *details = other.clone();
+        }
+        self.add_completion(other);
+    }
+
+    /// Fold in the usage of another prompt of the same request, already
+    /// folded over its choices. Like Python for a batch of prompts, prompt
+    /// tokens add up over the prompts, as do completion and reasoning tokens.
+    pub(crate) fn add_prompt(&mut self, other: &Usage) {
+        self.prompt_tokens += other.prompt_tokens;
+        if let (Some(details), Some(other)) = (
+            &mut self.prompt_tokens_details,
+            &other.prompt_tokens_details,
+        ) {
+            details.cached_tokens += other.cached_tokens;
+            details.created_cache_tokens += other.created_cache_tokens;
+        }
+        self.add_completion(other);
+    }
+
+    fn add_completion(&mut self, other: &Usage) {
         if let (Some(completion_tokens), Some(other)) =
             (&mut self.completion_tokens, other.completion_tokens)
         {
@@ -762,21 +794,6 @@ impl Usage {
         }
         self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
     }
-
-    /// Fold in the usage of the first choice of another prompt of the same
-    /// request. Like Python for a batch of prompts, prompt tokens add up over
-    /// the prompts, on top of [`Self::add_choice`].
-    pub(crate) fn add_prompt(&mut self, other: &Usage) {
-        self.prompt_tokens += other.prompt_tokens;
-        if let (Some(details), Some(other)) = (
-            &mut self.prompt_tokens_details,
-            &other.prompt_tokens_details,
-        ) {
-            details.cached_tokens += other.cached_tokens;
-            details.created_cache_tokens += other.created_cache_tokens;
-        }
-        self.add_choice(other);
-    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
@@ -786,6 +803,10 @@ pub struct PromptTokenUsageInfo {
     /// Prompt tokens newly written to the prefix cache. Python reports it on
     /// chat only; Rust reports it wherever `cached_tokens` is reported.
     pub created_cache_tokens: usize,
+    /// Whether the counts come from an actual prefill; read when folding the
+    /// choices of a prompt, never serialized.
+    #[serde(skip)]
+    pub prefill_reported: bool,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -807,6 +828,7 @@ mod usage_tests {
         prompt_cache_usage: PromptCacheUsage {
             cached_token_count: 3,
             cache_creation_token_count: 1,
+            prefill_reported: true,
         },
     };
 

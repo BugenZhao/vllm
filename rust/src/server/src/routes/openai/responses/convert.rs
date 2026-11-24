@@ -1033,6 +1033,7 @@ mod tests {
                 prompt_cache_usage: vllm_llm::PromptCacheUsage {
                     cached_token_count: 3,
                     cache_creation_token_count: 4,
+                    prefill_reported: true,
                 },
             },
             reasoning_tokens: 2,

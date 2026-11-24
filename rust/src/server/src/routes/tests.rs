@@ -14454,6 +14454,31 @@ async fn test_app_with_parallel_samples(
     MockEngineTask,
     tokio::sync::oneshot::Receiver<Vec<EngineCoreRequest>>,
 ) {
+    test_app_with_parallel_sample_outputs(
+        outputs
+            .into_iter()
+            .map(|specs| -> SampleOutputs {
+                Box::new(move |request_id| engine_outputs_for_request(request_id, specs))
+            })
+            .collect(),
+        ApiServerOptions::default(),
+    )
+    .await
+}
+
+/// The engine outputs of one sample, given its engine request ID.
+type SampleOutputs = Box<dyn FnOnce(&str) -> EngineCoreOutputs + Send>;
+
+/// Like [`test_app_with_parallel_samples`], with each sample's engine outputs
+/// built in full and the given server options.
+async fn test_app_with_parallel_sample_outputs(
+    outputs: Vec<SampleOutputs>,
+    api_server_options: ApiServerOptions,
+) -> (
+    axum::Router,
+    MockEngineTask,
+    tokio::sync::oneshot::Receiver<Vec<EngineCoreRequest>>,
+) {
     let (requests_tx, requests_rx) = tokio::sync::oneshot::channel();
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -14472,11 +14497,7 @@ async fn test_app_with_parallel_samples(
                 let mut choices = requests.iter().collect::<Vec<_>>();
                 choices.sort_by_key(|request| (&request.external_req_id, &request.request_id));
                 for (request, output) in choices.into_iter().zip(outputs) {
-                    send_outputs(
-                        push,
-                        engine_outputs_for_request(&request.request_id, output),
-                    )
-                    .await;
+                    send_outputs(push, output(&request.request_id)).await;
                 }
                 requests_tx.send(requests).expect("send requests");
             })
@@ -14496,10 +14517,10 @@ async fn test_app_with_parallel_samples(
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
         build_router_with_gates(
-            Arc::new(AppState::new(
-                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat,
-            )),
+            Arc::new(
+                AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                    .with_api_server_options(api_server_options),
+            ),
             RouteGates {
                 scale_out: true,
                 ..RouteGates::default()
@@ -14886,6 +14907,90 @@ async fn completions_stream_batched_prompts_index_chunks_and_send_one_usage_chun
     assert_eq!(usage_chunks[0]["usage"]["completion_tokens"], 5);
     assert_eq!(usage_chunks[0]["usage"]["total_tokens"], 10);
     assert_eq!(payloads.last(), Some(usage_chunks[0]));
+}
+
+/// Like Python for `n > 1`, `prompt_tokens_details` reports the prefilled
+/// sample with the fewest cached tokens, together with its created-cache
+/// count: a later sample can hit the prefix a sibling just cached. A sample
+/// aborted while queued reports no prefill and does not count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_n_report_fewest_cached_tokens_of_prefilled_samples() {
+    fn prefilled(
+        cached: u32,
+        created: u32,
+        finish_reason: EngineCoreFinishReason,
+    ) -> SampleOutputs {
+        Box::new(move |request_id| {
+            RequestBatchOutputs {
+                outputs: vec![
+                    EngineCoreOutput {
+                        prefill_stats: Some(Box::new(PrefillStats {
+                            num_prompt_tokens: 6,
+                            num_cached_tokens: cached,
+                            num_local_cached_tokens: cached,
+                            num_cache_creation_tokens: created,
+                            ..Default::default()
+                        })),
+                        ..request_output(request_id, vec![b'h' as u32], None)
+                    },
+                    request_output(request_id, vec![b'i' as u32], Some(finish_reason)),
+                ],
+                ..Default::default()
+            }
+            .into()
+        })
+    }
+    fn aborted_while_queued() -> SampleOutputs {
+        Box::new(|request_id| {
+            engine_outputs_for_request(
+                request_id,
+                vec![(vec![], Some(EngineCoreFinishReason::Abort))],
+            )
+        })
+    }
+
+    for stream in [false, true] {
+        let (mut app, engine_task, _requests) = test_app_with_parallel_sample_outputs(
+            vec![
+                prefilled(4, 1, EngineCoreFinishReason::Stop),
+                prefilled(2, 3, EngineCoreFinishReason::Length),
+                aborted_while_queued(),
+            ],
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "n": 3,
+                "stream": stream,
+                "stream_options": stream.then(|| json!({"include_usage": true}))
+            }),
+        )
+        .await;
+        // Checked first: an unexpected error leaves the engine waiting for samples.
+        assert_eq!(status, StatusCode::OK, "{json}");
+        engine_task.await.expect("mock engine task");
+
+        let usage = if stream {
+            let payloads = sse_json_payloads(json["raw"].as_str().expect("SSE body"));
+            payloads.last().expect("final usage chunk")["usage"].clone()
+        } else {
+            json["usage"].clone()
+        };
+        assert_eq!(
+            usage["prompt_tokens_details"],
+            json!({"cached_tokens": 2, "created_cache_tokens": 3}),
+            "stream={stream} {json}"
+        );
+    }
 }
 
 /// A prompt of a batch that fails to submit drops the requests of the prompts
