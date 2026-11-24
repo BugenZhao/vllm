@@ -41,14 +41,17 @@ enum Parsers {
     Unified(String),
     /// Separate, optional reasoning and tool-call parsers.
     Split {
-        tool: ToolParserSlot,
+        tool: ToolParsing,
+        /// No request requires reasoning parsing, so a missing parser needs no
+        /// reason, unlike tool parsing.
         reasoning: Option<String>,
     },
 }
 
-/// The tool parser of [`Parsers::Split`], or why there is none.
+/// The tool parser of [`Parsers::Split`], or why there is none: a request with
+/// tools reports which.
 #[derive(Clone)]
-enum ToolParserSlot {
+enum ToolParsing {
     Parser(String),
     /// Tool parsing is turned off (`none`).
     Disabled,
@@ -126,7 +129,7 @@ impl ResolvedParsers {
                 Err(error) if tool_auto && reasoning_auto => {
                     warn_unusable_auto_parser("unified", unified_name, model_id, &error);
                     Parsers::Split {
-                        tool: ToolParserSlot::Unavailable,
+                        tool: ToolParsing::Unavailable,
                         reasoning: None,
                     }
                 }
@@ -138,19 +141,17 @@ impl ResolvedParsers {
                     match ToolParserFactory::global().create(name, &[], tokenizer.clone()) {
                         Ok(_) => {
                             info!(parser_name = name, "using tool parser");
-                            ToolParserSlot::Parser(name.to_owned())
+                            ToolParsing::Parser(name.to_owned())
                         }
                         Err(error) if tool_auto => {
                             warn_unusable_auto_parser("tool", name, model_id, &error);
-                            ToolParserSlot::Unavailable
+                            ToolParsing::Unavailable
                         }
                         Err(error) => return Err(error),
                     }
                 }
-                None if matches!(tool_call_parser, ParserSelection::None) => {
-                    ToolParserSlot::Disabled
-                }
-                None => ToolParserSlot::Unavailable,
+                None if matches!(tool_call_parser, ParserSelection::None) => ToolParsing::Disabled,
+                None => ToolParsing::Unavailable,
             };
             let reasoning = match reasoning_name {
                 Some(name) => {
@@ -187,7 +188,7 @@ impl ResolvedParsers {
         match &self.parsers {
             Parsers::Unified(name) => Some(name),
             Parsers::Split {
-                tool: ToolParserSlot::Parser(name),
+                tool: ToolParsing::Parser(name),
                 ..
             } => Some(name),
             Parsers::Split { .. } => None,
@@ -235,18 +236,18 @@ impl ResolvedParsers {
     /// on.
     fn create_tool_parser(
         &self,
-        slot: &ToolParserSlot,
+        tool_parsing: &ToolParsing,
         tool_context: &ResolvedToolContext,
     ) -> Result<Option<Box<dyn ToolParser>>> {
         let tools = &tool_context.effective_tools;
         if tools.is_empty() {
             return Ok(None);
         }
-        let parser_name = match slot {
-            ToolParserSlot::Parser(name) => name,
+        let parser_name = match tool_parsing {
+            ToolParsing::Parser(name) => name,
             _ if !tool_context.parsing_enabled() => return Ok(None),
-            ToolParserSlot::Disabled => return Err(Error::ParserDisabled { kind: "tool" }),
-            ToolParserSlot::Unavailable => {
+            ToolParsing::Disabled => return Err(Error::ParserDisabled { kind: "tool" }),
+            ToolParsing::Unavailable => {
                 return Err(Error::ParserUnavailableForModel {
                     kind: "tool",
                     model_id: self.model_id.clone(),
