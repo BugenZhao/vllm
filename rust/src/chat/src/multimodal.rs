@@ -70,6 +70,9 @@ pub struct MultimodalModelInfo {
     media_connector: Arc<MediaConnector>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Tokenize each text segment between media markers on its own, with
+    /// special tokens, as the checkpoint's processor does (Phi-3-vision).
+    tokenize_segments_separately: bool,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -630,6 +633,7 @@ impl MultimodalModelInfo {
             unserved_modalities,
             media_connector,
             limit_mm_per_prompt,
+            tokenize_segments_separately: models::tokenizes_segments_separately(model_spec),
         }))
     }
 
@@ -797,6 +801,71 @@ impl MultimodalModelInfo {
         prompt
     }
 
+    /// Tokenize a rendered multimodal prompt. For a model that tokenizes text
+    /// segments separately, each segment between media markers is encoded on
+    /// its own with special tokens, whatever `add_special_tokens` says (for
+    /// Phi-3-vision, a BOS at the start and after every image). Like
+    /// [`Self::rewrite_rendered_markers`], at most one marker per media item
+    /// ends a segment; later occurrences are ordinary text.
+    fn encode_rendered_prompt(
+        &self,
+        prompt: &str,
+        media_parts: &[MediaContentPart],
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>> {
+        let tokenizer = self.context.tokenizer();
+        let encode = |text: &str, add_special_tokens: bool| {
+            tokenizer
+                .encode(text, add_special_tokens)
+                .map_err(|error| multimodal!("{error}"))
+        };
+        if !self.tokenize_segments_separately {
+            return encode(prompt, add_special_tokens);
+        }
+
+        // Each modality's marker with the number of its items left to place.
+        let mut markers: Vec<(&ResolvedPlaceholder, usize)> = [
+            (
+                self.image.as_ref().map(|support| &support.placeholder),
+                MmModality::Image,
+            ),
+            (
+                self.video.as_ref().map(|support| &support.placeholder),
+                MmModality::Video,
+            ),
+            (
+                self.audio.as_ref().map(|support| &support.placeholder),
+                MmModality::Audio,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(placeholder, modality)| {
+            let items = media_parts
+                .iter()
+                .filter(|part| media_part_limit_modality(part) == Some(modality))
+                .count();
+            Some((placeholder?, items))
+        })
+        .collect();
+        let mut token_ids = Vec::new();
+        let mut rest = prompt;
+        loop {
+            let next_marker = markers
+                .iter_mut()
+                .filter(|(_, items)| *items > 0)
+                .filter_map(|(marker, items)| Some((rest.find(&marker.token)?, *marker, items)))
+                .min_by_key(|(start, ..)| *start);
+            let segment_end = next_marker.as_ref().map_or(rest.len(), |(start, ..)| *start);
+            token_ids.extend(encode(&rest[..segment_end], true)?);
+            let Some((start, marker, items)) = next_marker else {
+                return Ok(token_ids);
+            };
+            *items -= 1;
+            token_ids.extend_from_slice(&marker.marker_token_ids);
+            rest = &rest[start + marker.token.len()..];
+        }
+    }
+
     fn vision_preprocessing_context(
         &self,
         prompt_token_ids: &[u32],
@@ -830,14 +899,11 @@ pub(crate) async fn finalize_rendered_prompt(
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
     let mut prompt_token_ids = match rendered.prompt {
-        Prompt::Text(prompt) => info
-            .context
-            .tokenizer()
-            .encode(
-                &info.rewrite_rendered_markers(prompt, &media_parts),
-                request.add_special_tokens,
-            )
-            .map_err(|error| multimodal!("{error}"))?,
+        Prompt::Text(prompt) => info.encode_rendered_prompt(
+            &info.rewrite_rendered_markers(prompt, &media_parts),
+            &media_parts,
+            request.add_special_tokens,
+        )?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let prepared = info
@@ -1479,6 +1545,56 @@ mod tests {
             "vision_config": {"image_size": 336, "patch_size": 14}
         });
         test_info("llama4", config, llama4_tokenizer())
+    }
+
+    /// Phi-3-vision's processor encodes each text segment around its images
+    /// as its own sequence with a BOS (`processing_phi3_v.py`); a marker
+    /// beyond the request's images is ordinary text. Other models encode the
+    /// rendered prompt as a whole.
+    #[test]
+    fn phi3_v_encodes_text_segments_separately() {
+        const BOS_ID: u32 = 1000;
+        const USER_ID: u32 = 32010;
+        const IMAGE_ID: u32 = 32044;
+        const PROMPT: &str = "<|user|>\n<|image|>\n<|image|>\nHi<|image|>";
+        let tokenizer = || {
+            TestTokenizer::new()
+                .with_bos_token("<s>", BOS_ID)
+                .with_special_token("<|user|>", USER_ID)
+                .with_special_token("<|image|>", IMAGE_ID)
+                .with_regular_token("<|image_pad|>", QWEN3_IMAGE_PAD_ID)
+        };
+        let images = [png_640x480(), png_640x480()];
+        let newline = u32::from(b'\n');
+
+        let phi3_v = test_info(
+            "phi3_v",
+            serde_json::json!({"model_type": "phi3_v"}),
+            tokenizer(),
+        );
+        assert_eq!(
+            phi3_v.encode_rendered_prompt(PROMPT, &images, false).unwrap(),
+            [
+                BOS_ID,
+                USER_ID,
+                newline,
+                IMAGE_ID,
+                BOS_ID,
+                newline,
+                IMAGE_ID,
+                BOS_ID,
+                newline,
+                u32::from(b'H'),
+                u32::from(b'i'),
+                IMAGE_ID,
+            ]
+        );
+
+        let qwen3_vl = test_info("qwen3_vl", qwen3_vl_config(), tokenizer());
+        assert_eq!(
+            qwen3_vl.encode_rendered_prompt(PROMPT, &images, false).unwrap(),
+            tokenizer().encode(PROMPT, false).unwrap()
+        );
     }
 
     fn qwen3_vl_config() -> serde_json::Value {

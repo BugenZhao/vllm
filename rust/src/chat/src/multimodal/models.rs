@@ -33,6 +33,18 @@ const MODEL_TYPE_ALIASES: &[(&str, &str)] = &[
     ("kimi_k31", "kimi_k3"), // Kimi K3.1 ships K3's vision tower and preprocessing unchanged.
 ];
 
+/// Names of specs whose checkpoint processor tokenizes each text segment
+/// between media markers as its own sequence, special tokens included,
+/// instead of the rendered prompt as a whole.
+const SEGMENT_TOKENIZED_SPECS: &[&str] = &[
+    "phi3_v", // Phi-3-vision's `processing_phi3_v.py`: a BOS starts every segment.
+];
+
+/// Whether `spec`'s prompts are tokenized one text segment at a time.
+pub(super) fn tokenizes_segments_separately(spec: &dyn ModelProcessorSpec) -> bool {
+    SEGMENT_TOKENIZED_SPECS.contains(&spec.name())
+}
+
 /// Resolve the model processor spec for one loaded model: a local spec first,
 /// then the `llm-multimodal` registry, through a model type alias if any.
 pub(super) fn lookup_spec(metadata: &ModelMetadata<'_>) -> Option<&'static dyn ModelProcessorSpec> {
