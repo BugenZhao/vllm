@@ -68,7 +68,8 @@ use super::{
     strip_root_path, with_root_path,
 };
 use crate::config::{
-    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    LoraModulePath, MaxTokenizeTokens,
 };
 use crate::lora::LoadLoraError;
 use crate::model_names::ServedModelNames;
@@ -13653,7 +13654,7 @@ async fn tokenize_chat_max_tokenize_tokens_enforcement() {
     let state = Arc::new(
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
-                max_tokenize_tokens: Some(5),
+                max_tokenize_tokens: MaxTokenizeTokens::Limit(5),
                 ..Default::default()
             },
         ),
@@ -13723,7 +13724,7 @@ async fn tokenize_chat_max_tokenize_tokens_enforcement() {
     let state2 = Arc::new(
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat2).with_api_server_options(
             ApiServerOptions {
-                max_tokenize_tokens: Some(100),
+                max_tokenize_tokens: MaxTokenizeTokens::Limit(100),
                 ..Default::default()
             },
         ),

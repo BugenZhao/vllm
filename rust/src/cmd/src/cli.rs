@@ -43,8 +43,8 @@ use vllm_server::{
     CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection, Server, ServerConfig,
+    MaxTokenizeTokens, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
+    RenderConfig, RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -790,19 +790,19 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
-    /// Maximum number of tokens allowed for /tokenize and /detokenize
-    /// requests. Defaults to max(max_model_len * 2, 131072); set <= 0 to
-    /// disable. The --max-tokenize-tokens CLI flag takes precedence.
+    /// Maximum number of tokens allowed in /tokenize and /detokenize requests
+    /// (default `max(2 * max_model_len, 131072)`); a value `<= 0` disables
+    /// the limit. Like Python, it can also be set through
+    /// `VLLM_MAX_TOKENIZE_TOKENS`, where a blank value is unset.
     #[arg(
         long,
         env = "VLLM_MAX_TOKENIZE_TOKENS",
-        value_parser = parse_optional_int,
-        hide_default_value = true,
         default_value = "",
+        hide_default_value = true,
         allow_negative_numbers = true
     )]
     #[serde(default)]
-    pub max_tokenize_tokens: OptionalInt,
+    pub max_tokenize_tokens: MaxTokenizeTokens,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -1427,16 +1427,6 @@ impl FromStr for LogStatsInterval {
 /// decimal integers in the `i64` range.
 fn parse_int(value: &str) -> Result<i64, String> {
     value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))
-}
-
-/// Parse an optional integer environment variable, treating empty or
-/// whitespace-only strings as unset (`None`).
-type OptionalInt = Option<i64>;
-fn parse_optional_int(value: &str) -> Result<Option<i64>, String> {
-    if value.trim().is_empty() {
-        return Ok(None);
-    }
-    parse_int(value).map(Some)
 }
 
 /// Parse an integer flag environment variable as Python's `bool(int(value))`,

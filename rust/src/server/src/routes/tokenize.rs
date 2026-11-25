@@ -37,14 +37,6 @@ fn token_strs(tokenizer: &vllm_text::tokenizer::DynTokenizer, ids: &[u32]) -> Ve
     ids.iter().map(|&id| tokenizer.id_to_token(id).unwrap_or_default()).collect()
 }
 
-fn resolve_max_tokenize_tokens(configured_limit: Option<i64>, max_model_len: u32) -> Option<usize> {
-    match configured_limit {
-        Some(limit) if limit <= 0 => None,
-        Some(limit) => Some(limit as usize),
-        None => Some((max_model_len as usize * 2).max(131_072)),
-    }
-}
-
 fn check_max_tokenize_tokens(count: usize, limit: usize, qualifier: &str) -> Result<(), ApiError> {
     if count > limit {
         return Err(ApiError::InvalidRequest {
@@ -136,8 +128,7 @@ pub async fn tokenize(
     let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
-    let max_tokenize_tokens =
-        resolve_max_tokenize_tokens(state.api_server_options.max_tokenize_tokens, max_model_len);
+    let max_tokenize_tokens = state.api_server_options.max_tokenize_tokens.resolve(max_model_len);
 
     let (tokens, want_strs) = match body {
         TokenizeRequest::Completion(req) => {
@@ -225,8 +216,7 @@ pub async fn detokenize(
 ) -> Result<Json<DetokenizeResponse>, ApiError> {
     state.base_model_names().check(body.model.as_deref())?;
     let max_model_len = state.llm().info().max_model_len;
-    let max_tokenize_tokens =
-        resolve_max_tokenize_tokens(state.api_server_options.max_tokenize_tokens, max_model_len);
+    let max_tokenize_tokens = state.api_server_options.max_tokenize_tokens.resolve(max_model_len);
     if let Some(limit) = max_tokenize_tokens {
         check_max_tokenize_tokens(body.tokens.len(), limit, "")?;
     }
@@ -244,25 +234,9 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use vllm_tokenizer::Tokenizer;
 
-    use super::{
-        check_max_tokenize_tokens, estimate_chat_tokens, resolve_max_tokenize_tokens,
-        tokenize_request_id,
-    };
+    use super::{check_max_tokenize_tokens, estimate_chat_tokens, tokenize_request_id};
     use crate::error::ApiError;
     use crate::routes::openai::utils::types::{ChatMessage, ContentPart, MessageContent, ToolCall};
-
-    #[test]
-    fn resolve_max_tokenize_tokens_explicit() {
-        assert_eq!(resolve_max_tokenize_tokens(Some(100), 2048), Some(100));
-        assert_eq!(resolve_max_tokenize_tokens(Some(0), 2048), None);
-    }
-
-    #[test]
-    fn resolve_max_tokenize_tokens_default() {
-        // max(max_model_len * 2, 131_072)
-        assert_eq!(resolve_max_tokenize_tokens(None, 2048), Some(131_072));
-        assert_eq!(resolve_max_tokenize_tokens(None, 100_000), Some(200_000));
-    }
 
     #[test]
     fn check_max_tokenize_tokens_bounds() {

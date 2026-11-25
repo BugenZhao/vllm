@@ -11,8 +11,8 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     AdmissionLimits, EngineCoreConfig, FingerprintMode, GenerationConfigMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RendererSelection,
+    LoraModulePath, MaxTokenizeTokens, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -330,7 +330,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
-                        max_tokenize_tokens: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1205,6 +1205,44 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     }
 }
 
+/// `--max-tokenize-tokens`, which `VLLM_MAX_TOKENIZE_TOKENS` also sets, bounds
+/// `/tokenize` and `/detokenize`; like Python, a value `<= 0` removes the bound
+/// and a blank one, as an empty variable gives, leaves the default.
+#[test]
+fn serve_args_lower_max_tokenize_tokens() {
+    let parse = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))?;
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        Ok::<_, clap::Error>(
+            args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+                .server
+                .api_server_options
+                .max_tokenize_tokens,
+        )
+    };
+
+    assert_eq!(parse(&[]).unwrap(), MaxTokenizeTokens::ModelDefault);
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", " "]).unwrap(),
+        MaxTokenizeTokens::ModelDefault
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", " 7 "]).unwrap(),
+        MaxTokenizeTokens::Limit(7)
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", "-1"]).unwrap(),
+        MaxTokenizeTokens::Unlimited
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", "1e3"]).unwrap_err().kind(),
+        clap::error::ErrorKind::ValueValidation
+    );
+}
+
 /// Python resolves the settings it reads only from environment variables and
 /// passes them in `--args-json`.
 #[test]
@@ -1226,7 +1264,10 @@ fn args_json_reads_env_only_settings() {
         Some(32 * 1024 * 1024)
     );
 
-    assert_eq!(args.api_server_options().max_tokenize_tokens, None);
+    assert_eq!(
+        args.api_server_options().max_tokenize_tokens,
+        MaxTokenizeTokens::ModelDefault
+    );
 
     let args = parse(
         r#","log_stats_interval":0.5,"disable_request_id_randomization":true,
@@ -1243,7 +1284,10 @@ fn args_json_reads_env_only_settings() {
     assert!(args.api_server_options().server_dev_mode);
     assert!(args.api_server_options().allow_runtime_lora_updating);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
-    assert_eq!(args.api_server_options().max_tokenize_tokens, Some(100));
+    assert_eq!(
+        args.api_server_options().max_tokenize_tokens,
+        MaxTokenizeTokens::Limit(100)
+    );
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -1297,81 +1341,6 @@ fn log_error_stack_defaults_to_server_dev_mode() {
     assert!(!json(
         r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true,"log_error_stack":false}"#
     ));
-}
-
-/// CLI args take precedence over environment variables for `--max-tokenize-tokens`.
-
-#[test]
-fn serve_cli_flag_takes_precedence_over_env_var() {
-    unsafe {
-        std::env::set_var("VLLM_MAX_TOKENIZE_TOKENS", "100");
-    }
-
-    let cli_no_flag = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
-    let Command::Serve(serve_no_flag) = cli_no_flag.command else {
-        panic!()
-    };
-    assert_eq!(
-        serve_no_flag.runtime.api_server_options().max_tokenize_tokens,
-        Some(100)
-    );
-
-    let cli_flag = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--max-tokenize-tokens",
-        "200",
-    ])
-    .unwrap();
-    let Command::Serve(serve_flag) = cli_flag.command else {
-        panic!()
-    };
-    assert_eq!(
-        serve_flag.runtime.api_server_options().max_tokenize_tokens,
-        Some(200)
-    );
-
-    let cli_flag_disabled = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--max-tokenize-tokens",
-        "0",
-    ])
-    .unwrap();
-    let Command::Serve(serve_flag_disabled) = cli_flag_disabled.command else {
-        panic!()
-    };
-    assert_eq!(
-        serve_flag_disabled.runtime.api_server_options().max_tokenize_tokens,
-        Some(0)
-    );
-
-    unsafe {
-        std::env::remove_var("VLLM_MAX_TOKENIZE_TOKENS");
-    }
-}
-
-#[test]
-fn max_tokenize_tokens_arg_takes_precedence_over_env() {
-    // Python resolves `VLLM_MAX_TOKENIZE_TOKENS` into `--args-json`.
-    let json = |args_json: &str| {
-        parse_runtime_args_json(args_json)
-            .unwrap()
-            .api_server_options()
-            .max_tokenize_tokens
-    };
-
-    assert_eq!(json(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#), None);
-    assert_eq!(
-        json(r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":200}"#),
-        Some(200)
-    );
-    assert_eq!(
-        json(r#"{"model_tag":"Qwen/Qwen3-0.6B","max_tokenize_tokens":0}"#),
-        Some(0)
-    );
 }
 
 /// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like
@@ -2524,7 +2493,7 @@ fn frontend_args_accept_json() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
-                        max_tokenize_tokens: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3687,7 +3656,7 @@ fn serve_args_accept_handshake_aliases() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
-                        max_tokenize_tokens: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3979,7 +3948,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    max_tokenize_tokens: None,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4133,7 +4102,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    max_tokenize_tokens: None,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4393,7 +4362,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                         33554432,
                     ),
                     max_n_sequences: 16384,
-                    max_tokenize_tokens: None,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4721,19 +4690,4 @@ fn mm_processor_kwargs_reach_frontend_engine_and_render() {
         panic!("expected render args")
     };
     assert_eq!(args.into_config().mm_processor_kwargs, expected);
-}
-
-#[test]
-fn serve_ignores_empty_max_tokenize_tokens_env() {
-    for empty_val in ["", "   "] {
-        unsafe { std::env::set_var("VLLM_MAX_TOKENIZE_TOKENS", empty_val) };
-        let parsed = Cli::try_parse_from(["vllm-rs", "serve", "meta-llama/Llama-3.2-1B"]);
-        unsafe { std::env::remove_var("VLLM_MAX_TOKENIZE_TOKENS") };
-
-        let cli = parsed.expect("empty VLLM_MAX_TOKENIZE_TOKENS should not fail CLI parsing");
-        let Command::Serve(serve) = cli.command else {
-            panic!("expected Serve command");
-        };
-        assert_eq!(serve.runtime.max_tokenize_tokens, None);
-    }
 }
