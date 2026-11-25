@@ -698,6 +698,8 @@ mod tests {
         commit: String,
         files: std::sync::Arc<std::collections::BTreeMap<String, Vec<u8>>>,
         requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// The `Authorization` header of each listing request.
+        listing_authorizations: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// Answer the listing request with 500, like an unreachable Hub.
         fail_listing: bool,
     }
@@ -729,9 +731,15 @@ mod tests {
         async fn listing(
             axum::extract::State(hub): axum::extract::State<Self>,
             axum::extract::Path((_, _, rev)): axum::extract::Path<(String, String, String)>,
+            headers: axum::http::HeaderMap,
         ) -> axum::response::Response {
             use axum::response::IntoResponse as _;
             hub.record(format!("listing/{rev}"));
+            hub.listing_authorizations.lock().unwrap().push(
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .map(|value| value.to_str().unwrap().to_string()),
+            );
             if hub.fail_listing {
                 return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
@@ -1132,6 +1140,7 @@ mod tests {
                 .map(|(name, content)| (name.to_string(), content.as_bytes().to_vec())),
             )),
             requests: Default::default(),
+            listing_authorizations: Default::default(),
             fail_listing: false,
         };
         let endpoint = hub.clone().serve().await;
@@ -1206,6 +1215,7 @@ mod tests {
                 GENERATION_CONFIG.as_bytes().to_vec(),
             )])),
             requests: Default::default(),
+            listing_authorizations: Default::default(),
             fail_listing: false,
         };
         let endpoint = hub.clone().serve().await;
@@ -1262,6 +1272,7 @@ mod tests {
                 GENERATION_CONFIG.as_bytes().to_vec(),
             )])),
             requests: Default::default(),
+            listing_authorizations: Default::default(),
             fail_listing: true,
         };
         let endpoint = hub.clone().serve().await;
@@ -1272,6 +1283,51 @@ mod tests {
         assert_eq!(hub.requests(), vec![format!("listing/{FAKE_COMMIT}")]);
         // Not knowing whether the files exist, nothing is recorded as absent.
         assert!(!cache.join("models--test--model/.no_exist").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_snapshot_lookup_sends_hf_token() {
+        const TEST: &str = "cached_snapshot_lookup_sends_hf_token";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_TOKEN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let files = ResolvedModelFiles::from_sources(&ModelFileSources {
+                model: source("test/model", None),
+                tokenizer: None,
+                hf_config: None,
+                skip_tokenizer_init: false,
+                hf_token: Some(HfToken("flag-token".to_string())),
+            })
+            .await
+            .unwrap();
+            assert!(files.generation_config_path.is_some());
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        partial_snapshot(
+            &cache,
+            &["tokenizer.json", "tokenizer_config.json", "config.json"],
+        );
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from([(
+                "generation_config.json".to_string(),
+                GENERATION_CONFIG.as_bytes().to_vec(),
+            )])),
+            requests: Default::default(),
+            listing_authorizations: Default::default(),
+            fail_listing: false,
+        };
+        let endpoint = hub.clone().serve().await;
+
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+
+        // A gated or private repo needs `--hf-token` on the snapshot's lookup too.
+        assert_eq!(
+            *hub.listing_authorizations.lock().unwrap(),
+            [Some("Bearer flag-token".to_string())]
+        );
     }
 
     #[tokio::test]
