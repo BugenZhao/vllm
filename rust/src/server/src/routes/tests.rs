@@ -13641,109 +13641,85 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
     assert!(new_len > continue_len);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn tokenize_chat_max_tokenize_tokens_enforcement() {
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-tokenize-chat-max-tokens",
+async fn test_app_with_max_tokenize_tokens(
+    max_tokenize_tokens: MaxTokenizeTokens,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-tokenize-max-tokenize-tokens",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    // Configure max_tokenize_tokens = 5.
     let state = Arc::new(
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
             ApiServerOptions {
-                max_tokenize_tokens: MaxTokenizeTokens::Limit(5),
+                max_tokenize_tokens,
                 ..Default::default()
             },
         ),
     );
-    let mut app = build_router(state);
+    (build_router(state), engine_task)
+}
 
-    // 1. Oversized chat payload is rejected early by pre-check.
-    // In TestTokenizer, each ASCII char is 1 byte / 1 token, so 10 chars is estimated as 10 tokens > 5 limit.
-    let (status, err_json) = post_json(
-        &mut app,
-        "/tokenize",
+/// `--max-tokenize-tokens` bounds the tokens of `/tokenize`, for text and chat,
+/// and the tokens `/detokenize` decodes, with Python's status and `param`; a
+/// count equal to the bound passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_and_detokenize_enforce_max_tokenize_tokens() {
+    let (mut app, _engine_task) =
+        test_app_with_max_tokenize_tokens(MaxTokenizeTokens::Limit(5)).await;
+    let completion = |prompt: &str| {
         json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "0123456789"}],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(err_json["error"]["param"], "input_tokens");
-    let err_msg = err_json["error"]["message"].as_str().unwrap();
-    assert!(
-        err_msg.contains("at least 10 input tokens"),
-        "expected 'at least 10 input tokens' in error message: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("maximum context length is 5 tokens"),
-        "expected 'maximum context length is 5 tokens' in error message: {err_msg}"
-    );
+            "prompt": prompt,
+            "add_special_tokens": false,
+        })
+    };
+    let detokenize =
+        |count: usize| json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "tokens": vec![104; count]});
 
-    // 2. Chat payload passes pre-check (e.g. 2 chars estimated as 2 tokens <= 5),
-    // but chat template overhead pushes actual token count over 5 tokens.
-    // Post-check catches this and rejects with the exact token count (without "at least ").
-    let (status, err_json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "hi"}],
-            "add_generation_prompt": true,
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(err_json["error"]["param"], "input_tokens");
-    let err_msg = err_json["error"]["message"].as_str().unwrap();
-    assert!(
-        !err_msg.contains("at least "),
-        "did not expect 'at least ' in post-check error message: {err_msg}"
+    let (status, json) = post_json(&mut app, "/tokenize", completion("hello")).await;
+    assert_eq!(
+        (status, &json["count"]),
+        (StatusCode::OK, &json!(5)),
+        "{json}"
     );
-    assert!(
-        err_msg.contains("maximum context length is 5 tokens"),
-        "expected 'maximum context length is 5 tokens' in error message: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("input tokens, which exceeds this limit"),
-        "expected standard error message structure: {err_msg}"
-    );
+    let (status, json) = post_json(&mut app, "/detokenize", detokenize(5)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
 
-    // 3. Valid request within max_tokenize_tokens succeeds.
-    // Configure another server with limit = 100.
-    let (chat2, _engine_task2) = test_models_with_engine_outputs_and_backend(
-        b"engine-tokenize-chat-max-tokens-ok",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let state2 = Arc::new(
-        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat2).with_api_server_options(
-            ApiServerOptions {
-                max_tokenize_tokens: MaxTokenizeTokens::Limit(100),
-                ..Default::default()
-            },
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        ("/tokenize", completion("hello!")),
+        (
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
         ),
-    );
-    let mut app2 = build_router(state2);
+        ("/detokenize", detokenize(6)),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {json}");
+        errors.push(json.to_string());
+    }
+    expect_test::expect![[r#"
+        {"error":{"message":"This model's maximum context length is 5 tokens. However, your prompt contains 6 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.","type":"BadRequestError","param":"input_tokens","code":400}}
+        {"error":{"message":"This model's maximum context length is 5 tokens. However, your prompt contains 19 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.","type":"BadRequestError","param":"input_tokens","code":400}}
+        {"error":{"message":"This model's maximum context length is 5 tokens. However, your prompt contains 6 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.","type":"BadRequestError","param":"input_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
 
-    let (status, ok_json) = post_json(
-        &mut app2,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "hi"}],
-            "add_generation_prompt": true,
-        }),
-    )
-    .await;
+    // The default bound is twice the mock engine's `max_model_len`; `<= 0`
+    // removes it.
+    let over_default = detokenize(2 * DEFAULT_MOCK_MAX_MODEL_LEN as usize + 1);
+    let (mut app, _engine_task) =
+        test_app_with_max_tokenize_tokens(MaxTokenizeTokens::ModelDefault).await;
+    let (status, _) = post_json(&mut app, "/detokenize", over_default.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (mut app, _engine_task) =
+        test_app_with_max_tokenize_tokens(MaxTokenizeTokens::Unlimited).await;
+    let (status, _) = post_json(&mut app, "/detokenize", over_default).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(ok_json["count"].as_u64().unwrap() <= 100);
-    assert!(!ok_json["tokens"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

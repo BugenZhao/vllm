@@ -186,7 +186,7 @@ pub struct HuggingFaceTokenizer {
     added_vocab: Box<[(String, u32)]>,
     vocab_size: usize,
     leading_space_marker: Option<char>,
-    max_token_len: usize,
+    max_chars_per_token: usize,
 }
 
 impl HuggingFaceTokenizer {
@@ -212,8 +212,9 @@ impl HuggingFaceTokenizer {
             Arc::from(ids)
         };
         // HF materializes the merged vocabulary to count it, so cache the result.
-        let vocab_size = tokenizer.get_vocab_size(true);
-        let max_token_len = tokenizer.get_vocab(true).keys().map(|s| s.len()).max().unwrap_or(0);
+        let vocab = tokenizer.get_vocab(true);
+        let vocab_size = vocab.len();
+        let max_chars_per_token = max_chars_per_token(vocab.keys());
         let leading_space_marker = leading_space_marker(&tokenizer);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
@@ -221,7 +222,7 @@ impl HuggingFaceTokenizer {
             added_vocab,
             vocab_size,
             leading_space_marker,
-            max_token_len,
+            max_chars_per_token,
         }
     }
 
@@ -256,15 +257,11 @@ impl HuggingFaceTokenizer {
                 .iter()
                 .filter(|(token, _)| tokenizer.model().token_to_id(token).is_none())
                 .count();
-        let model = tokenizer.model();
-        let max_model_token_len = (0..model.vocab_size() as u32)
-            .filter_map(|id| model.id_to_token(id))
-            .map(|s| s.len())
-            .max()
-            .unwrap_or(0);
-        let max_added_token_len =
-            added_vocab.iter().map(|(token, _)| token.len()).max().unwrap_or(0);
-        let max_token_len = max_model_token_len.max(max_added_token_len);
+        let max_chars_per_token = max_chars_per_token(
+            (0..tokenizer.model().vocab_size() as u32)
+                .filter_map(|id| tokenizer.model().id_to_token(id))
+                .chain(added_vocab.iter().map(|(token, _)| token.as_str())),
+        );
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -278,7 +275,7 @@ impl HuggingFaceTokenizer {
             // fastokens rejects Metaspace pre-tokenizers, so those tokenizers load
             // through the HF backend.
             leading_space_marker: None,
-            max_token_len,
+            max_chars_per_token,
         }
     }
 
@@ -403,9 +400,18 @@ impl Tokenizer for HuggingFaceTokenizer {
         self.special_token_ids.binary_search(&token_id).is_ok()
     }
 
-    fn estimate_min_token(&self, text: &str) -> usize {
-        text.len().checked_div(self.max_token_len).unwrap_or(0)
+    fn max_chars_per_token(&self) -> Option<usize> {
+        Some(self.max_chars_per_token)
     }
+}
+
+/// The length in characters of the longest of `tokens`.
+fn max_chars_per_token(tokens: impl IntoIterator<Item = impl AsRef<str>>) -> usize {
+    tokens
+        .into_iter()
+        .map(|token| token.as_ref().chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -781,12 +787,9 @@ mod tests {
         let fast = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
         assert_eq!(fast.vocab_size(), hf.vocab_size());
         assert_eq!(fast.vocab_size(), 10);
-        assert_eq!(fast.estimate_min_token(""), 0);
-        assert_eq!(hf.estimate_min_token(""), 0);
-        assert_eq!(fast.max_token_len, hf.max_token_len);
-        let text = "a".repeat(fast.max_token_len * 4 + 2);
-        assert_eq!(fast.estimate_min_token(&text), 4);
-        assert_eq!(hf.estimate_min_token(&text), 4);
+        // The longest entry is the added `<|im_end|>`.
+        assert_eq!(fast.max_chars_per_token(), hf.max_chars_per_token());
+        assert_eq!(fast.max_chars_per_token(), Some(10));
         assert_eq!(
             fast.encode("hello<|im_end|>", false).unwrap(),
             hf.encode("hello<|im_end|>", false).unwrap()

@@ -45,6 +45,25 @@ pub enum Error {
          tokens. Please reduce the length of the input prompt."
     )]
     PromptFillsContext { max_model_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_tokens} tokens. However, your prompt \
+         contains {chars} characters (more than {max_chars} characters, which is the upper \
+         bound for {max_tokens} input tokens). Please reduce the length of the input prompt."
+    )]
+    PromptTextOverTokenLimit {
+        max_tokens: usize,
+        chars: usize,
+        max_chars: usize,
+    },
+    #[error(
+        "This model's maximum context length is {max_tokens} tokens. However, your prompt \
+         contains {prompt_len} input tokens, which exceeds this limit even without any output \
+         tokens. Please reduce the length of the input prompt."
+    )]
+    PromptOverTokenLimit {
+        max_tokens: usize,
+        prompt_len: usize,
+    },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
@@ -87,6 +106,8 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::PromptFillsContext { .. }
+            | Self::PromptTextOverTokenLimit { .. }
+            | Self::PromptOverTokenLimit { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
             | Self::StopStringsRequireDetokenize { .. }
@@ -133,7 +154,10 @@ impl Error {
     /// `param` of the OpenAI error object.
     pub fn param(&self) -> Option<&'static str> {
         match self {
-            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::PromptTooLong { .. }
+            | Self::PromptFillsContext { .. }
+            | Self::PromptOverTokenLimit { .. } => Some("input_tokens"),
+            Self::PromptTextOverTokenLimit { .. } => Some("input_text"),
             Self::Llm(LlmError::PromptLogprobsUnsupported { parameter }) => Some(parameter),
             _ => None,
         }

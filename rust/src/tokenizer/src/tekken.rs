@@ -11,18 +11,10 @@ use crate::{Result, Tokenizer};
 /// Mistral Tekken tokenizer from a `tekken.json` file.
 pub struct TekkenTokenizer {
     inner: Tekkenizer,
-    max_token_len: usize,
+    max_chars_per_token: usize,
 }
 
 impl TekkenTokenizer {
-    fn from_inner(inner: Tekkenizer) -> Self {
-        let max_token_len = inner.vocab().iter().map(|s| s.len()).max().unwrap_or(0);
-        Self {
-            inner,
-            max_token_len,
-        }
-    }
-
     /// Load a Mistral Tekken tokenizer from a `tekken.json` file.
     pub fn new(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with Mistral Tekken");
@@ -34,6 +26,15 @@ impl TekkenTokenizer {
             )
         })?;
         Ok(Self::from_inner(inner))
+    }
+
+    fn from_inner(inner: Tekkenizer) -> Self {
+        let max_chars_per_token =
+            inner.vocab().iter().map(|token| token.chars().count()).max().unwrap_or(0);
+        Self {
+            inner,
+            max_chars_per_token,
+        }
     }
 }
 
@@ -82,8 +83,8 @@ impl Tokenizer for TekkenTokenizer {
         self.inner.is_special_token(token_id)
     }
 
-    fn estimate_min_token(&self, text: &str) -> usize {
-        text.len().checked_div(self.max_token_len).unwrap_or(0)
+    fn max_chars_per_token(&self) -> Option<usize> {
+        Some(self.max_chars_per_token)
     }
 }
 
@@ -121,15 +122,10 @@ mod tests {
         TekkenTokenizer::from_inner(inner)
     }
 
+    /// The vocabulary counts the special tokens, here `<control>`.
     #[test]
-    fn estimate_min_token_uses_max_token_len_in_vocabulary() {
-        let tokenizer = test_tokenizer();
-        // In test_tokenizer, vocab tokens are 1 byte each, but "<control>" special token is 9 bytes.
-        // Therefore max_token_len = 9.
-        assert_eq!(tokenizer.estimate_min_token(""), 0);
-        assert_eq!(tokenizer.estimate_min_token("12345678"), 0);
-        assert_eq!(tokenizer.estimate_min_token("123456789"), 1);
-        assert_eq!(tokenizer.estimate_min_token("123456789012345678"), 2);
+    fn max_chars_per_token_counts_special_tokens() {
+        assert_eq!(test_tokenizer().max_chars_per_token(), Some(9));
     }
 
     #[test]

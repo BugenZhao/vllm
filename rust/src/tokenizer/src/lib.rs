@@ -73,12 +73,12 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
-    /// Estimate the minimum token count for a text input.
-    ///
-    /// The estimate is based on the formula:
-    /// `length of the text / max_token_len_in_vocabulary`.
-    fn estimate_min_token(&self, text: &str) -> usize {
-        text.len()
+    /// Return the length in characters of the longest vocabulary entry, like
+    /// Python's `max_chars_per_token`: the character budget per token that
+    /// bounds a text before it is encoded. `None` when the backend does not
+    /// know it.
+    fn max_chars_per_token(&self) -> Option<usize> {
+        None
     }
 
     /// Create a stateful incremental decoder primed with the given prompt

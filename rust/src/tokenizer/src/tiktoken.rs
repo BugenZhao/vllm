@@ -147,7 +147,8 @@ struct TokenMetadata {
     /// lossy UTF-8, matching decode behavior for byte sequences that are not
     /// valid UTF-8 on their own.
     token_by_id: FxHashMap<u32, String>,
-    max_token_len: usize,
+    /// Length in characters of the longest raw token string.
+    max_chars_per_token: usize,
 }
 
 impl TokenMetadata {
@@ -436,10 +437,8 @@ impl LoadedTiktokenConfig {
             token_by_id.insert(id, token.clone());
         }
 
-        let max_bpe_len = encoder.keys().map(|b| b.len()).max().unwrap_or(0);
-        let max_special_len = special_tokens_encoder.keys().map(|s| s.len()).max().unwrap_or(0);
-        let max_token_len = max_bpe_len.max(max_special_len);
-
+        let max_chars_per_token =
+            token_by_id.values().map(|token| token.chars().count()).max().unwrap_or(0);
         let pattern = model_config.as_ref().map_or(CL100K_BASE_PATTERN, detect_bpe_pattern);
 
         Ok(Self {
@@ -450,7 +449,7 @@ impl LoadedTiktokenConfig {
                 vocab_upper_bound: reserved_end,
                 non_special_added_ids,
                 token_by_id,
-                max_token_len,
+                max_chars_per_token,
             },
             pattern,
         })
@@ -526,8 +525,8 @@ impl Tokenizer for TiktokenTokenizer {
         self.metadata.vocab_upper_bound as usize
     }
 
-    fn estimate_min_token(&self, text: &str) -> usize {
-        text.len().checked_div(self.metadata.max_token_len).unwrap_or(0)
+    fn max_chars_per_token(&self) -> Option<usize> {
+        Some(self.metadata.max_chars_per_token)
     }
 }
 
@@ -653,15 +652,13 @@ mod tests {
         }
     }
 
+    /// The longest raw token string here is a reserved slot's placeholder name,
+    /// `<|reserved_token_511|>`.
     #[test]
-    fn tiktoken_estimate_min_token() {
+    fn tiktoken_max_chars_per_token_counts_special_names() {
         let (backends, _dir) = tiktoken_backends();
-        for backend in &backends {
-            let max_token_len = backend.metadata.max_token_len;
-            assert!(max_token_len > 0);
-            assert_eq!(backend.estimate_min_token(""), 0);
-            let text = "a".repeat(max_token_len * 3 + 1);
-            assert_eq!(backend.estimate_min_token(&text), 3);
+        for backend in backends {
+            assert_eq!(backend.max_chars_per_token(), Some(22));
         }
     }
 
