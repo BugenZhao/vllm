@@ -348,3 +348,32 @@ pub(crate) fn tool_search_request(references: &[&str]) -> ChatRequest {
         .insert("thinking".into(), Value::Bool(false));
     request
 }
+
+/// [`tool_search_request`] whose search result references a deferred strict
+/// tool, `get_time`, that has no description. Its schema is already in the
+/// normalized strict form deepseek-recipe's request conversion produces.
+pub(crate) fn undescribed_strict_tool_search_request() -> ChatRequest {
+    let mut request = tool_search_request(&["get_time"]);
+    let tools = vec![
+        tool(
+            "tool_search",
+            "Search tools",
+            json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            false,
+        ),
+        ChatTool {
+            name: "get_time".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+                "required": [],
+            }),
+            strict: Some(true),
+            defer_loading: Some(true),
+        },
+    ];
+    request.tool_context = ResolvedToolContext::new(&request.messages, tools, None, true).unwrap();
+    request
+}

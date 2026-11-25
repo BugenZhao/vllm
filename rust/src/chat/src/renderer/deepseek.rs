@@ -80,9 +80,27 @@ impl DsDialect {
     }
 }
 
+/// How a tool prompt writes each tool schema line.
+#[derive(Debug, Clone, Copy)]
+enum ToolSchemaShape {
+    /// Request tools, as deepseek-recipe lists them: an omitted description is
+    /// `""`, and `strict` is not listed.
+    Recipe,
+    /// Tools a developer message declares, which deepseek-recipe does not
+    /// have: the declared fields, keeping vLLM's developer-message format.
+    Declared,
+}
+
+#[derive(Debug, Serialize)]
+struct RecipeToolSchema<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize)]
-struct RenderedToolSchema<'a> {
+struct DeclaredToolSchema<'a> {
     name: &'a str,
     description: Option<&'a str>,
     parameters: &'a Value,
@@ -514,7 +532,12 @@ fn next_rendered_entry(
 }
 
 /// Render the tool preamble shown to the model for one DeepSeek dialect.
-fn render_tools(out: &mut String, tools: &[ChatTool], dialect: DsDialect) -> Result<()> {
+fn render_tools(
+    out: &mut String,
+    tools: &[ChatTool],
+    shape: ToolSchemaShape,
+    dialect: DsDialect,
+) -> Result<()> {
     let tool_calls_tag = dialect.tool_calls_tag();
     let invoke_tag = dialect.invoke_tag();
     let parameter_tag = dialect.parameter_tag();
@@ -554,7 +577,7 @@ Otherwise, output directly after </think> with tool calls or final response.
         if index > 0 {
             out.push('\n');
         }
-        render_tool_schema(out, tool)?;
+        render_tool_schema(out, tool, shape)?;
     }
 
     out.push_str(
@@ -564,13 +587,21 @@ Otherwise, output directly after </think> with tool calls or final response.
 }
 
 /// Serialize one typed tool schema into the JSON shape embedded in the prompt.
-fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
-    out.push_str(&json_dumps(&RenderedToolSchema {
-        name: &tool.name,
-        description: tool.description.as_deref(),
-        parameters: &tool.parameters,
-        strict: tool.strict,
-    })?);
+fn render_tool_schema(out: &mut String, tool: &ChatTool, shape: ToolSchemaShape) -> Result<()> {
+    let line = match shape {
+        ToolSchemaShape::Recipe => json_dumps(&RecipeToolSchema {
+            name: &tool.name,
+            description: tool.description.as_deref().unwrap_or_default(),
+            parameters: &tool.parameters,
+        }),
+        ToolSchemaShape::Declared => json_dumps(&DeclaredToolSchema {
+            name: &tool.name,
+            description: tool.description.as_deref(),
+            parameters: &tool.parameters,
+            strict: tool.strict,
+        }),
+    }?;
+    out.push_str(&line);
     Ok(())
 }
 
@@ -591,25 +622,31 @@ fn write_updated_tool_schemas(
     let (block_start, block_end) = user_content_block_bounds(messages, message_index);
     // A referenced tool is missing only when `tool_choice: none` excluded the
     // request-level tools from the prompt; it stays unlisted then.
-    let tools = messages[block_start..block_end]
+    let tool_indices = messages[block_start..block_end]
         .iter()
         .filter_map(|message| match message {
             ChatMessage::ToolResponse { content, .. } => Some(content),
             _ => None,
         })
         .flat_map(ChatContent::tool_references)
-        .filter_map(|name| request.tool(name))
+        .filter_map(|name| request.tools().iter().position(|tool| tool.name == name))
         .collect::<Vec<_>>();
-    if tools.is_empty() {
+    if tool_indices.is_empty() {
         return Ok(());
     }
     out.push_str(SYSTEM_SP_TOKEN);
     out.push_str("\n\n### Updated Tool Schemas\n\n");
-    for (index, tool) in tools.into_iter().enumerate() {
+    for (index, tool_index) in tool_indices.into_iter().enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        render_tool_schema(out, tool)?;
+        // Request-level tools come first among the effective tools.
+        let shape = if tool_index < request.initial_tools().len() {
+            ToolSchemaShape::Recipe
+        } else {
+            ToolSchemaShape::Declared
+        };
+        render_tool_schema(out, &request.tools()[tool_index], shape)?;
     }
     Ok(())
 }
@@ -627,7 +664,7 @@ fn render_system_message(
     }
     if !tools.is_empty() {
         out.push_str("\n\n");
-        render_tools(out, tools, dialect)?;
+        render_tools(out, tools, ToolSchemaShape::Recipe, dialect)?;
     }
     Ok(())
 }
@@ -651,7 +688,7 @@ fn render_developer_message(
     write_chat_content(out, content, dialect, message_index, media_order)?;
     if !tools.is_empty() {
         out.push_str("\n\n");
-        render_tools(out, tools, dialect)?;
+        render_tools(out, tools, ToolSchemaShape::Declared, dialect)?;
     }
     Ok(())
 }

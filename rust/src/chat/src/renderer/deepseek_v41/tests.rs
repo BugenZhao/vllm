@@ -13,9 +13,10 @@ use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{
     FixtureRequestOptions, fixture_chat_request, tool, tool_search_request,
+    undescribed_strict_tool_search_request,
 };
 use crate::request::{
-    ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode,
+    ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode,
     ResolvedToolContext,
 };
 
@@ -554,4 +555,47 @@ fn joins_assistant_text_parts_with_reference_separator() {
 
         answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
     .assert_eq(&render(&request));
+}
+
+/// Like deepseek-recipe (`935817c`): a tool without a description is listed
+/// with `"description": ""`, and `strict` is not listed, also in the updated
+/// tool schemas written after a tool search result.
+#[test]
+fn tool_schema_lists_empty_description_without_strict_like_deepseek_recipe() {
+    let prompt = render(&undescribed_strict_tool_search_request());
+    let (_, schemas) = prompt.split_once("### Updated Tool Schemas\n\n").unwrap();
+    let (schema, _) = schemas.split_once("<｜Assistant｜>").unwrap();
+    expect![[r#"{"name": "get_time", "description": "", "parameters": {"type": "object", "properties": {}, "additionalProperties": false, "required": []}}"#]]
+        .assert_eq(schema);
+}
+
+/// A deferred tool a developer message declares keeps its declared fields in
+/// the updated tool schemas, as in the developer turn's own tool prompt.
+#[test]
+fn updated_tool_schema_keeps_developer_declared_fields() {
+    let mut request = tool_search_request(&["get_time"]);
+    let get_time = ChatTool {
+        name: "get_time".to_string(),
+        description: None,
+        parameters: json!({"type": "object"}),
+        strict: Some(true),
+        defer_loading: Some(true),
+    };
+    request
+        .messages
+        .insert(0, ChatMessage::developer("policy", Some(vec![get_time])));
+    let tools = vec![tool(
+        "tool_search",
+        "Search tools",
+        json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        false,
+    )];
+    request.tool_context = ResolvedToolContext::new(&request.messages, tools, None, true).unwrap();
+
+    let prompt = render(&request);
+    let (_, schemas) = prompt.split_once("### Updated Tool Schemas\n\n").unwrap();
+    let (schema, _) = schemas.split_once("<｜Assistant｜>").unwrap();
+
+    expect![[r#"{"name": "get_time", "parameters": {"type": "object"}, "strict": true}"#]]
+        .assert_eq(schema);
 }

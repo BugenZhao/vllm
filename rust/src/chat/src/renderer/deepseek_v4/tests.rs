@@ -14,6 +14,7 @@ use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{
     FixtureRequestOptions, fixture_chat_request, tool_search_request,
+    undescribed_strict_tool_search_request,
 };
 use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
@@ -854,4 +855,39 @@ fn tool_references_render_as_tool_names_like_deepseek_recipe() {
     expect_file!["fixtures/tool_search_references.txt"].assert_eq(&render_request(
         &tool_search_request(&["get_weather", "get_time"]),
     ));
+}
+
+/// Like deepseek-recipe (`935817c`): a tool without a description is listed
+/// with `"description": ""`, and `strict` is not listed. V4 lists the deferred
+/// tool up front.
+#[test]
+fn tool_schema_lists_empty_description_without_strict_like_deepseek_recipe() {
+    let prompt = render_request(&undescribed_strict_tool_search_request());
+    let (_, schemas) = prompt.split_once("### Available Tool Schemas\n\n").unwrap();
+    let schema = schemas.lines().find(|line| line.starts_with(r#"{"name": "get_time""#)).unwrap();
+    expect![[r#"{"name": "get_time", "description": "", "parameters": {"type": "object", "properties": {}, "additionalProperties": false, "required": []}}"#]]
+        .assert_eq(schema);
+}
+
+/// Developer-message tools, which deepseek-recipe does not have, keep their
+/// declared fields, as the checkpoint's encoder writes them: no default
+/// description, and `strict` when declared.
+#[test]
+fn developer_tool_schema_keeps_declared_fields() {
+    let tool = ChatTool {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: Value::Object(Default::default()),
+        strict: Some(true),
+        defer_loading: None,
+    };
+    let request = thinking_request(vec![
+        ChatMessage::user("question"),
+        ChatMessage::developer("policy", Some(vec![tool])),
+    ]);
+
+    let prompt = render_request(&request);
+    let schema = prompt.lines().find(|line| line.starts_with(r#"{"name": "lookup""#)).unwrap();
+
+    expect![[r#"{"name": "lookup", "parameters": {}, "strict": true}"#]].assert_eq(schema);
 }
