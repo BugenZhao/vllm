@@ -577,8 +577,14 @@ fn record_no_exist(marker: &Path) {
     }
 }
 
+/// Like `huggingface_hub`, `TRANSFORMERS_OFFLINE` stands in when `HF_HUB_OFFLINE` is
+/// unset or empty.
 fn is_hf_hub_offline() -> bool {
-    std::env::var("HF_HUB_OFFLINE").is_ok_and(|value| {
+    let value = std::env::var("HF_HUB_OFFLINE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("TRANSFORMERS_OFFLINE").ok());
+    value.is_some_and(|value| {
         matches!(
             value.to_ascii_uppercase().as_str(),
             "1" | "ON" | "YES" | "TRUE"
@@ -820,7 +826,8 @@ mod tests {
                 .env("HF_HOME", hf_home)
                 .env("HF_HUB_CACHE", cache)
                 .env("HF_ENDPOINT", endpoint)
-                .env_remove("HF_HUB_OFFLINE");
+                .env_remove("HF_HUB_OFFLINE")
+                .env_remove("TRANSFORMERS_OFFLINE");
             for (key, value) in extra_env {
                 command.env(key, value);
             }
@@ -1241,6 +1248,16 @@ mod tests {
         partial_snapshot(&offline, &partial);
         run_child(TEST, CHILD, &offline, &endpoint, &[("HF_HUB_OFFLINE", "1")]).await;
         assert!(!offline.join("models--test--model/.no_exist").exists());
+        let transformers_offline = dir.path().join("transformers-offline");
+        partial_snapshot(&transformers_offline, &partial);
+        run_child(
+            TEST,
+            CHILD,
+            &transformers_offline,
+            &endpoint,
+            &[("TRANSFORMERS_OFFLINE", "1")],
+        )
+        .await;
 
         assert_eq!(hub.requests(), Vec::<String>::new());
     }
@@ -1466,6 +1483,7 @@ mod tests {
             .env("HF_TOKEN", "env-token")
             .env_remove("HF_HUB_CACHE")
             .env_remove("HF_HUB_OFFLINE")
+            .env_remove("TRANSFORMERS_OFFLINE")
             .output()
             .unwrap();
         assert!(
