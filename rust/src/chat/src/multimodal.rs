@@ -2785,8 +2785,8 @@ mod tests {
         }
     }
 
-    /// Qwen3-VL's processor caps videos at 32 per prompt unless
-    /// `--limit-mm-per-prompt` sets a video count, as in Python.
+    /// A model's default item cap applies to a modality that
+    /// `--limit-mm-per-prompt` gives no count, as in Python.
     #[test]
     fn validate_mm_limits_applies_the_model_default_without_a_configured_count() {
         let videos = |count| std::iter::repeat_with(video_url_part).take(count).collect::<Vec<_>>();
