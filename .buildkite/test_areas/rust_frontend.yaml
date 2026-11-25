@@ -28,8 +28,8 @@ steps:
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - tests/entrypoints/openai/completion/test_token_in_token_out.py
   - tests/entrypoints/openai/test_chunked_prompt.py
-
-  # - tests/entrypoints/openai/completion/test_prompt_validation.py
+  - tests/entrypoints/openai/completion/test_prompt_validation.py
+  - tests/entrypoints/openai/chat_completion/test_batched_chat_completions.py
   - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
   - tests/entrypoints/openai/test_return_tokens_as_ids.py
@@ -55,8 +55,9 @@ steps:
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
   - pytest -v -s entrypoints/openai/completion/test_token_in_token_out.py
   - pytest -v -s entrypoints/openai/test_chunked_prompt.py
-
-  # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
+  - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
+  # The Rust frontend does not serve /v1/chat/completions/batch.
+  - pytest -v -s entrypoints/openai/chat_completion/test_batched_chat_completions.py -k "test_inference_invalid_model_error_is_bounded and not batch-chat"
   # test_shutdown_on_engine_failure launches the Python API server directly, not the Rust frontend.
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py
@@ -93,6 +94,8 @@ steps:
       - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - tests/entrypoints/openai/completion/test_token_in_token_out.py
       - tests/entrypoints/openai/test_chunked_prompt.py
+      - tests/entrypoints/openai/completion/test_prompt_validation.py
+      - tests/entrypoints/openai/chat_completion/test_batched_chat_completions.py
       - tests/entrypoints/launchers/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/openai/test_return_tokens_as_ids.py
@@ -115,6 +118,7 @@ steps:
   - tests/utils.py
   - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
   - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+  - tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
   - tests/entrypoints/serve/lora/test_lora_adapters.py
@@ -133,6 +137,8 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+  # The Rust frontend has no multimodal processor cache, so it rejects cache-only features.
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py --deselect "tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py::test_features_with_content_parts[True]"
   # run_batch drives the Python batch runner, not a server. test_metrics_exist needs
   # vllm:admission_rejections (text) and image inputs (multimodal), which the Rust frontend lacks.
   # The multimodal model (SmolVLM, Idefics3) has no Rust processor, so the Rust frontend refuses
@@ -170,6 +176,7 @@ steps:
       - tests/utils.py
       - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
       - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+      - tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py
       - tests/entrypoints/serve/instrumentator/test_basic.py
       - tests/entrypoints/serve/instrumentator/test_metrics.py
       - tests/entrypoints/serve/lora/test_lora_adapters.py
@@ -187,7 +194,7 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
   key: rust-frontend-core-correctness
   automatic_shard: true
-  timeout_in_minutes: 20
+  timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -196,11 +203,13 @@ steps:
   - tests/utils.py
   - tests/entrypoints/openai/correctness/test_lmeval.py
   - tests/v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
+  - tests/v1/determinism/test_online_batch_invariance.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   - pytest -v -s v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
+  - pytest -v -s v1/determinism/test_online_batch_invariance.py
   mirror:
     amd:
       automatic_shard: true
@@ -216,6 +225,7 @@ steps:
       - tests/utils.py
       - tests/entrypoints/openai/correctness/test_lmeval.py
       - tests/v1/core/prefix_cache/test_hybrid_prefix_cache_hit_rate.py
+      - tests/v1/determinism/test_online_batch_invariance.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Chat Completions"
@@ -274,6 +284,8 @@ steps:
     tool_use
     --ignore=tool_use/mistral
     --models=llama3.2
+  # Hermes 3's chat template takes the length of an undefined `tools`.
+  - pytest -v -s tool_use/test_chat_completions.py --models=hermes -k "without_tools or with_empty_tools"
   - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
   - pytest -v -s entrypoints/tool_parsers/test_hermes_tool_parser.py
@@ -308,6 +320,7 @@ steps:
   - vllm/entrypoints/openai/
   - tests/utils.py
   - tests/entrypoints/openai/responses
+  - tests/entrypoints/multimodal/openai/responses/test_image.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -321,6 +334,9 @@ steps:
   - pytest -v -s entrypoints/openai/responses/test_namespace_tool_separator.py
   - pytest -v -s entrypoints/openai/responses/test_structured_output.py
   - pytest -v -s entrypoints/openai/responses/test_simple.py -k "not enable_response_messages and not streaming_logprobs"
+  # Image URLs in the other tests point at a local asset server, and the Rust frontend
+  # does not fetch media from loopback hosts; the base64 data-URL cases cover the path.
+  - pytest -v -s entrypoints/multimodal/openai/responses/test_image.py -k base64encoded
   mirror:
     amd:
       automatic_shard: true
@@ -335,6 +351,7 @@ steps:
       - vllm/entrypoints/openai/
       - tests/utils.py
       - tests/entrypoints/openai/responses
+      - tests/entrypoints/multimodal/openai/responses/test_image.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
