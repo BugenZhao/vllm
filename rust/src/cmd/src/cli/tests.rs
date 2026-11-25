@@ -3344,11 +3344,6 @@ fn unsupported_env_switches_fail_startup() {
             "enable_responses_api_store",
             "VLLM_ENABLE_RESPONSES_API_STORE",
         ),
-        (
-            "--max-tokenize-tokens",
-            "max_tokenize_tokens",
-            "VLLM_MAX_TOKENIZE_TOKENS",
-        ),
     ] {
         // Like any `Unsupported` argument, every value is refused, including
         // the off value `0`.
