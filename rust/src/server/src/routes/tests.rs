@@ -13162,6 +13162,47 @@ async fn post_json(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_accepts_loaded_lora_models() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(true, |_| {})).await;
+    let adapter = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    state.load_static_lora(&adapter).await.expect("load static lora");
+    let mut app = build_router(state);
+
+    // Python checks the adapter name and still tokenizes with the base
+    // model's tokenizer, so each response equals the base-model one.
+    let requests = [
+        ("/tokenize", json!({ "prompt": "hello" })),
+        (
+            "/tokenize",
+            json!({ "messages": [{ "role": "user", "content": "hello" }] }),
+        ),
+        ("/detokenize", json!({ "tokens": [72] })),
+    ];
+    for (uri, body) in requests {
+        let (base_status, base_json) = post_json(&mut app, uri, body.clone()).await;
+        let mut lora_body = body;
+        lora_body["model"] = json!("alice");
+        let (lora_status, lora_json) = post_json(&mut app, uri, lora_body).await;
+        assert_eq!(
+            (base_status, lora_status),
+            (StatusCode::OK, StatusCode::OK),
+            "{uri}"
+        );
+        assert_eq!(lora_json, base_json, "{uri}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_completion_round_trips_through_detokenize() {
     let (mut app, _engine_task) = test_app().await;
     let prompt = "Hello world";
