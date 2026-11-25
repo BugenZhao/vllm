@@ -73,6 +73,14 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
+    /// Return the length in characters of the longest vocabulary entry, like
+    /// Python's `max_chars_per_token`: the character budget per token that
+    /// bounds a text before it is encoded. `None` when the backend does not
+    /// know it.
+    fn max_chars_per_token(&self) -> Option<usize> {
+        None
+    }
+
     /// Create a stateful incremental decoder primed with the given prompt
     /// tokens.
     ///

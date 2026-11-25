@@ -108,21 +108,48 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    /// Tokenize and truncate the prompt. With `max_tokens`, reject a prompt of
+    /// more tokens, and a text too long to fit them before encoding it, like
+    /// Python's `TokenizeParams` length checks.
     fn prepare_prompt_tokens(
         &self,
         prompt: Prompt,
         add_special_tokens: bool,
         prompt_truncation: Option<PromptTruncation>,
+        max_tokens: Option<usize>,
     ) -> Result<Vec<u32>> {
         let tokenizer = self.backend.tokenizer();
         let mut prompt_token_ids = match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
+            Prompt::Text(text) => {
+                if let Some(max_tokens) = max_tokens
+                    && let Some(max_chars_per_token) = tokenizer.max_chars_per_token()
+                {
+                    let max_chars = max_tokens.saturating_mul(max_chars_per_token);
+                    let chars = text.chars().count();
+                    if chars > max_chars {
+                        return Err(Error::PromptTextOverTokenLimit {
+                            max_tokens,
+                            chars,
+                            max_chars,
+                        });
+                    }
+                }
+                tokenizer.encode(&text, add_special_tokens)?
+            }
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
             Prompt::TokenIds(token_ids) => token_ids,
         };
         if let Some(prompt_truncation) = prompt_truncation {
             prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+        }
+        if let Some(max_tokens) = max_tokens
+            && prompt_token_ids.len() > max_tokens
+        {
+            return Err(Error::PromptOverTokenLimit {
+                max_tokens,
+                prompt_len: prompt_token_ids.len(),
+            });
         }
         Ok(prompt_token_ids)
     }
@@ -139,6 +166,7 @@ impl TextRequestProcessor {
             take(&mut request.prompt),
             request.add_special_tokens,
             request.prompt_truncation.take(),
+            None,
         )?;
         request.prompt = Prompt::TokenIds(prompt_token_ids);
         match &request.prompt {
@@ -147,13 +175,15 @@ impl TextRequestProcessor {
         }
     }
 
-    /// Prepare one request's prompt tokens without generation-specific lowering.
-    pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
+    /// Prepare one request's prompt tokens without generation-specific
+    /// lowering, rejecting a prompt of more than `max_tokens` tokens.
+    pub fn tokenize(&self, request: TextRequest, max_tokens: Option<usize>) -> Result<Vec<u32>> {
         request.validate()?;
         self.prepare_prompt_tokens(
             request.prompt,
             request.add_special_tokens,
             request.prompt_truncation,
+            max_tokens,
         )
     }
 
@@ -174,6 +204,7 @@ impl TextRequestProcessor {
             take(&mut request.prompt),
             request.add_special_tokens,
             request.prompt_truncation,
+            None,
         )?;
         let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
@@ -505,6 +536,80 @@ mod tests {
         "#]].assert_debug_eq(&errors);
     }
 
+    /// Like Python's `TokenizeParams`, a bounded tokenize rejects a text whose
+    /// characters could not fit the tokens before encoding it, even when the
+    /// tokenizer would merge it into fewer, and then a prompt of more tokens.
+    #[test]
+    fn bounded_tokenize_rejects_long_text_before_encoding_and_long_prompts() {
+        /// Encodes each non-space byte as one token, so blanks cost nothing,
+        /// and refuses a text over the character budget of three tokens.
+        struct SpaceDroppingTokenizer;
+
+        impl vllm_tokenizer::Tokenizer for SpaceDroppingTokenizer {
+            fn encode(&self, text: &str, _: bool) -> vllm_tokenizer::Result<Vec<u32>> {
+                assert!(text.chars().count() <= 3, "encoded {text:?}");
+                Ok(text.bytes().filter(|b| *b != b' ').map(u32::from).collect())
+            }
+            fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+                self.encode(text, false)
+            }
+            fn decode(&self, _: &[u32], _: bool) -> vllm_tokenizer::Result<String> {
+                unimplemented!()
+            }
+            fn token_to_id(&self, _: &str) -> Option<u32> {
+                None
+            }
+            fn id_to_token(&self, _: u32) -> Option<String> {
+                None
+            }
+            fn max_chars_per_token(&self) -> Option<usize> {
+                Some(1)
+            }
+        }
+
+        struct SpaceDroppingBackend;
+
+        impl TextBackend for SpaceDroppingBackend {
+            fn tokenizer(&self) -> DynTokenizer {
+                Arc::new(SpaceDroppingTokenizer)
+            }
+
+            fn model_id(&self) -> &str {
+                "test-model"
+            }
+        }
+
+        let processor = TextRequestProcessor::new(Arc::new(SpaceDroppingBackend), 1024);
+        let tokenize = |prompt: Prompt| {
+            let request = TextRequest {
+                prompt,
+                ..TextRequest::for_test()
+            };
+            processor.tokenize(request, Some(3)).map_err(|error| error.to_report_string())
+        };
+
+        assert_eq!(tokenize(Prompt::Text("a b".to_string())), Ok(vec![97, 98]));
+        // Three characters in four bytes.
+        assert_eq!(
+            tokenize(Prompt::Text("é  ".to_string())),
+            Ok(vec![195, 169])
+        );
+        assert_eq!(tokenize(Prompt::TokenIds(vec![1, 2, 3])), Ok(vec![1, 2, 3]));
+        expect_test::expect![[r#"
+            [
+                Err(
+                    "This model's maximum context length is 3 tokens. However, your prompt contains 4 characters (more than 3 characters, which is the upper bound for 3 input tokens). Please reduce the length of the input prompt.",
+                ),
+                Err(
+                    "This model's maximum context length is 3 tokens. However, your prompt contains 4 input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input prompt.",
+                ),
+            ]
+        "#]].assert_debug_eq(&[
+            tokenize(Prompt::Text("a   ".to_string())),
+            tokenize(Prompt::TokenIds(vec![1, 2, 3, 4])),
+        ]);
+    }
+
     #[test]
     fn tokenize_and_prepare_apply_the_same_prompt_truncation() {
         let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 10);
@@ -517,7 +622,10 @@ mod tests {
             ..TextRequest::for_test()
         };
 
-        assert_eq!(processor.tokenize(request.clone()).unwrap(), vec![3, 4, 5]);
+        assert_eq!(
+            processor.tokenize(request.clone(), None).unwrap(),
+            vec![3, 4, 5]
+        );
         assert_eq!(
             processor.prepare(request).unwrap().generate_request.prompt_token_ids,
             vec![3, 4, 5]

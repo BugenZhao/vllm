@@ -43,8 +43,8 @@ use vllm_server::{
     CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode, LlmSource, LoraModulePath,
-    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RenderConfig,
-    RendererSelection, Server, ServerConfig,
+    MaxTokenizeTokens, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
+    RenderConfig, RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -790,6 +790,20 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
+    /// Maximum number of tokens allowed in /tokenize and /detokenize requests
+    /// (default `max(2 * max_model_len, 131072)`); a value `<= 0` disables
+    /// the limit. Like Python, it can also be set through
+    /// `VLLM_MAX_TOKENIZE_TOKENS`, where a blank value is unset.
+    #[arg(
+        long,
+        env = "VLLM_MAX_TOKENIZE_TOKENS",
+        default_value = "",
+        hide_default_value = true,
+        allow_negative_numbers = true
+    )]
+    #[serde(default)]
+    pub max_tokenize_tokens: MaxTokenizeTokens,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -1256,6 +1270,7 @@ impl SharedRuntimeArgs {
                 Some(limit) => Some(limit),
             },
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
+            max_tokenize_tokens: self.max_tokenize_tokens,
         }
     }
 

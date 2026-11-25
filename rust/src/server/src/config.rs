@@ -111,6 +111,64 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// Upper bound on the tokens of a `/tokenize` or `/detokenize` request
+    /// (`--max-tokenize-tokens`).
+    pub max_tokenize_tokens: MaxTokenizeTokens,
+}
+
+/// Upper bound on the tokens of a `/tokenize` or `/detokenize` request, like
+/// Python's `--max-tokenize-tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum MaxTokenizeTokens {
+    /// `max(2 * max_model_len, 131072)`, Python's default.
+    #[default]
+    ModelDefault,
+    /// No bound, from a configured value `<= 0`.
+    Unlimited,
+    /// A configured bound.
+    Limit(usize),
+}
+
+impl MaxTokenizeTokens {
+    /// Lower a configured integer: `<= 0` removes the bound, as in Python.
+    fn from_configured(value: i64) -> Self {
+        match usize::try_from(value) {
+            Ok(0) | Err(_) => Self::Unlimited,
+            Ok(limit) => Self::Limit(limit),
+        }
+    }
+
+    /// Resolve the bound for a model with `max_model_len`; `None` is unbounded.
+    pub fn resolve(self, max_model_len: u32) -> Option<usize> {
+        match self {
+            Self::ModelDefault => Some((max_model_len as usize * 2).max(131_072)),
+            Self::Unlimited => None,
+            Self::Limit(limit) => Some(limit),
+        }
+    }
+}
+
+impl FromStr for MaxTokenizeTokens {
+    type Err = String;
+
+    /// Parse like Python's `VLLM_MAX_TOKENIZE_TOKENS`: a blank value is unset,
+    /// anything else must be an integer.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(Self::ModelDefault);
+        }
+        let value = value.parse().map_err(|_| format!("`{value}` is not an integer"))?;
+        Ok(Self::from_configured(value))
+    }
+}
+
+/// Python passes the resolved integer in `--args-json`, or leaves it out.
+impl<'de> Deserialize<'de> for MaxTokenizeTokens {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Option::<i64>::deserialize(deserializer)?
+            .map_or(Self::ModelDefault, Self::from_configured))
+    }
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and
@@ -634,5 +692,51 @@ mod lora_module_path_tests {
         assert!("org/a".parse::<LoraModulePath>().is_err());
         assert!(r#"{"name": "a"}"#.parse::<LoraModulePath>().is_err());
         assert!(r#"[{"name": "a", "path": "org/a"}]"#.parse::<LoraModulePath>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod max_tokenize_tokens_tests {
+    use super::MaxTokenizeTokens;
+
+    /// Python's default is twice the model length, but at least 131072.
+    #[test]
+    fn model_default_doubles_max_model_len_with_a_floor() {
+        assert_eq!(MaxTokenizeTokens::ModelDefault.resolve(100), Some(131_072));
+        assert_eq!(
+            MaxTokenizeTokens::ModelDefault.resolve(70_000),
+            Some(140_000)
+        );
+        assert_eq!(MaxTokenizeTokens::Limit(5).resolve(70_000), Some(5));
+        assert_eq!(MaxTokenizeTokens::Unlimited.resolve(70_000), None);
+    }
+
+    /// The flag and its variable parse like Python's: blank is unset, `<= 0`
+    /// removes the bound; `--args-json` carries the integer or leaves it out.
+    #[test]
+    fn parses_like_python() {
+        for (text, expected) in [
+            ("", MaxTokenizeTokens::ModelDefault),
+            ("  ", MaxTokenizeTokens::ModelDefault),
+            (" 7 ", MaxTokenizeTokens::Limit(7)),
+            ("0", MaxTokenizeTokens::Unlimited),
+            ("-1", MaxTokenizeTokens::Unlimited),
+        ] {
+            assert_eq!(text.parse::<MaxTokenizeTokens>(), Ok(expected), "{text:?}");
+        }
+        assert_eq!(
+            "1e3".parse::<MaxTokenizeTokens>(),
+            Err("`1e3` is not an integer".to_string())
+        );
+        for (json, expected) in [
+            ("null", MaxTokenizeTokens::ModelDefault),
+            ("7", MaxTokenizeTokens::Limit(7)),
+            ("0", MaxTokenizeTokens::Unlimited),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<MaxTokenizeTokens>(json).unwrap(),
+                expected
+            );
+        }
     }
 }

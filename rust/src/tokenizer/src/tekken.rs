@@ -11,6 +11,7 @@ use crate::{Result, Tokenizer};
 /// Mistral Tekken tokenizer from a `tekken.json` file.
 pub struct TekkenTokenizer {
     inner: Tekkenizer,
+    max_chars_per_token: usize,
 }
 
 impl TekkenTokenizer {
@@ -24,7 +25,16 @@ impl TekkenTokenizer {
                 path.display()
             )
         })?;
-        Ok(Self { inner })
+        Ok(Self::from_inner(inner))
+    }
+
+    fn from_inner(inner: Tekkenizer) -> Self {
+        let max_chars_per_token =
+            inner.vocab().iter().map(|token| token.chars().count()).max().unwrap_or(0);
+        Self {
+            inner,
+            max_chars_per_token,
+        }
     }
 }
 
@@ -72,6 +82,10 @@ impl Tokenizer for TekkenTokenizer {
     fn is_special_id(&self, token_id: u32) -> bool {
         self.inner.is_special_token(token_id)
     }
+
+    fn max_chars_per_token(&self) -> Option<usize> {
+        Some(self.max_chars_per_token)
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +119,13 @@ mod tests {
             None,
         )
         .expect("build Tekken tokenizer");
-        TekkenTokenizer { inner }
+        TekkenTokenizer::from_inner(inner)
+    }
+
+    /// The vocabulary counts the special tokens, here `<control>`.
+    #[test]
+    fn max_chars_per_token_counts_special_tokens() {
+        assert_eq!(test_tokenizer().max_chars_per_token(), Some(9));
     }
 
     #[test]

@@ -11,8 +11,8 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     AdmissionLimits, EngineCoreConfig, FingerprintMode, GenerationConfigMode, HttpListenerMode,
-    LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RendererSelection,
+    LoraModulePath, MaxTokenizeTokens, OutputLogConfig, OutputLogging, ParserSelection,
+    ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::{HfToken, ModelSource};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -330,6 +330,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1204,6 +1205,44 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     }
 }
 
+/// `--max-tokenize-tokens`, which `VLLM_MAX_TOKENIZE_TOKENS` also sets, bounds
+/// `/tokenize` and `/detokenize`; like Python, a value `<= 0` removes the bound
+/// and a blank one, as an empty variable gives, leaves the default.
+#[test]
+fn serve_args_lower_max_tokenize_tokens() {
+    let parse = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))?;
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        Ok::<_, clap::Error>(
+            args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+                .server
+                .api_server_options
+                .max_tokenize_tokens,
+        )
+    };
+
+    assert_eq!(parse(&[]).unwrap(), MaxTokenizeTokens::ModelDefault);
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", " "]).unwrap(),
+        MaxTokenizeTokens::ModelDefault
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", " 7 "]).unwrap(),
+        MaxTokenizeTokens::Limit(7)
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", "-1"]).unwrap(),
+        MaxTokenizeTokens::Unlimited
+    );
+    assert_eq!(
+        parse(&["--max-tokenize-tokens", "1e3"]).unwrap_err().kind(),
+        clap::error::ErrorKind::ValueValidation
+    );
+}
+
 /// Python resolves the settings it reads only from environment variables and
 /// passes them in `--args-json`.
 #[test]
@@ -1225,11 +1264,17 @@ fn args_json_reads_env_only_settings() {
         Some(32 * 1024 * 1024)
     );
 
+    assert_eq!(
+        args.api_server_options().max_tokenize_tokens,
+        MaxTokenizeTokens::ModelDefault
+    );
+
     let args = parse(
         r#","log_stats_interval":0.5,"disable_request_id_randomization":true,
         "keep_alive_on_engine_death":true,"http_max_request_body_size":1048576,
         "skip_model_name_validation":true,"server_dev_mode":true,
-        "allow_runtime_lora_updating":true,"max_n_sequences":8"#,
+        "allow_runtime_lora_updating":true,"max_n_sequences":8,
+        "max_tokenize_tokens":100"#,
     )
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
@@ -1239,6 +1284,10 @@ fn args_json_reads_env_only_settings() {
     assert!(args.api_server_options().server_dev_mode);
     assert!(args.api_server_options().allow_runtime_lora_updating);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
+    assert_eq!(
+        args.api_server_options().max_tokenize_tokens,
+        MaxTokenizeTokens::Limit(100)
+    );
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -2444,6 +2493,7 @@ fn frontend_args_accept_json() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3263,11 +3313,6 @@ fn unsupported_env_switches_fail_startup() {
             "enable_responses_api_store",
             "VLLM_ENABLE_RESPONSES_API_STORE",
         ),
-        (
-            "--max-tokenize-tokens",
-            "max_tokenize_tokens",
-            "VLLM_MAX_TOKENIZE_TOKENS",
-        ),
     ] {
         // Like any `Unsupported` argument, every value is refused, including
         // the off value `0`.
@@ -3611,6 +3656,7 @@ fn serve_args_accept_handshake_aliases() {
                         server_dev_mode: false,
                         allow_runtime_lora_updating: false,
                         max_n_sequences: None,
+                        max_tokenize_tokens: ModelDefault,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3902,6 +3948,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4055,6 +4102,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {
@@ -4314,6 +4362,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                         33554432,
                     ),
                     max_n_sequences: 16384,
+                    max_tokenize_tokens: ModelDefault,
                 },
                 fingerprint_mode: Full,
                 cors: CorsConfig {

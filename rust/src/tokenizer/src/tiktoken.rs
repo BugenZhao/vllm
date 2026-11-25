@@ -147,6 +147,8 @@ struct TokenMetadata {
     /// lossy UTF-8, matching decode behavior for byte sequences that are not
     /// valid UTF-8 on their own.
     token_by_id: FxHashMap<u32, String>,
+    /// Length in characters of the longest raw token string.
+    max_chars_per_token: usize,
 }
 
 impl TokenMetadata {
@@ -435,6 +437,8 @@ impl LoadedTiktokenConfig {
             token_by_id.insert(id, token.clone());
         }
 
+        let max_chars_per_token =
+            token_by_id.values().map(|token| token.chars().count()).max().unwrap_or(0);
         let pattern = model_config.as_ref().map_or(CL100K_BASE_PATTERN, detect_bpe_pattern);
 
         Ok(Self {
@@ -445,6 +449,7 @@ impl LoadedTiktokenConfig {
                 vocab_upper_bound: reserved_end,
                 non_special_added_ids,
                 token_by_id,
+                max_chars_per_token,
             },
             pattern,
         })
@@ -518,6 +523,10 @@ impl Tokenizer for TiktokenTokenizer {
         // tokens plus the registered special/reserved slots), used to range-check
         // `allowed_token_ids` so tiktoken models are not exempt from validation.
         self.metadata.vocab_upper_bound as usize
+    }
+
+    fn max_chars_per_token(&self) -> Option<usize> {
+        Some(self.metadata.max_chars_per_token)
     }
 }
 
@@ -640,6 +649,16 @@ mod tests {
         let (backends, _dir) = tiktoken_backends();
         for backend in backends {
             assert_eq!(backend.vocab_size(), 512);
+        }
+    }
+
+    /// The longest raw token string here is a reserved slot's placeholder name,
+    /// `<|reserved_token_511|>`.
+    #[test]
+    fn tiktoken_max_chars_per_token_counts_special_names() {
+        let (backends, _dir) = tiktoken_backends();
+        for backend in backends {
+            assert_eq!(backend.max_chars_per_token(), Some(22));
         }
     }
 

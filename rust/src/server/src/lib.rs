@@ -36,8 +36,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, ServerConfig, TlsConfig,
+    DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath, MaxTokenizeTokens,
+    OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;

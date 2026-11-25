@@ -44,10 +44,13 @@ pub async fn tokenize(
     let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
+    let max_tokens = state.api_server_options.max_tokenize_tokens.resolve(max_model_len);
 
     let (tokens, want_strs) = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req)?,
-        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await?,
+        TokenizeRequest::Completion(req) => {
+            tokenize_completion(&state, &request_id, req, max_tokens)?
+        }
+        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req, max_tokens).await?,
     };
 
     let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
@@ -63,6 +66,7 @@ fn tokenize_completion(
     state: &AppState,
     request_id: &str,
     req: TokenizeCompletionRequest,
+    max_tokens: Option<usize>,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     state.base_model_names().check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
@@ -70,7 +74,7 @@ fn tokenize_completion(
         .chat
         .text()
         .request_processor()
-        .tokenize(req.into_text_request(request_id.to_string()))
+        .tokenize(req.into_text_request(request_id.to_string()), max_tokens)
         .map_err(|error| text_submit_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
@@ -83,6 +87,7 @@ async fn tokenize_chat(
     state: &AppState,
     request_id: &str,
     req: TokenizeChatRequest,
+    max_tokens: Option<usize>,
 ) -> Result<(Vec<u32>, bool), ApiError> {
     state.base_model_names().check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
@@ -98,7 +103,7 @@ async fn tokenize_chat(
         .chat
         .text()
         .request_processor()
-        .tokenize(text_request)
+        .tokenize(text_request, max_tokens)
         .map_err(|error| text_submit_error("tokenize failed", error))?;
     Ok((tokens, return_token_strs))
 }
@@ -108,6 +113,16 @@ pub async fn detokenize(
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
 ) -> Result<Json<DetokenizeResponse>, ApiError> {
     state.base_model_names().check(body.model.as_deref())?;
+    let max_model_len = state.llm().info().max_model_len;
+    if let Some(max_tokens) = state.api_server_options.max_tokenize_tokens.resolve(max_model_len)
+        && body.tokens.len() > max_tokens
+    {
+        let error = vllm_text::Error::PromptOverTokenLimit {
+            max_tokens,
+            prompt_len: body.tokens.len(),
+        };
+        return Err(text_submit_error("detokenize failed", error));
+    }
     let tokenizer = state.chat.text().tokenizer();
     let prompt = tokenizer
         .decode(&body.tokens, /* skip_special_tokens = */ false)
