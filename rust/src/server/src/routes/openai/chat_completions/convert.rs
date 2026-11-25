@@ -368,7 +368,7 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                 }),
                 ContentPart::InputAudio { input_audio, uuid } => Ok(ChatContentPart::InputAudio {
                     data: input_audio.data,
-                    format: input_audio.format,
+                    format: Some(input_audio.format),
                     uuid,
                 }),
                 ContentPart::ToolReference { name } => Ok(ChatContentPart::ToolReference { name }),
@@ -486,13 +486,13 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use expect_test::expect;
     use llm_multimodal::ImageDetail;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use thiserror_ext::AsReport as _;
     use validator::Validate;
     use vllm_chat::{
         AllowedToolsMode, AssistantContentBlock, AssistantToolCall, ChatContentPart,
         ChatMessage as VllmChatMessage, ChatRenderer, ChatTool as VllmChatTool, ChatToolChoice,
-        GenerationPromptMode, KimiK3ChatRenderer, KimiK3Variant,
+        GenerationPromptMode, InputAudioFormat, KimiK3ChatRenderer, KimiK3Variant,
         SamplingParams as VllmSamplingParams,
     };
     use vllm_text::{
@@ -588,6 +588,38 @@ mod tests {
             "stream_interval": 0,
         });
         assert!(serde_json::from_value::<ChatCompletionRequest>(request).is_err());
+    }
+
+    #[test]
+    fn chat_http_input_audio_format_accepts_only_openai_names() {
+        let request = |format: Option<Value>| {
+            let mut input_audio = json!({"data": "dGVzdA=="});
+            if let Some(format) = format {
+                input_audio["format"] = format;
+            }
+            json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "input_audio", "input_audio": input_audio}],
+                }],
+            })
+        };
+        for format in ["wav", "mp3"] {
+            serde_json::from_value::<ChatCompletionRequest>(request(Some(json!(format))))
+                .expect("OpenAI format names are accepted");
+        }
+        for (format, expected) in [
+            (None, "missing field `format`"),
+            (Some(Value::Null), "invalid type: null"),
+            (Some(json!("WAV")), "expected `wav` or `mp3`"),
+            (Some(json!("MP3")), "expected `wav` or `mp3`"),
+            (Some(json!("flac")), "expected `wav` or `mp3`"),
+        ] {
+            let error = serde_json::from_value::<ChatCompletionRequest>(request(format.clone()))
+                .expect_err("format must be rejected")
+                .to_string();
+            assert!(error.contains(expected), "format {format:?}: {error}");
+        }
     }
 
     #[test]
@@ -1341,7 +1373,7 @@ mod tests {
                     ContentPart::InputAudio {
                         input_audio: InputAudio {
                             data: "dGVzdA==".to_string(),
-                            format: Some("wav".to_string()),
+                            format: InputAudioFormat::Wav,
                         },
                         uuid: Some("audio-1".to_string()),
                     },
@@ -1369,7 +1401,7 @@ mod tests {
             vec![VllmChatMessage::user(vec![
                 ChatContentPart::InputAudio {
                     data: "dGVzdA==".to_string(),
-                    format: Some("wav".to_string()),
+                    format: Some(InputAudioFormat::Wav),
                     uuid: Some("audio-1".to_string()),
                 },
                 ChatContentPart::audio_url("https://example.com/audio.mp3"),

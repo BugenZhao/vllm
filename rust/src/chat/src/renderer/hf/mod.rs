@@ -728,7 +728,7 @@ mod tests {
     use crate::EffortValue;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, ResolvedToolContext,
+        GenerationPromptMode, InputAudioFormat, ResolvedToolContext,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -850,7 +850,7 @@ mod tests {
     fn audio_request() -> ChatRequest {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
-            ChatContentPart::input_audio("dGVzdA==", Some("wav".to_string())),
+            ChatContentPart::input_audio("dGVzdA==", Some(InputAudioFormat::Wav)),
             ChatContentPart::audio_url("https://example.com/demo.mp3"),
             ChatContentPart::text("b"),
         ])])

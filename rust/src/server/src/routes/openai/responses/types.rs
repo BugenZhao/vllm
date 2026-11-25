@@ -14,8 +14,9 @@ use std::fmt;
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
-    ToolReference, default_true, deserialize_request_top_k,
+    ToolReference, default_true, deserialize_request_top_k, deserialize_text_or_list,
 };
+use itertools::Either;
 use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -480,11 +481,20 @@ pub struct ResponseInputMessage {
 }
 
 /// Message content: either a plain string or a list of typed parts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ResponseMessageContent {
     Text(String),
     Parts(Vec<ResponseInputContentPart>),
+}
+
+impl<'de> Deserialize<'de> for ResponseMessageContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match deserialize_text_or_list(deserializer)? {
+            Either::Left(text) => Self::Text(text),
+            Either::Right(parts) => Self::Parts(parts),
+        })
+    }
 }
 
 /// One message content part.

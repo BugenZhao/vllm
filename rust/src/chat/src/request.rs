@@ -31,6 +31,18 @@ pub enum ChatRole {
     Custom(String),
 }
 
+/// Container format of an `input_audio` content block. OpenAI accepts exactly
+/// these lowercase names.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum InputAudioFormat {
+    Wav,
+    Mp3,
+}
+
 /// One text-only chat content part in OpenAI-style block format.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +64,9 @@ pub enum ChatContentPart {
     /// One `input_audio` content block carrying base64-encoded audio bytes.
     InputAudio {
         data: String,
-        format: Option<String>,
+        /// `None` when the caller did not name the container (gRPC render), so
+        /// the media connector detects it from the bytes.
+        format: Option<InputAudioFormat>,
         uuid: Option<String>,
     },
     /// One audio URL/data URL content block.
@@ -93,7 +107,7 @@ impl ChatContentPart {
     }
 
     /// Construct one base64-encoded input-audio content part.
-    pub fn input_audio(data: impl Into<String>, format: Option<String>) -> Self {
+    pub fn input_audio(data: impl Into<String>, format: Option<InputAudioFormat>) -> Self {
         Self::InputAudio {
             data: data.into(),
             format,

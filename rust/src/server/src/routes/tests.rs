@@ -13160,6 +13160,59 @@ async fn post_json(
     (status, json)
 }
 
+/// A body whose `messages` is a list is a chat tokenize request even when it
+/// also carries `prompt`: a malformed chat part is reported, not replaced by the
+/// tokens of `prompt`. Without a `messages` list, `prompt` is tokenized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_selects_chat_by_a_messages_list() {
+    let (mut app, _engine_task) = test_app().await;
+    let request = |messages: serde_json::Value| json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello", "messages": messages});
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        request(json!([{
+            "role": "user",
+            "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA==", "format": "WAV"}}],
+        }])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("expected `wav` or `mp3`"), "{message}");
+
+    for messages in [serde_json::Value::Null, json!(17)] {
+        let (status, json) = post_json(&mut app, "/tokenize", request(messages)).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["count"], 6, "{json}");
+    }
+}
+
+/// A Responses `input_audio` part without `format` names the missing field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_input_audio_without_format_names_the_field() {
+    let (mut app, _engine_task) = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/responses",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_audio", "input_audio": {"data": "dGVzdA=="}}],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(message.contains("format"), "{message}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn tokenize_completion_round_trips_through_detokenize() {
