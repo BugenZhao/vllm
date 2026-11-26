@@ -147,6 +147,42 @@ impl TextRequestProcessor {
         }
     }
 
+    /// Tokenize and truncate the prompt in place like
+    /// [`Self::tokenize_in_place`], for a completions echo of what the model
+    /// sees.
+    ///
+    /// When truncation cut a text prompt, also return, per kept token, whether
+    /// the tokenizer added it as a special token rather than reading it from
+    /// the text, so the echo can leave those out, like Python's
+    /// `prompt_echo_mask`. `None` otherwise: an uncut text prompt is echoed as
+    /// sent, and a token-ID prompt has no text to tell them apart.
+    pub fn tokenize_in_place_for_echo<'r>(
+        &self,
+        request: &'r mut TextRequest,
+    ) -> Result<(&'r [u32], Option<Vec<bool>>)> {
+        let (Prompt::Text(text), Some(truncation)) = (&request.prompt, request.prompt_truncation)
+        else {
+            return Ok((self.tokenize_in_place(request)?, None));
+        };
+        request.validate()?;
+        let (mut prompt_token_ids, added) = (self.backend.tokenizer())
+            .encode_with_special_tokens_mask(text, request.add_special_tokens)?;
+        let added = match truncation.kept_range(prompt_token_ids.len(), self.max_model_len)? {
+            Some(kept) => {
+                prompt_token_ids.truncate(kept.end);
+                prompt_token_ids.drain(..kept.start);
+                Some(added[kept].to_vec())
+            }
+            None => None,
+        };
+        request.prompt_truncation = None;
+        request.prompt = Prompt::TokenIds(prompt_token_ids);
+        match &request.prompt {
+            Prompt::TokenIds(prompt_token_ids) => Ok((prompt_token_ids, added)),
+            Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
+        }
+    }
+
     /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
@@ -404,6 +440,21 @@ mod tests {
         }
     }
 
+    /// A backend whose tokenizer adds `</s>` as BOS, like OPT, which also
+    /// reads `</s>` written in the text as the same token.
+    #[derive(Debug)]
+    struct BosTextBackend;
+
+    impl TextBackend for BosTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(TestTokenizer::new().with_bos_token("</s>", 300))
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+    }
+
     /// A `--skip-tokenizer-init` backend: token IDs only, bounded by the model
     /// vocabulary.
     struct TokenizerlessTextBackend;
@@ -519,6 +570,74 @@ mod tests {
             processor.prepare(request).unwrap().generate_request.prompt_token_ids,
             vec![3, 4, 5]
         );
+    }
+
+    /// A text prompt that truncation cut reports which kept tokens the
+    /// tokenizer added, so an echo can leave out the BOS but keep a `</s>`
+    /// written in the text; anything else is echoed as sent.
+    #[test]
+    fn tokenize_in_place_for_echo_marks_added_special_tokens_of_cut_text_prompts() {
+        let processor = TextRequestProcessor::new(Arc::new(BosTextBackend), 10);
+        let text = |text: &str| Prompt::Text(text.to_string());
+        let cases = [
+            // (prompt, add_special_tokens, kept tokens and side, kept IDs, added mask)
+            (
+                text("</s>hello"),
+                true,
+                (4, TruncationSide::Right),
+                vec![300, 300, 104, 101],
+                Some(vec![true, false, false, false]),
+            ),
+            (
+                text("hello"),
+                true,
+                (3, TruncationSide::Left),
+                vec![108, 108, 111],
+                Some(vec![false; 3]),
+            ),
+            (
+                text("hello"),
+                true,
+                (1, TruncationSide::Right),
+                vec![300],
+                Some(vec![true]),
+            ),
+            (
+                text("hello"),
+                false,
+                (2, TruncationSide::Right),
+                vec![104, 101],
+                Some(vec![false; 2]),
+            ),
+            (
+                text("hi"),
+                true,
+                (5, TruncationSide::Left),
+                vec![300, 104, 105],
+                None,
+            ),
+            (
+                Prompt::TokenIds(vec![300, 1, 2, 3]),
+                true,
+                (2, TruncationSide::Left),
+                vec![2, 3],
+                None,
+            ),
+        ];
+        for (prompt, add_special_tokens, (limit, side), kept, added) in cases {
+            let mut request = TextRequest {
+                prompt: prompt.clone(),
+                add_special_tokens,
+                prompt_truncation: Some(PromptTruncation {
+                    limit: PromptTruncationLimit::Fixed(limit),
+                    side,
+                }),
+                ..TextRequest::for_test()
+            };
+            let (token_ids, mask) = processor.tokenize_in_place_for_echo(&mut request).unwrap();
+            assert_eq!((token_ids, mask), (kept.as_slice(), added), "{prompt:?}");
+            assert_eq!(request.prompt_truncation, None);
+        }
     }
 
     /// `truncate_prompt_tokens=-1` keeps `max_model_len - 1` prompt tokens

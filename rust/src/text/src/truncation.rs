@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -49,6 +51,16 @@ impl PromptTruncation {
     }
 
     pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, max_model_len: u32) -> Result<()> {
+        if let Some(kept) = self.kept_range(prompt_token_ids.len(), max_model_len)? {
+            prompt_token_ids.truncate(kept.end);
+            prompt_token_ids.drain(..kept.start);
+        }
+        Ok(())
+    }
+
+    /// The range of a `len`-token prompt that truncation keeps, or `None` when
+    /// the prompt already fits.
+    pub(crate) fn kept_range(self, len: usize, max_model_len: u32) -> Result<Option<Range<usize>>> {
         let max_input_tokens = match self.limit {
             PromptTruncationLimit::InputBudget => max_model_len.saturating_sub(1),
             PromptTruncationLimit::Fixed(limit) => {
@@ -62,18 +74,14 @@ impl PromptTruncation {
             }
         } as usize;
 
-        if prompt_token_ids.len() <= max_input_tokens {
-            return Ok(());
+        if len <= max_input_tokens {
+            return Ok(None);
         }
 
-        match self.side {
-            TruncationSide::Left => {
-                let start = prompt_token_ids.len() - max_input_tokens;
-                prompt_token_ids.drain(0..start);
-            }
-            TruncationSide::Right => prompt_token_ids.truncate(max_input_tokens),
-        }
-        Ok(())
+        Ok(Some(match self.side {
+            TruncationSide::Left => len - max_input_tokens..len,
+            TruncationSide::Right => 0..max_input_tokens,
+        }))
     }
 }
 

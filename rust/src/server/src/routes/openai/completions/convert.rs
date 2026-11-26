@@ -44,8 +44,29 @@ pub(super) struct PreparedRequest {
 pub(super) struct PreparedPrompt {
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
-    /// Prompt text that should be echoed back northbound when `echo=true`.
-    pub echo: Option<String>,
+    /// Prompt echoed back northbound when `echo=true`.
+    pub echo: Option<PromptEcho>,
+}
+
+/// The prompt a completion echoes back when `echo=true`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PromptEcho {
+    /// Prompt text to echo.
+    pub text: String,
+    /// Per prompt token, whether the echoed logprobs leave it out, like
+    /// Python's `prompt_echo_mask`: the special tokens the tokenizer added to a
+    /// text prompt that truncation cut. `None` echoes every prompt token.
+    pub hidden_tokens: Option<Vec<bool>>,
+}
+
+impl PromptEcho {
+    /// Echo `text` with the logprobs of every prompt token.
+    pub fn whole(text: String) -> Self {
+        Self {
+            text,
+            hidden_tokens: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -279,28 +300,45 @@ fn render_completion_suffix(
         .collect()
 }
 
-/// Return the prompt text to echo.
+/// Return the prompt to echo.
 fn completion_echo_text(
     request: &mut TextRequest,
     echo: bool,
     return_token_ids: bool,
     processor: &TextRequestProcessor,
-) -> Result<Option<String>, ApiError> {
+) -> Result<Option<PromptEcho>, ApiError> {
     if !echo {
         return Ok(None);
     }
 
-    match &request.prompt {
-        Prompt::Text(prompt) => return Ok(Some(prompt.clone())),
-        Prompt::TokenIds(_) if return_token_ids => return Ok(Some(String::new())),
-        Prompt::TokenIds(_) => {}
-    }
+    let sent_text = match &request.prompt {
+        // Only truncation can make a text prompt's echo differ from it.
+        Prompt::Text(prompt) if request.prompt_truncation.is_none() => {
+            return Ok(Some(PromptEcho::whole(prompt.clone())));
+        }
+        Prompt::Text(prompt) => Some(prompt.clone()),
+        Prompt::TokenIds(_) if return_token_ids => {
+            return Ok(Some(PromptEcho::whole(String::new())));
+        }
+        Prompt::TokenIds(_) => None,
+    };
     // Truncation decides which prompt tokens the engine receives, so apply it
     // now and echo the text of the tokens that remain, like Python's renderer.
-    let token_ids = processor
-        .tokenize_in_place(request)
+    let (token_ids, added) = processor
+        .tokenize_in_place_for_echo(request)
         .map_err(|error| text_submit_error("failed to prepare the echoed prompt", error))?;
-    processor.tokenizer().decode(token_ids, false).map(Some).map_err(|error| {
+    let echoed_token_ids = match (sent_text, &added) {
+        // A text prompt that truncation left whole is echoed as sent.
+        (Some(text), None) => return Ok(Some(PromptEcho::whole(text))),
+        // The echo of a cut text prompt leaves out the special tokens the
+        // tokenizer added; the ones written in the text stay.
+        (_, Some(added)) => (token_ids.iter().zip(added))
+            .filter(|&(_, &added)| !added)
+            .map(|(&token_id, _)| token_id)
+            .collect(),
+        (None, None) => token_ids.to_vec(),
+    };
+    let text = processor.tokenizer().decode(&echoed_token_ids, false).map_err(|error| {
         ApiError::invalid_request(
             format!(
                 "Failed to decode token-ID prompt for echo: {}",
@@ -308,7 +346,12 @@ fn completion_echo_text(
             ),
             Some("prompt"),
         )
-    })
+    })?;
+    Ok(Some(PromptEcho {
+        text,
+        // `return_token_ids` responses keep every prompt token, like Python.
+        hidden_tokens: added.filter(|_| !return_token_ids),
+    }))
 }
 
 #[cfg(test)]
@@ -329,7 +372,7 @@ mod tests {
     };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::prepare_completion_request;
+    use super::{PromptEcho, prepare_completion_request};
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::render::RenderState;
@@ -344,7 +387,7 @@ mod tests {
 
         /// The echoed text of a single-prompt request.
         fn echo(&self) -> Option<String> {
-            self.single_prompt().echo.clone()
+            self.single_prompt().echo.as_ref().map(|echo| echo.text.clone())
         }
 
         fn single_prompt(&self) -> &super::PreparedPrompt {
@@ -366,12 +409,12 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct TestTextBackend;
+    #[derive(Debug, Clone)]
+    struct TestTextBackend(TestTokenizer);
 
     impl TextBackend for TestTextBackend {
         fn tokenizer(&self) -> DynTokenizer {
-            Arc::new(TestTokenizer::new())
+            Arc::new(self.0.clone())
         }
 
         fn model_id(&self) -> &str {
@@ -383,7 +426,7 @@ mod tests {
     /// fill-in-the-middle format, which this backend does not have.
     impl ChatBackend for TestTextBackend {
         fn chat_renderer(&self) -> DynChatRenderer {
-            Arc::new(Self)
+            Arc::new(self.clone())
         }
 
         fn new_chat_output_processor(
@@ -402,12 +445,17 @@ mod tests {
     }
 
     fn test_processors() -> RenderState {
+        test_processors_with(TestTokenizer::new())
+    }
+
+    fn test_processors_with(tokenizer: TestTokenizer) -> RenderState {
+        let backend = TestTextBackend(tokenizer);
         RenderState {
             model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
             served_model_names: ServedModelNames::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()]),
             max_model_len: Some(64),
-            text: TextRequestProcessor::new(Arc::new(TestTextBackend), 64),
-            chat: ChatRequestProcessor::new(Arc::new(TestTextBackend), None, None),
+            text: TextRequestProcessor::new(Arc::new(backend.clone()), 64),
+            chat: ChatRequestProcessor::new(Arc::new(backend), None, None),
             lora_modules: Vec::new(),
         }
     }
@@ -826,6 +874,55 @@ mod tests {
             prepared.text_request().prompt,
             Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
+    }
+
+    /// Like Python's explicit-side truncation, a cut text prompt echoes the
+    /// text of the kept tokens without the BOS the tokenizer added, while a
+    /// `</s>` written in the text stays; the echoed logprobs hide the BOS
+    /// unless `return_token_ids`. A prompt that fits is echoed as sent.
+    #[test]
+    fn prepare_completion_request_echoes_kept_text_of_truncated_prompt() {
+        let processors = test_processors_with(TestTokenizer::new().with_bos_token("</s>", 300));
+        let cases = [
+            (
+                "</s>hello",
+                4,
+                "right",
+                false,
+                "</s>he",
+                Some(vec![true, false, false, false]),
+            ),
+            ("hello", 3, "left", false, "llo", Some(vec![false; 3])),
+            ("hello", 1, "right", false, "", Some(vec![true])),
+            ("</s>hello", 4, "right", true, "</s>he", None),
+            ("hi", 5, "left", false, "hi", None),
+        ];
+        for (prompt, keep, side, return_token_ids, text, hidden_tokens) in cases {
+            let request = serde_json::from_value(json!({
+                "prompt": prompt,
+                "echo": true,
+                "logprobs": 0,
+                "truncate_prompt_tokens": keep,
+                "truncation_side": side,
+                "return_token_ids": return_token_ids,
+            }))
+            .unwrap();
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                &processors,
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.single_prompt().echo,
+                Some(PromptEcho {
+                    text: text.to_string(),
+                    hidden_tokens,
+                }),
+                "{prompt:?} keep {keep} from the {side}",
+            );
+        }
     }
 
     #[test]

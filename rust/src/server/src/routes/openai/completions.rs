@@ -27,7 +27,7 @@ use vllm_text::{
     TextOutputStreamExt as _, TextRequest,
 };
 
-use self::convert::{PreparedPrompt, ResponseOptions, prepare_completion_request};
+use self::convert::{PreparedPrompt, PromptEcho, ResponseOptions, prepare_completion_request};
 pub(crate) use self::types::CompletionRequest;
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_openai,
@@ -223,7 +223,7 @@ impl ChoiceChunk for CompletionSseChunk {
 
 async fn collect_completion(
     stream: impl TextOutputStream,
-    echo: Option<String>,
+    echo: Option<PromptEcho>,
     tokenizer: DynTokenizer,
     request_id: String,
     response_model: String,
@@ -262,14 +262,15 @@ async fn collect_completion(
 
     let logprobs = if requested_logprobs.is_some() {
         let echoed_prompt_logprobs = echo
-            .is_some()
-            .then(|| {
+            .as_ref()
+            .map(|echo| {
                 echoed_prompt_logprobs_to_openai(
                     collected.prompt_logprobs.as_ref(),
                     &collected.prompt_token_ids,
                     tokenizer.as_ref(),
                     return_tokens_as_token_ids,
                 )
+                .map(|logprobs| hide_echoed_prompt_tokens(logprobs, echo.hidden_tokens.as_deref()))
             })
             .transpose()?;
         if prompt_only {
@@ -306,8 +307,8 @@ async fn collect_completion(
     }
     let text = match &echo {
         None => collected.text,
-        Some(prompt) if prompt_only => prompt.clone(),
-        Some(prompt) => format!("{prompt}{}", collected.text),
+        Some(echo) if prompt_only => echo.text.clone(),
+        Some(echo) => format!("{}{}", echo.text, collected.text),
     };
     let metrics = PerRequestMetrics::from_request(
         enable_per_request_metrics,
@@ -358,7 +359,7 @@ async fn collect_completion(
 #[try_stream]
 async fn completion_chunk_stream(
     stream: impl TextOutputStream,
-    echo: Option<String>,
+    echo: Option<PromptEcho>,
     tokenizer: DynTokenizer,
     request_id: String,
     response_model: String,
@@ -439,7 +440,7 @@ async fn completion_chunk_stream(
             }) => {
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
-                if let Some(prompt) = echo.as_ref() {
+                if let Some(echo) = echo.as_ref() {
                     // Like Python, the echoed prompt carries its own logprobs, and
                     // generated tokens continue from the offsets they report.
                     let logprobs = requested_logprobs
@@ -451,14 +452,17 @@ async fn completion_chunk_stream(
                                 tokenizer.as_ref(),
                                 return_tokens_as_token_ids,
                             )
+                            .map(|logprobs| {
+                                hide_echoed_prompt_tokens(logprobs, echo.hidden_tokens.as_deref())
+                            })
                         })
                         .transpose();
                     pending_prompt_chunk = Some(logprobs.map(|logprobs| {
                         next_text_offset = logprobs
                             .as_ref()
                             .and_then(text_end_offset)
-                            .unwrap_or_else(|| text_len(prompt));
-                        let mut chunk = delta_chunk(&envelope, prompt.clone(), logprobs);
+                            .unwrap_or_else(|| text_len(&echo.text));
+                        let mut chunk = delta_chunk(&envelope, echo.text.clone(), logprobs);
                         if return_token_ids && first_chunk {
                             if let Some(choice) = chunk.choices.first_mut() {
                                 choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
@@ -770,6 +774,33 @@ fn echoed_prompt_logprobs_to_openai(
     Ok(logprobs)
 }
 
+/// Leave the hidden prompt tokens, if any, out of the echoed prompt's
+/// `logprobs`, and count the text offsets over the tokens that remain, like
+/// Python's `_get_echoed_prompt_logprobs`.
+fn hide_echoed_prompt_tokens(logprobs: LogProbs, hidden_tokens: Option<&[bool]>) -> LogProbs {
+    let Some(hidden_tokens) = hidden_tokens else {
+        return logprobs;
+    };
+    let mut visible = LogProbs::default();
+    let mut text_offset = 0;
+    let entries = logprobs
+        .tokens
+        .into_iter()
+        .zip(logprobs.token_logprobs)
+        .zip(logprobs.top_logprobs);
+    for (index, ((token, token_logprob), top_logprobs)) in entries.enumerate() {
+        if hidden_tokens.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        visible.text_offset.push(text_offset);
+        text_offset = text_offset.saturating_add(text_len(&token));
+        visible.tokens.push(token);
+        visible.token_logprobs.push(token_logprob);
+        visible.top_logprobs.push(top_logprobs);
+    }
+    visible
+}
+
 fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
@@ -799,8 +830,9 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::{
-        ApiError, ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, ResponseOptions,
-        StreamResponseEnvelope, collect_completion, completion_chunk_stream, final_chunk,
+        ApiError, ApiServerOptions, CompletionSseChunk, CompletionStreamResponse, PromptEcho,
+        ResponseOptions, StreamResponseEnvelope, collect_completion, completion_chunk_stream,
+        final_chunk,
     };
 
     /// Byte-level tokenizer in which `9707` spells `Hello`.
@@ -1412,7 +1444,7 @@ mod tests {
 
         let response = super::collect_completion(
             stream,
-            Some("hello".to_string()),
+            Some(PromptEcho::whole("hello".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1471,7 +1503,7 @@ mod tests {
 
         let response = super::collect_completion(
             stream,
-            Some("Hello".to_string()),
+            Some(PromptEcho::whole("Hello".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1540,7 +1572,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
-            Some("hello".to_string()),
+            Some(PromptEcho::whole("hello".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1629,7 +1661,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
-            Some("Hello".to_string()),
+            Some(PromptEcho::whole("Hello".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1713,7 +1745,7 @@ mod tests {
 
         let response = collect_completion(
             stream,
-            Some(prompt.to_string()),
+            Some(PromptEcho::whole(prompt.to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1764,7 +1796,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
-            Some("Hi".to_string()),
+            Some(PromptEcho::whole("Hi".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1837,7 +1869,7 @@ mod tests {
         // token string can only come from the tokenizer.
         let response = collect_completion(
             stream,
-            Some(String::new()),
+            Some(PromptEcho::whole(String::new())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1859,6 +1891,115 @@ mod tests {
         assert_eq!(logprobs.tokens, ["Hello", "!"]);
         assert_eq!(logprobs.token_logprobs, [None, Some(-0.5)]);
         assert_eq!(logprobs.text_offset, [0, 5]);
+    }
+
+    /// The engine events of a truncated prompt whose first token is the BOS
+    /// `</s>` the tokenizer added, followed by one generated `!`.
+    fn truncated_echo_events() -> Vec<Result<DecodedTextEvent, vllm_text::Error>> {
+        let token = |token_id: u32, token: &str, logprob| DecodedPositionLogprobs {
+            entries: vec![DecodedTokenLogprob {
+                token_id,
+                token: token.to_string(),
+                logprob,
+                rank: 1,
+            }],
+        };
+        vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![300, b'h'.into(), b'i'.into()].into(),
+                prompt_logprobs: Some(DecodedPromptLogprobs {
+                    first_token_id: 300,
+                    first_token: "</s>".to_string(),
+                    scored_positions: vec![
+                        token(b'h'.into(), "h", -0.1),
+                        token(b'i'.into(), "i", -0.2),
+                    ],
+                }),
+                prompt_token_id_logprobs: None,
+            }),
+            Ok(decoded_delta(
+                "!",
+                vec![b'!'.into()],
+                Some(DecodedLogprobs {
+                    positions: vec![token(b'!'.into(), "!", -0.5)],
+                }),
+                Some(Finished {
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 1,
+                        prompt_cache_usage: Default::default(),
+                    },
+                    ..finished_without_output(3, FinishReason::Length)
+                }),
+            )),
+        ]
+    }
+
+    /// Like Python's `prompt_echo_mask`, the echoed logprobs of a truncated
+    /// prompt leave out the BOS the tokenizer added, and the text offsets,
+    /// generated tokens included, count only the echoed text.
+    #[tokio::test]
+    async fn completions_hide_added_special_tokens_from_truncated_prompt_echo() {
+        let echo = PromptEcho {
+            text: "hi".to_string(),
+            hidden_tokens: Some(vec![true, false, false]),
+        };
+        let options = || ResponseOptions {
+            requested_logprobs: Some(0),
+            ..Default::default()
+        };
+
+        let response = collect_completion(
+            stream::iter(truncated_echo_events()),
+            Some(echo.clone()),
+            test_tokenizer(),
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            options(),
+        )
+        .await
+        .expect("collect completion");
+        let choice = &response.choices[0];
+        assert_eq!(choice.text, "hi!");
+        let logprobs = choice.logprobs.as_ref().expect("logprobs");
+        assert_eq!(logprobs.tokens, ["h", "i", "!"]);
+        assert_eq!(
+            logprobs.token_logprobs,
+            [Some(-0.1), Some(-0.2), Some(-0.5)]
+        );
+        assert_eq!(logprobs.text_offset, [0, 1, 2]);
+
+        let chunks: Vec<_> = completion_chunk_stream(
+            stream::iter(truncated_echo_events()),
+            Some(echo),
+            test_tokenizer(),
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            options(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .try_collect()
+        .expect("stream should succeed");
+        let (mut text, mut tokens, mut text_offset) = (String::new(), vec![], Vec::<u32>::new());
+        for chunk in &chunks {
+            let choice = &chunk_response(chunk).choices[0];
+            text.push_str(&choice.text);
+            if let Some(logprobs) = &choice.logprobs {
+                tokens.extend(logprobs.tokens.iter().cloned());
+                text_offset.extend(&logprobs.text_offset);
+            }
+        }
+        assert_eq!(text, "hi!");
+        assert_eq!(tokens, ["h", "i", "!"]);
+        assert_eq!(text_offset, [0, 1, 2]);
     }
 
     /// Generated tokens without their requested logprobs are an engine
@@ -1892,7 +2033,7 @@ mod tests {
 
         let error = collect_completion(
             stream,
-            Some("Hi".to_string()),
+            Some(PromptEcho::whole("Hi".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
@@ -1997,7 +2138,7 @@ mod tests {
 
         let chunks = completion_chunk_stream(
             stream,
-            Some("hello".to_string()),
+            Some(PromptEcho::whole("hello".to_string())),
             test_tokenizer(),
             "cmpl-1".to_string(),
             "model".to_string(),
