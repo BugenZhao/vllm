@@ -2,8 +2,12 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::FunctionToolParam;
+use xgrammar_structural_tag::format::{Format, JsonSchemaStyle, TagFormat, TriggeredTagsFormat};
+use xgrammar_structural_tag::tool::function_parameters;
 
 use super::qwen_coder::{Qwen3CoderToolParser, QwenCoderConfig};
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
 const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
@@ -34,9 +38,9 @@ const SEED_OSS_CONFIG: QwenCoderConfig = QwenCoderConfig {
 /// [`Qwen3CoderToolParser`] configured with the Seed-OSS markers. This mirrors
 /// Python `SeedOssParser(Qwen3Parser)` in `vllm/parser/seed_oss.py`.
 ///
-/// Structured-output tags are intentionally unsupported: the trait default
-/// `structural_tag_model() -> None` matches Python `SeedOssEngineToolParser`,
-/// which sets `structural_tag_model = None` (xgrammar has no Seed-OSS model).
+/// xgrammar has no Seed-OSS model (Python `SeedOssEngineToolParser` sets
+/// `structural_tag_model = None`), so this parser builds the call grammar
+/// from the calls the chat template renders.
 ///
 /// The `<seed:tool_call>` wrapper tokens are added-vocabulary tokens
 /// (`special = false`), not tokenizer special tokens, so they survive decoding
@@ -64,6 +68,48 @@ impl ToolParser for SeedOssToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    /// Build the `<seed:tool_call>` blocks the chat template renders: one or
+    /// more for a tool choice that obliges a call, or any number amid free
+    /// text when `auto` still asks for a grammar (a strict tool,
+    /// `--tool-strict-level`, `parallel_tool_calls: false`).
+    fn build_call_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(tools) = output_grammar::normalize_tool_choice(ctx)? else {
+            return Ok(None);
+        };
+
+        let call = |prefix: &str, tool: &FunctionToolParam| {
+            TagFormat::new(
+                format!(
+                    "{prefix}{}\n<function={}>\n",
+                    SEED_OSS_CONFIG.tool_call_start, tool.function.name
+                ),
+                Format::json_schema_style(
+                    function_parameters(&tool.function),
+                    JsonSchemaStyle::QwenXml,
+                ),
+                format!("</function>\n{}", SEED_OSS_CONFIG.tool_call_end),
+            )
+        };
+        let single_call = tools.choice.is_forced() || !ctx.parallel_tool_calls;
+        Ok(Some(if tools.choice.requires_tool_call() {
+            // The template opens every call on a new line, the first one
+            // included.
+            let calls = tools.function_tools.iter().map(|tool| call("\n", tool)).collect();
+            Format::tags_with_separator(calls, "", true, single_call)
+        } else {
+            // Trigger on the bare opener, which is all the parser needs to
+            // start a call; the newline before it stays free text.
+            let calls = tools.function_tools.iter().map(|tool| call("", tool)).collect();
+            Format::TriggeredTags(
+                TriggeredTagsFormat::new(&[SEED_OSS_CONFIG.tool_call_start], calls)
+                    .with_stop_after_first(single_call),
+            )
+        }))
+    }
+
     fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
@@ -79,13 +125,18 @@ impl ToolParser for SeedOssToolParser {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
+    use xgrammar_structural_tag::ToolChoice;
+    use xgrammar_structural_tag::format::Format;
 
     use super::SeedOssToolParser;
+    use crate::output_grammar::test_utils::outline;
+    use crate::output_grammar::{OutputGrammarContext, ToolStrictLevel};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
-    use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
+    use crate::tool::{Tool, ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -260,5 +311,69 @@ mod tests {
             "\n\n",
             "<seed:tool_call>\n<function=get_weather>\n</function>\n</seed:tool_call>",
         );
+    }
+
+    #[test]
+    fn seed_oss_builds_the_template_call_grammar() {
+        let mut strict_tools = test_tools()[..2].to_vec();
+        strict_tools[0].strict = Some(true);
+        let build = |tools: &[Tool],
+                     tool_choice: ToolChoice,
+                     parallel_tool_calls,
+                     answer: Option<&Format>| {
+            SeedOssToolParser::new(tools)
+                .build_visible_format(&OutputGrammarContext {
+                    tools,
+                    tool_choice: &tool_choice,
+                    tool_strict_level: ToolStrictLevel::Auto,
+                    parallel_tool_calls,
+                    answer,
+                })
+                .unwrap()
+                .map(|format| outline(&format))
+        };
+
+        // `required` holds the model to one or more calls as the template
+        // renders them; a strict tool pins its arguments.
+        expect![[r#"
+            tags_with_separator `` at_least_one
+              tag `\n<seed:tool_call>\n<function=get_weather>\n` qwen_xml({ location?: string, city?: string, state?: string, unit?: string, date?: string, days?: integer }) `</function>\n</seed:tool_call>`
+              tag `\n<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+        "#]].assert_eq(&build(&strict_tools, ToolChoice::required(), true, None).unwrap());
+        // A named tool allows exactly that one call.
+        expect![[r#"
+            tags_with_separator `` at_least_one stop_after_first
+              tag `\n<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+        "#]].assert_eq(&build(&strict_tools, ToolChoice::function("add"), true, None).unwrap());
+
+        // `auto` builds no grammar unless something asks for one, such as a
+        // strict tool, and then leaves text free around the calls.
+        assert!(build(&test_tools()[..2], ToolChoice::auto(), true, None).is_none());
+        expect![[r#"
+            triggered_tags [`<seed:tool_call>`]
+              tag `<seed:tool_call>\n<function=get_weather>\n` qwen_xml({ location?: string, city?: string, state?: string, unit?: string, date?: string, days?: integer }) `</function>\n</seed:tool_call>`
+              tag `<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+        "#]].assert_eq(&build(&strict_tools, ToolChoice::auto(), true, None).unwrap());
+        // Without parallel calls, both stop after the first call.
+        expect![[r#"
+            tags_with_separator `` at_least_one stop_after_first
+              tag `\n<seed:tool_call>\n<function=get_weather>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+              tag `\n<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+        "#]].assert_eq(&build(&test_tools()[..2], ToolChoice::required(), false, None).unwrap());
+        expect![[r#"
+            triggered_tags [`<seed:tool_call>`] stop_after_first
+              tag `<seed:tool_call>\n<function=get_weather>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+              tag `<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+        "#]].assert_eq(&build(&test_tools()[..2], ToolChoice::auto(), false, None).unwrap());
+
+        // With an answer constraint, `auto` holds either the calls or the answer.
+        let answer = Format::json_schema(json!({"type": "object"}));
+        expect![[r#"
+            or
+              tags_with_separator `` at_least_one
+                tag `\n<seed:tool_call>\n<function=get_weather>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+                tag `\n<seed:tool_call>\n<function=add>\n` qwen_xml(any) `</function>\n</seed:tool_call>`
+              json(object)
+        "#]].assert_eq(&build(&test_tools()[..2], ToolChoice::auto(), true, Some(&answer)).unwrap());
     }
 }
