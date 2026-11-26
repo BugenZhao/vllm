@@ -37,7 +37,7 @@ use vllm_tokenizer::parse_checkpoint_json;
 
 use crate::error::{Error, Result, bail_multimodal, multimodal};
 use crate::renderer::{MediaPartSource, RenderedPrompt};
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, InputAudioFormat};
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
 mod expand;
@@ -952,6 +952,18 @@ fn extract_media_parts(
             }),
         })
         .collect()
+}
+
+/// Container format of an `input_audio` content block. Serde takes OpenAI's
+/// lowercase names, as the HTTP schema does; `FromStr` ignores case.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+pub enum InputAudioFormat {
+    Wav,
+    Mp3,
 }
 
 /// Wrap OpenAI base64 audio in a data URL consumed by `MediaConnector`.

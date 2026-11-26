@@ -728,9 +728,9 @@ mod tests {
     use crate::EffortValue;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, InputAudioFormat, ResolvedToolContext,
+        GenerationPromptMode, ResolvedToolContext,
     };
-    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
+    use crate::{AssistantContentBlock, ChatRenderer, Error, InputAudioFormat, Result};
 
     const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");

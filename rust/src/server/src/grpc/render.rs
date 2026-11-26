@@ -342,7 +342,7 @@ fn part_from_proto(part: pb::ChatContentPart) -> Result<ChatContentPart, Status>
             format: audio
                 .format
                 .map(|format| {
-                    format.to_ascii_lowercase().parse().map_err(|_| {
+                    format.parse().map_err(|_| {
                         Status::invalid_argument(format!(
                             "unsupported input_audio format `{format}`; expected `wav` or `mp3`"
                         ))

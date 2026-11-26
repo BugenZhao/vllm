@@ -15,6 +15,7 @@ pub use xgrammar_structural_tag::AllowedToolsMode;
 
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage};
+use crate::multimodal::InputAudioFormat;
 use crate::{AssistantMessageExt, EffortValue};
 
 /// Role label for one text-only chat message.
@@ -29,18 +30,6 @@ pub enum ChatRole {
     /// Role outside the standard set, passed to chat templates unchanged.
     #[serde(untagged)]
     Custom(String),
-}
-
-/// Container format of an `input_audio` content block. OpenAI accepts exactly
-/// these lowercase names.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::EnumString, strum::Display,
-)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-pub enum InputAudioFormat {
-    Wav,
-    Mp3,
 }
 
 /// One text-only chat content part in OpenAI-style block format.
