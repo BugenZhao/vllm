@@ -682,20 +682,25 @@ fn tools_convert_string_arguments() {
                 "enabled": {"type": "boolean"},
                 "label": {"type": "string"},
                 "weekday": {"type": "integer"},
+                "snooze": {"type": ["string", "integer"]},
+                "tags": {"type": ["string", "array"]},
+                "ids": {"anyOf": [{"type": "integer"}, {"type": "array", "items": {"type": "integer"}}]},
             },
         }),
         strict: None,
         defer_loading: None,
     }];
-    let text = "<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n<parameter=weekday>1</parameter><parameter=weekday>2</parameter>\n</function>\n</tool_call>";
+    let text = "<tool_call>\n<function=set_alarm>\n<parameter=hour>\n7\n</parameter>\n<parameter=enabled>\ntrue\n</parameter>\n<parameter=label>\nwake up\n</parameter>\n<parameter=weekday>1</parameter><parameter=weekday>2</parameter><parameter=snooze>5</parameter><parameter=tags>[1]</parameter><parameter=tags>[2]</parameter><parameter=ids>1</parameter><parameter=ids>2</parameter>\n</function>\n</tool_call>";
+    // A union takes text its typed member accepts; the list of a parameter
+    // that admits an array is its own value, converted by the item schema.
     assert_eq!(
         message(&parse_events(&template, &tools, "", &[text]).unwrap()),
-        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": 7, "enabled": true, "label": "wake up", "weekday": [1, 2]}}]})
+        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": 7, "enabled": true, "label": "wake up", "weekday": [1, 2], "snooze": 5, "tags": ["[1]", "[2]"], "ids": [1, 2]}}]})
     );
     // Without tools, values stay strings.
     assert_eq!(
         message(&parse_events(&template, &[], "", &[text]).unwrap()),
-        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": "7", "enabled": "true", "label": "wake up", "weekday": ["1", "2"]}}]})
+        json!({"tool_calls": [{"name": "set_alarm", "arguments": {"hour": "7", "enabled": "true", "label": "wake up", "weekday": ["1", "2"], "snooze": "5", "tags": ["[1]", "[2]"], "ids": ["1", "2"]}}]})
     );
 }
 
