@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::mem::take;
 
 use serde_json::{Map, Number, Value};
 
@@ -135,6 +136,36 @@ impl ToolSchemas {
         tool_schema.convert(name, value.into())
     }
 
+    /// Convert the raw string items of a list value of one named parameter.
+    ///
+    /// A parameter that admits an array takes the list as its own value, whose
+    /// items convert by the array's item schema; otherwise the items are values
+    /// of the parameter collected from repeated keys.
+    pub(crate) fn convert_list_items(&self, function_name: &str, name: &str, items: &mut [Value]) {
+        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
+        let param_type = tool_schema.param_type(name);
+        let array = match &param_type {
+            Some(JsonParamType::Array(array)) => Some(array),
+            Some(JsonParamType::OneOf(types)) => {
+                types.iter().find_map(|param_type| match param_type {
+                    JsonParamType::Array(array) => Some(array),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let item_type = match array {
+            Some(array) => array.items(),
+            None => param_type.clone(),
+        };
+        for item in items {
+            if let Value::String(text) = item {
+                *item =
+                    convert_with_optional_schema(item_type.as_ref(), &ParamInput::Text(take(text)));
+            }
+        }
+    }
+
     /// Whether [`Self::convert_param_with_schema`] keeps any text of the named
     /// parameter verbatim as a JSON string, so a parser can stream its value
     /// as it arrives.
@@ -192,14 +223,22 @@ impl<'a> JsonParamType<'a> {
             return None;
         }
         let mut types = Vec::new();
+        // Types some option allows any value of, not only `const` or `enum`
+        // values.
+        let mut open_types = Vec::new();
+        let mut string_literals = Vec::new();
         for option in &options {
             // String literals stay with the string type, which keeps text
             // verbatim instead of unquoting text that spells one as JSON.
-            if let OptionSource::Literal(value) = option.source
-                && !value.is_string()
-                && !types.contains(&Self::Literal(value))
-            {
-                types.push(Self::Literal(value));
+            if let OptionSource::Literal(value) = option.source {
+                let literals = if value.is_string() {
+                    &mut string_literals
+                } else {
+                    &mut types
+                };
+                if !literals.contains(&Self::Literal(value)) {
+                    literals.push(Self::Literal(value));
+                }
             }
             let schema = option.schema();
             let param_type = match option.ty {
@@ -222,17 +261,55 @@ impl<'a> JsonParamType<'a> {
                     items: schema.and_then(|schema| schema.get("items")),
                 }),
             };
+            if !matches!(option.source, OptionSource::Literal(_))
+                && !open_types.contains(&param_type)
+            {
+                open_types.push(param_type.clone());
+            }
             if !types.contains(&param_type) {
                 types.push(param_type);
             }
         }
+        // Beside other types, strings known only from literals match their
+        // text exactly, so the union does not admit any string.
+        if !open_types.contains(&Self::String)
+            && types
+                .iter()
+                .any(|param_type| !matches!(param_type, Self::String | Self::Literal(_)))
+        {
+            types.retain(|param_type| *param_type != Self::String);
+            types.extend(string_literals);
+        }
         // Text spelling a literal decodes to it before any type, a string in
-        // particular, accepts the same text.
-        types.sort_by_key(|param_type| !matches!(param_type, Self::Literal(_)));
+        // particular, accepts the same text. A string accepts any text, so it
+        // comes after the other types, which keep the schema's order: text a
+        // typed member accepts does not stay a string, as in Python's
+        // `coerce_to_schema_type` and Transformers' `_coerce_tool_calls`. A
+        // scalar type known only from literals comes last, so text spelling
+        // none of them stays a string rather than becoming a value the schema
+        // excludes; `null` has no other value, so a null literal admits the
+        // whole type.
+        types.sort_by_key(|param_type| match param_type {
+            Self::Literal(_) => 0,
+            Self::String => 2,
+            Self::Integer | Self::Number | Self::Boolean if !open_types.contains(param_type) => 3,
+            _ => 1,
+        });
         match types.len() {
             0 => None,
             1 => types.pop(),
             _ => Some(Self::OneOf(types)),
+        }
+    }
+}
+
+impl JsonParamType<'_> {
+    /// Whether a string value is admissible, alone or as a union member.
+    fn admits_string(&self) -> bool {
+        match self {
+            Self::String => true,
+            Self::OneOf(types) => types.contains(&Self::String),
+            _ => false,
         }
     }
 }
@@ -268,13 +345,14 @@ fn convert_with_optional_schema(
     param_type: Option<&JsonParamType<'_>>,
     input: &ParamInput,
 ) -> Value {
-    // Coerce the literal text `null` to JSON null, except for `string`-typed
-    // params, where it must stay the string "null": a model emitting the literal
-    // text "null" for a string field means the string, not a missing value.
+    // Coerce the literal text `null` to JSON null, except for params that admit
+    // a string, where it must stay the string "null": a model emitting the literal
+    // text "null" for a string field means the string, not a missing value. A
+    // union that also admits null converts it with its null member.
     // Python-style `None` follows the same schema coercion rules.
     if let ParamInput::Text(value) = input
         && is_null_literal(value)
-        && param_type != Some(&JsonParamType::String)
+        && !param_type.is_some_and(JsonParamType::admits_string)
     {
         return Value::Null;
     }
@@ -321,13 +399,37 @@ fn try_convert_text_value(param_type: &JsonParamType<'_>, value: &str) -> Option
         JsonParamType::Object(_) => serde_json::from_str(value).ok().filter(Value::is_object),
         JsonParamType::Array(_) => serde_json::from_str(value).ok().filter(Value::is_array),
         JsonParamType::Null => is_null_literal(value).then_some(Value::Null),
+        JsonParamType::Literal(Value::String(literal)) => {
+            (value == literal).then(|| Value::String(literal.clone()))
+        }
         JsonParamType::Literal(literal) => serde_json::from_str::<Value>(value.trim())
             .ok()
             .filter(|value| value == *literal),
-        JsonParamType::OneOf(types) => {
-            types.iter().find_map(|param_type| try_convert_text_value(param_type, value))
-        }
+        JsonParamType::OneOf(types) => try_convert_union_text(types, value),
     }
+}
+
+/// Convert one raw string value to the first union member that accepts it.
+///
+/// Where a string is admissible, a member does not take text it would
+/// rewrite: blank text stays the empty string instead of an empty object or
+/// array, and a number must be spelled canonically (`007` and `3.0` stay
+/// strings).
+fn try_convert_union_text(types: &[JsonParamType<'_>], value: &str) -> Option<Value> {
+    let admits_string = types.contains(&JsonParamType::String);
+    types.iter().find_map(|param_type| {
+        let converted = try_convert_text_value(param_type, value)?;
+        let rewrites_text = admits_string
+            && match param_type {
+                JsonParamType::Object(_) | JsonParamType::Array(_) => value.trim().is_empty(),
+                JsonParamType::Integer | JsonParamType::Number => !matches!(
+                    &converted,
+                    Value::Number(number) if number.to_string() == value.trim()
+                ),
+                _ => false,
+            };
+        (!rewrites_text).then_some(converted)
+    })
 }
 
 /// Convert one structured parameter input to a normalized JSON type.
@@ -696,22 +798,101 @@ mod tests {
     }
 
     #[test]
-    fn preserves_union_type_order() {
-        let integer_first = ToolSchema::from_schema(json!({
+    fn union_types_take_text_before_string() {
+        let params = ToolSchema::from_schema(json!({
             "type": "object",
             "properties": {
-                "value": { "type": ["integer", "string"] }
-            }
-        }));
-        let string_first = ToolSchema::from_schema(json!({
-            "type": "object",
-            "properties": {
-                "value": { "type": ["string", "integer"] }
+                "integer_first": { "type": ["integer", "string"] },
+                "string_first": { "type": ["string", "integer"] },
+                "number": { "type": ["string", "number"] },
+                "boolean": { "type": ["string", "boolean"] },
+                "array": { "type": ["string", "array"] },
+                "object": { "anyOf": [{ "type": "string" }, { "type": "object" }] },
+                "integer_or_boolean": { "type": ["boolean", "integer"] },
+                "array_or_object": { "type": ["array", "object"] },
+                "array_or_integer": { "type": ["array", "integer"] },
+                "string_or_const": { "anyOf": [{ "type": "string" }, { "const": 1 }] },
+                "number_or_auto": { "anyOf": [{ "type": "number" }, { "const": "auto" }] },
+                "const_object_or_array": {
+                    "anyOf": [
+                        { "const": { "k": "x" } },
+                        { "type": "array", "items": { "type": "integer" } }
+                    ]
+                }
             }
         }));
 
-        assert_eq!(integer_first.convert("value", text("42")), json!(42));
-        assert_eq!(string_first.convert("value", text("42")), json!("42"));
+        // A typed member that accepts the text wins over `string`, whatever
+        // the schema's order; the typed members keep it.
+        assert_eq!(params.convert("integer_first", text("42")), json!(42));
+        assert_eq!(params.convert("string_first", text("42")), json!(42));
+        assert_eq!(params.convert("number", text("1.5")), json!(1.5));
+        assert_eq!(params.convert("boolean", text("true")), json!(true));
+        assert_eq!(params.convert("array", text("[1, 2]")), json!([1, 2]));
+        assert_eq!(
+            params.convert("object", text(r#"{"x":1}"#)),
+            json!({ "x": 1 })
+        );
+        assert_eq!(params.convert("integer_or_boolean", text("1")), json!(true));
+        assert_eq!(params.convert("integer_or_boolean", text("2")), json!(2));
+        assert_eq!(
+            params.convert("integer_or_boolean", text("true")),
+            json!(true)
+        );
+        // Text no typed member accepts stays a string, verbatim.
+        assert_eq!(
+            params.convert("string_first", text(" forty two ")),
+            json!(" forty two ")
+        );
+        assert_eq!(params.convert("array", text("[1, 2")), json!("[1, 2"));
+        // Where a string is admissible, text a member would rewrite stays it.
+        assert_eq!(params.convert("string_first", text("007")), json!("007"));
+        assert_eq!(params.convert("string_first", text("3.0")), json!("3.0"));
+        assert_eq!(params.convert("number", text("1.50")), json!("1.50"));
+        assert_eq!(params.convert("array", text("")), json!(""));
+        assert_eq!(params.convert("array_or_integer", text("007")), json!(7));
+        assert_eq!(params.convert("array_or_integer", text("")), json!([]));
+        assert_eq!(params.convert("array_or_object", text("")), json!([]));
+        // A type known only from a literal takes no other text.
+        assert_eq!(params.convert("string_or_const", text("1")), json!(1));
+        assert_eq!(params.convert("string_or_const", text("2")), json!("2"));
+        // A string known only from a literal matches its text exactly, so the
+        // union admits no other string.
+        assert_eq!(params.convert("number_or_auto", text("1.50")), json!(1.5));
+        assert_eq!(
+            params.convert("number_or_auto", text("auto")),
+            json!("auto")
+        );
+        assert_eq!(
+            params.convert(
+                "const_object_or_array",
+                elements(vec![elem("k", text("x"))])
+            ),
+            json!({ "k": "x" })
+        );
+        assert_eq!(
+            params.convert("array_or_object", elements(vec![elem("item", text("x"))])),
+            json!(["x"])
+        );
+    }
+
+    #[test]
+    fn union_with_string_keeps_null_text_unless_it_admits_null() {
+        let params = ToolSchema::from_schema(json!({
+            "type": "object",
+            "properties": {
+                "string_or_integer": { "type": ["string", "integer"] },
+                "nullable": { "type": ["string", "integer", "null"] }
+            }
+        }));
+
+        for literal in ["null", "NULL", "None"] {
+            assert_eq!(
+                params.convert("string_or_integer", text(literal)),
+                json!(literal)
+            );
+            assert_eq!(params.convert("nullable", text(literal)), json!(null));
+        }
     }
 
     #[test]
@@ -841,17 +1022,20 @@ mod tests {
             "type": "object",
             "properties": {
                 "mode": { "enum": ["fast", 1] },
-                "flag": { "enum": ["auto", true] }
+                "flag": { "enum": ["auto", true] },
+                "code": { "enum": ["1", 2] }
             }
         }));
 
         assert_eq!(params.convert("mode", text("1")), json!(1));
         assert_eq!(params.convert("mode", text("fast")), json!("fast"));
-        // Text matching no literal keeps the schema order, which tries the
-        // string first.
-        assert_eq!(params.convert("mode", text("2")), json!("2"));
+        // The schema admits no other string, so the integer type known from the
+        // literal takes other numbers, as in Python.
+        assert_eq!(params.convert("mode", text("2")), json!(2));
         assert_eq!(params.convert("flag", text("true")), json!(true));
         assert_eq!(params.convert("flag", text("auto")), json!("auto"));
+        assert_eq!(params.convert("code", text("1")), json!("1"));
+        assert_eq!(params.convert("code", text("2")), json!(2));
     }
 
     #[test]

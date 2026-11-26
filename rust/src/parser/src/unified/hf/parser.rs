@@ -647,8 +647,9 @@ fn call_parts(call: Value, tool_schemas: &ToolSchemas) -> Result<(String, String
 }
 
 /// Convert the argument values a content parser left as raw text by the tool
-/// schema: top-level strings, and string lists collected from duplicate keys
-/// (`merge_duplicates`).
+/// schema: top-level strings, and the strings of lists, which are values
+/// collected from duplicate keys (`merge_duplicates`) or, for a parameter that
+/// admits an array, the parameter's own array.
 ///
 /// Deeper values are the content parser's own JSON and are kept, as in
 /// Transformers' `_coerce_tool_calls`.
@@ -658,14 +659,12 @@ fn convert_text_arguments(
     arguments: &mut Map<String, Value>,
 ) {
     for (name, value) in arguments.iter_mut() {
-        let values = match value {
-            Value::Array(items) => items.as_mut_slice(),
-            value => std::slice::from_mut(value),
-        };
-        for value in values {
-            if let Value::String(text) = value {
+        match value {
+            Value::Array(items) => tool_schemas.convert_list_items(function_name, name, items),
+            Value::String(text) => {
                 *value = tool_schemas.convert_param_with_schema(function_name, name, take(text));
             }
+            _ => {}
         }
     }
 }
