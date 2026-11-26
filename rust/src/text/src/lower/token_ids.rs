@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashSet;
 use std::result::Result;
 
 use thiserror::Error;
@@ -12,6 +13,8 @@ const MAX_NUM_BAD_WORDS_ENV: &str = "VLLM_MAX_NUM_BAD_WORDS";
 const DEFAULT_MAX_NUM_BAD_WORDS: usize = 128;
 const MAX_BAD_WORDS_TOTAL_TOKENS_ENV: &str = "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS";
 const DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS: usize = 1024;
+const MAX_STOP_TOKEN_IDS_ENV: &str = "VLLM_MAX_STOP_TOKEN_IDS";
+const DEFAULT_MAX_STOP_TOKEN_IDS: usize = 128;
 
 #[derive(Debug, Error)]
 pub enum TokenIdsError {
@@ -37,6 +40,8 @@ pub enum TokenIdsError {
         count: usize,
         max: usize,
     },
+    #[error("Too many stop_token_ids: {count}. The max number is {max}.")]
+    TooManyStopTokenIds { count: usize, max: usize },
     #[error(
         "token_id(s) {token_ids:?} in {parameter} are out of vocabulary. \
          Vocabulary size: {vocab_size}"
@@ -60,6 +65,7 @@ impl TokenIdsError {
             Self::TooManyBadWords { parameter, .. }
             | Self::TooManyBadWordTokens { parameter, .. } => *parameter,
             Self::OutOfVocab { parameter, .. } => Some(parameter),
+            Self::TooManyStopTokenIds { .. } => Some("stop_token_ids"),
         }
     }
 }
@@ -91,6 +97,22 @@ fn env_limit(name: &str, default: usize) -> usize {
 /// The per-request cap on bad-word sequences.
 pub(super) fn max_num_bad_words() -> usize {
     env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
+}
+
+/// Drop repeated stop token IDs, keeping the first occurrence, and cap how
+/// many remain, like Python's `SamplingParams.__post_init__`. Python counts the
+/// request's own IDs before the model's extra EOS IDs are merged in, and so
+/// does the caller.
+pub(super) fn dedup_stop_token_ids(stop_token_ids: Vec<u32>) -> Result<Vec<u32>, TokenIdsError> {
+    let mut seen = HashSet::new();
+    let stop_token_ids: Vec<_> =
+        stop_token_ids.into_iter().filter(|&token_id| seen.insert(token_id)).collect();
+    let count = stop_token_ids.len();
+    let max = env_limit(MAX_STOP_TOKEN_IDS_ENV, DEFAULT_MAX_STOP_TOKEN_IDS);
+    if count > max {
+        return Err(TokenIdsError::TooManyStopTokenIds { count, max });
+    }
+    Ok(stop_token_ids)
 }
 
 /// Mirrors Model Runner V2's per-request bad-words buffer limits:
