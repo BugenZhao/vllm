@@ -10478,14 +10478,14 @@ async fn non_stream_completions_echo_reports_the_truncated_prompt() {
     assert_eq!(json["usage"]["prompt_tokens"], 5);
 }
 
-/// A truncated token-ID prompt streams the decoded tokens that remain; a
-/// text prompt echoes its text as sent, like Python.
+/// A truncated prompt streams the decoded tokens that remain; for a text
+/// prompt, without the BOS the tokenizer added, like Python.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn completions_echo_stream_reports_the_truncated_prompt() {
     let cases = [
         (json!(bytes_to_token_ids(b"hello world")), "hello"),
-        (json!("hello world"), "hello world"),
+        (json!("hello world"), "hell"),
     ];
     for (prompt, echoed) in cases {
         let (app, engine_task) = test_app_with_engine_handle().await;

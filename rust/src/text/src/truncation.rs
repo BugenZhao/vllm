@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -9,9 +11,9 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TruncationSide {
-    /// Keep the last N tokens, discarding the prompt prefix.
+    /// Keep the end of the prompt, discarding its prefix.
     Left,
-    /// Keep the first N tokens, discarding the prompt suffix.
+    /// Keep the start of the prompt, discarding its suffix.
     Right,
 }
 
@@ -49,6 +51,16 @@ impl PromptTruncation {
     }
 
     pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, max_model_len: u32) -> Result<()> {
+        if let Some(kept) = self.kept_range(prompt_token_ids.len(), max_model_len)? {
+            prompt_token_ids.truncate(kept.end);
+            prompt_token_ids.drain(..kept.start);
+        }
+        Ok(())
+    }
+
+    /// The range of a `len`-token prompt that truncation keeps, or `None` when
+    /// the prompt already fits.
+    pub(crate) fn kept_range(self, len: usize, max_model_len: u32) -> Result<Option<Range<usize>>> {
         let max_input_tokens = match self.limit {
             PromptTruncationLimit::InputBudget => max_model_len.saturating_sub(1),
             PromptTruncationLimit::Fixed(limit) => {
@@ -62,19 +74,41 @@ impl PromptTruncation {
             }
         } as usize;
 
-        if prompt_token_ids.len() <= max_input_tokens {
-            return Ok(());
+        if len <= max_input_tokens {
+            return Ok(None);
         }
 
-        match self.side {
-            TruncationSide::Left => {
-                let start = prompt_token_ids.len() - max_input_tokens;
-                prompt_token_ids.drain(0..start);
-            }
-            TruncationSide::Right => prompt_token_ids.truncate(max_input_tokens),
-        }
-        Ok(())
+        Ok(Some(match self.side {
+            TruncationSide::Left => len - max_input_tokens..len,
+            TruncationSide::Right => 0..max_input_tokens,
+        }))
     }
+}
+
+/// The indices of a text prompt's tokens that truncation keeps, given the
+/// range `kept` it keeps of the whole prompt and the tokens the tokenizer
+/// `added`.
+///
+/// Like the tokenizer's own truncation, which Python applies when no side is
+/// requested, the added special tokens (BOS, `[CLS]`, `[SEP]`) take slots
+/// within the limit and are kept, and only the text is cut, from the same
+/// side. With more of them than the limit, `kept` applies as it is.
+pub(crate) fn kept_text_tokens(kept: Range<usize>, added: &[bool]) -> Vec<usize> {
+    let num_added = added.iter().filter(|&&added| added).count();
+    let Some(num_text) = kept.len().checked_sub(num_added) else {
+        return kept.collect();
+    };
+    let text: Vec<_> = (0..added.len()).filter(|&index| !added[index]).collect();
+    // A range from the start keeps the beginning of the text.
+    let text = if kept.start == 0 {
+        &text[..num_text]
+    } else {
+        &text[text.len() - num_text..]
+    };
+    let mut kept: Vec<_> = (0..added.len()).filter(|&index| added[index]).collect();
+    kept.extend(text);
+    kept.sort_unstable();
+    kept
 }
 
 #[cfg(test)]
@@ -122,6 +156,20 @@ mod tests {
         .apply(&mut right, 90)
         .unwrap();
         assert_eq!(right, vec![1, 2, 3]);
+    }
+
+    /// Like the tokenizer's own truncation, a text prompt keeps the `[CLS]`
+    /// and `[SEP]` the tokenizer added and cuts only its text, unless they
+    /// alone exceed the limit.
+    #[test]
+    fn text_truncation_keeps_added_special_tokens() {
+        // [CLS] a b c [SEP]
+        let added = [true, false, false, false, true];
+        assert_eq!(kept_text_tokens(0..3, &added), [0, 1, 4]);
+        assert_eq!(kept_text_tokens(2..5, &added), [0, 3, 4]);
+        assert_eq!(kept_text_tokens(0..2, &added), [0, 4]);
+        assert_eq!(kept_text_tokens(0..1, &added), [0]);
+        assert_eq!(kept_text_tokens(4..5, &added), [4]);
     }
 
     #[test]

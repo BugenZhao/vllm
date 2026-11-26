@@ -5,8 +5,10 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
+use fastokens::AddedTokenPolicy;
 use fastokens::Tokenizer as FastokensTokenizer;
 use fastokens::decoders::Decoder as FastokensDecoder;
+use fastokens::post_processors::ProcessedEncoding;
 use fastokens::pre_tokenized::{
     PreTokenizedString as FastokensPreTokenizedString, Split as FastokensSplit,
 };
@@ -326,6 +328,38 @@ impl Tokenizer for HuggingFaceTokenizer {
         }
     }
 
+    fn encode_with_special_tokens_mask(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<(Vec<u32>, Vec<bool>)> {
+        let (token_ids, mask) = match &self.backend {
+            Backend::Hf(t) => {
+                let encoding = t
+                    .encode(text, add_special_tokens)
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))?;
+                (
+                    encoding.get_ids().to_vec(),
+                    encoding.get_special_tokens_mask().to_vec(),
+                )
+            }
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => {
+                let encoding = t
+                    .encode_unpadded::<ProcessedEncoding>(
+                        text,
+                        add_special_tokens,
+                        AddedTokenPolicy::All,
+                    )
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))?;
+                (encoding.ids, encoding.special_tokens_mask)
+            }
+        };
+        Ok((
+            token_ids,
+            mask.into_iter().map(|added| added == 1).collect(),
+        ))
+    }
+
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
         match &self.backend {
             Backend::Hf(tokenizer) => encode_hf_ordinary(tokenizer, text)
@@ -615,6 +649,50 @@ mod tests {
     fn fastokens_ordinary_matches_original_encode_with_added_empty() {
         for fused in [false, true] {
             assert_ordinary_matches_added_empty(HuggingFaceTokenizer::new_fastokens, fused);
+        }
+    }
+
+    /// The mask comes from the encoding itself, so a BOS the post-processor
+    /// inserts is told apart from the same token written in the text, even
+    /// when the text is nothing else.
+    #[test]
+    fn special_tokens_mask_marks_only_tokens_the_post_processor_inserted() {
+        let dir = tempdir().expect("create temp dir");
+        let mut json = ordinary_test_tokenizer_json(false, true);
+        json["post_processor"] = json!({
+            "type": "TemplateProcessing",
+            "single": [
+                {"SpecialToken": {"id": SPECIAL_TOKEN, "type_id": 0}},
+                {"Sequence": {"id": "A", "type_id": 0}}
+            ],
+            "pair": [
+                {"SpecialToken": {"id": SPECIAL_TOKEN, "type_id": 0}},
+                {"Sequence": {"id": "A", "type_id": 0}},
+                {"Sequence": {"id": "B", "type_id": 1}}
+            ],
+            "special_tokens": {
+                SPECIAL_TOKEN: {"id": SPECIAL_TOKEN, "ids": [257], "tokens": [SPECIAL_TOKEN]}
+            }
+        });
+        let path = write_tokenizer_json(dir.path(), "tokenizer.json", &json);
+        let constructors: [fn(&Path) -> crate::Result<HuggingFaceTokenizer>; 2] = [
+            HuggingFaceTokenizer::new_hf,
+            HuggingFaceTokenizer::new_fastokens,
+        ];
+        for constructor in constructors {
+            let tokenizer = constructor(&path).expect("load tokenizer");
+            let literal = format!("{SPECIAL_TOKEN}{SPECIAL_TOKEN}");
+            assert_eq!(
+                tokenizer.encode_with_special_tokens_mask(&literal, true).unwrap(),
+                (vec![257, 257, 257], vec![true, false, false])
+            );
+            let (token_ids, added) = tokenizer.encode_with_special_tokens_mask("hi", true).unwrap();
+            assert_eq!(token_ids, tokenizer.encode("hi", true).unwrap());
+            assert_eq!(added, [true, false, false]);
+            assert_eq!(
+                tokenizer.encode_with_special_tokens_mask("hi", false).unwrap().1,
+                [false, false]
+            );
         }
     }
 

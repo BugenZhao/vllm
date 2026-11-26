@@ -29,6 +29,33 @@ pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
 
+    /// Encode one prompt string like [`Self::encode`], also returning, per
+    /// token, whether the tokenizer added it as a special token rather than
+    /// reading it from the text, like Python's `special_tokens_mask`.
+    ///
+    /// By default, the added tokens are those around the text encoded without
+    /// special tokens; none are marked when that encoding does not appear whole
+    /// inside the full one.
+    fn encode_with_special_tokens_mask(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<(Vec<u32>, Vec<bool>)> {
+        let token_ids = self.encode(text, add_special_tokens)?;
+        let mut added = vec![false; token_ids.len()];
+        if add_special_tokens {
+            let text_token_ids = self.encode(text, false)?;
+            if let Some(start) = token_ids
+                .windows(text_token_ids.len().max(1))
+                .position(|window| text_token_ids.is_empty() || window == text_token_ids)
+            {
+                added[..start].fill(true);
+                added[start + text_token_ids.len()..].fill(true);
+            }
+        }
+        Ok((token_ids, added))
+    }
+
     /// Equivalent to `encode(text, false)`, except that every added,
     /// special, and control-token matcher is bypassed.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>>;
