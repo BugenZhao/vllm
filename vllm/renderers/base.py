@@ -764,6 +764,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        tokenizer_truncated = False
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -774,7 +775,12 @@ class BaseRenderer(ABC, Generic[_T]):
                 self.tokenizer, prompt["prompt"]
             )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-            prompt = self._tokenize_prompt(prompt, params)
+            text_prompt = prompt
+            prompt = self._tokenize_prompt(text_prompt, params)
+            num_tokens = len(prompt["prompt_token_ids"])
+            if (probe := params._tokenizer_truncation_probe(num_tokens)) is not None:
+                probed = self._tokenize_prompt(text_prompt, probe)
+                tokenizer_truncated = len(probed["prompt_token_ids"]) > num_tokens
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
@@ -787,7 +793,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         # Rebuild cached text only for truncation, not padding alone.
         if params.needs_detokenization and (
-            "prompt" not in prompt or truncation is not None
+            "prompt" not in prompt or truncation is not None or tokenizer_truncated
         ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
@@ -815,6 +821,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        tokenizer_truncated = False
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -825,7 +832,12 @@ class BaseRenderer(ABC, Generic[_T]):
                 self.tokenizer, prompt["prompt"]
             )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
-            prompt = await self._tokenize_prompt_async(prompt, params)
+            text_prompt = prompt
+            prompt = await self._tokenize_prompt_async(text_prompt, params)
+            num_tokens = len(prompt["prompt_token_ids"])
+            if (probe := params._tokenizer_truncation_probe(num_tokens)) is not None:
+                probed = await self._tokenize_prompt_async(text_prompt, probe)
+                tokenizer_truncated = len(probed["prompt_token_ids"]) > num_tokens
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
@@ -838,7 +850,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         # Rebuild cached text only for truncation, not padding alone.
         if params.needs_detokenization and (
-            "prompt" not in prompt or truncation is not None
+            "prompt" not in prompt or truncation is not None or tokenizer_truncated
         ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
