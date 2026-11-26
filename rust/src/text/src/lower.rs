@@ -11,7 +11,8 @@ pub(crate) mod token_ids;
 use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs, validate_prompt_logprob_start};
 use sampling::{SamplingParamsError, validate_resolved_sampling_params};
 use token_ids::{
-    TokenIdsError, max_num_bad_words, validate_prompt_token_ids, validate_vocab_range,
+    TokenIdsError, dedup_stop_token_ids, max_num_bad_words, validate_prompt_token_ids,
+    validate_vocab_range,
 };
 use vllm_engine_core_client::protocol::sampling::{
     EngineCoreSamplingParams, RepetitionDetectionParams,
@@ -225,7 +226,7 @@ pub fn lower_sampling_params(
     }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
 
-    let mut stop_token_ids = stop_token_ids.unwrap_or_default();
+    let mut stop_token_ids = dedup_stop_token_ids(stop_token_ids.unwrap_or_default())?;
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
     if let Some(primary_eos_token_id) = primary_eos_token_id {
         all_stop_token_ids.insert(primary_eos_token_id);
@@ -886,6 +887,39 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_caps_distinct_stop_token_ids_before_merging_eos() {
+        let lower = |stop_token_ids: Vec<u32>| {
+            let mut request = sample_request();
+            request.sampling_params.stop_token_ids = Some(stop_token_ids);
+            lower_text_request(
+                request,
+                vec![1, 2, 3],
+                sample_sampling_hints(),
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                &stub_tokenizer(),
+            )
+        };
+
+        // 128 distinct IDs in descending order, then all of them again: the
+        // repeats do not count, the first occurrences keep their order, and the
+        // model's extra EOS ID is appended after the cap.
+        let distinct: Vec<u32> = (200..328).rev().collect();
+        let repeated = distinct.iter().chain(&distinct).copied().collect();
+        let params = lower(repeated).unwrap().generate_request.sampling_params;
+        let expected: Vec<u32> = distinct.iter().copied().chain([77]).collect();
+        assert_eq!(params.stop_token_ids, expected);
+
+        let error = lower((200..329).collect()).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("stop_token_ids")
+        );
+        expect_test::expect!["Too many stop_token_ids: 129. The max number is 128."]
+            .assert_eq(&error.to_string());
     }
 
     #[test]
