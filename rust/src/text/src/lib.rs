@@ -108,23 +108,42 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    /// Tokenize and truncate a prompt. For a text prompt that truncation cut,
+    /// also return, per kept token, whether the tokenizer added it as a
+    /// special token rather than reading it from the text.
     fn prepare_prompt_tokens(
         &self,
         prompt: Prompt,
         add_special_tokens: bool,
         prompt_truncation: Option<PromptTruncation>,
-    ) -> Result<Vec<u32>> {
+    ) -> Result<(Vec<u32>, Option<Vec<bool>>)> {
         let tokenizer = self.backend.tokenizer();
-        let mut prompt_token_ids = match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
+        let (text, prompt_truncation) = match (prompt, prompt_truncation) {
+            (Prompt::Text(text), None) => {
+                return Ok((tokenizer.encode(&text, add_special_tokens)?, None));
+            }
+            (Prompt::Text(text), Some(prompt_truncation)) => (text, prompt_truncation),
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids,
+            (Prompt::TokenIds(mut prompt_token_ids), prompt_truncation) => {
+                if let Some(prompt_truncation) = prompt_truncation {
+                    prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+                }
+                return Ok((prompt_token_ids, None));
+            }
         };
-        if let Some(prompt_truncation) = prompt_truncation {
-            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
-        }
-        Ok(prompt_token_ids)
+        let (prompt_token_ids, added) =
+            tokenizer.encode_with_special_tokens_mask(&text, add_special_tokens)?;
+        let Some(kept) =
+            prompt_truncation.kept_range(prompt_token_ids.len(), self.max_model_len)?
+        else {
+            return Ok((prompt_token_ids, None));
+        };
+        let kept = truncation::kept_text_tokens(kept, &added);
+        Ok((
+            kept.iter().map(|&index| prompt_token_ids[index]).collect(),
+            Some(kept.iter().map(|&index| added[index]).collect()),
+        ))
     }
 
     /// Tokenize and truncate the prompt in place, so that later preparation
@@ -134,17 +153,7 @@ impl TextRequestProcessor {
     /// example, to initialize a prompt-aware output parser) call this first
     /// and then hand the same request to [`TextLlm::generate`].
     pub fn tokenize_in_place<'r>(&self, request: &'r mut TextRequest) -> Result<&'r [u32]> {
-        request.validate()?;
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation.take(),
-        )?;
-        request.prompt = Prompt::TokenIds(prompt_token_ids);
-        match &request.prompt {
-            Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
-            Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
-        }
+        Ok(self.tokenize_in_place_for_echo(request)?.0)
     }
 
     /// Tokenize and truncate the prompt in place like
@@ -160,22 +169,12 @@ impl TextRequestProcessor {
         &self,
         request: &'r mut TextRequest,
     ) -> Result<(&'r [u32], Option<Vec<bool>>)> {
-        let (Prompt::Text(text), Some(truncation)) = (&request.prompt, request.prompt_truncation)
-        else {
-            return Ok((self.tokenize_in_place(request)?, None));
-        };
         request.validate()?;
-        let (mut prompt_token_ids, added) = (self.backend.tokenizer())
-            .encode_with_special_tokens_mask(text, request.add_special_tokens)?;
-        let added = match truncation.kept_range(prompt_token_ids.len(), self.max_model_len)? {
-            Some(kept) => {
-                prompt_token_ids.truncate(kept.end);
-                prompt_token_ids.drain(..kept.start);
-                Some(added[kept].to_vec())
-            }
-            None => None,
-        };
-        request.prompt_truncation = None;
+        let (prompt_token_ids, added) = self.prepare_prompt_tokens(
+            take(&mut request.prompt),
+            request.add_special_tokens,
+            request.prompt_truncation.take(),
+        )?;
         request.prompt = Prompt::TokenIds(prompt_token_ids);
         match &request.prompt {
             Prompt::TokenIds(prompt_token_ids) => Ok((prompt_token_ids, added)),
@@ -186,11 +185,13 @@ impl TextRequestProcessor {
     /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        self.prepare_prompt_tokens(
-            request.prompt,
-            request.add_special_tokens,
-            request.prompt_truncation,
-        )
+        Ok(self
+            .prepare_prompt_tokens(
+                request.prompt,
+                request.add_special_tokens,
+                request.prompt_truncation,
+            )?
+            .0)
     }
 
     /// Tokenize and lower one request without submitting it to an engine.
@@ -206,7 +207,7 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let prompt_token_ids = self.prepare_prompt_tokens(
+        let (prompt_token_ids, _) = self.prepare_prompt_tokens(
             take(&mut request.prompt),
             request.add_special_tokens,
             request.prompt_truncation,
@@ -592,8 +593,8 @@ mod tests {
                 text("hello"),
                 true,
                 (3, TruncationSide::Left),
-                vec![108, 108, 111],
-                Some(vec![false; 3]),
+                vec![300, 108, 111],
+                Some(vec![true, false, false]),
             ),
             (
                 text("hello"),
