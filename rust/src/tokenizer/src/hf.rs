@@ -965,4 +965,152 @@ mod tests {
             ]
         );
     }
+
+    /// SentencePiece-style tokenizer where every byte is a `<0xNN>`
+    /// byte-fallback token with id `byte + 1`, plus a special `</s>`.
+    fn byte_fallback_tokenizer_json() -> Value {
+        let mut vocab = serde_json::Map::new();
+        vocab.insert("<unk>".to_string(), json!(0));
+        for byte in 0..=255u32 {
+            vocab.insert(format!("<0x{byte:02X}>"), json!(byte + 1));
+        }
+        vocab.insert("</s>".to_string(), json!(EOS_ID));
+        json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [{
+                "id": EOS_ID,
+                "content": "</s>",
+                "single_word": false,
+                "lstrip": false,
+                "rstrip": false,
+                "normalized": false,
+                "special": true
+            }],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {
+                "type": "Sequence",
+                "decoders": [{"type": "ByteFallback"}, {"type": "Fuse"}]
+            },
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": "<unk>",
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": true,
+                "ignore_merges": false,
+                "vocab": vocab,
+                "merges": []
+            }
+        })
+    }
+
+    const EOS_ID: u32 = 257;
+
+    /// Push `generated` after `prompt` and return the flushed text.
+    fn decode_after_prompt(
+        tokenizer: &HuggingFaceTokenizer,
+        prompt: &[u32],
+        generated: &[u32],
+    ) -> String {
+        let mut stream = tokenizer.create_decode_stream(prompt, true, 0);
+        for &id in generated {
+            stream.push_token(id).expect("push token");
+        }
+        stream.flush(None).expect("flush").1.text
+    }
+
+    /// A prompt can end partway through a character. With byte fallback, the
+    /// decoder turns a byte run into U+FFFD unless the whole run is valid
+    /// UTF-8, so the prompt's trailing bytes must stay in the decode context.
+    #[test]
+    fn decode_stream_prompt_ending_mid_character_byte_fallback() {
+        let dir = tempdir().expect("create temp dir");
+        let path = write_tokenizer_json(
+            dir.path(),
+            "byte-fallback.json",
+            &byte_fallback_tokenizer_json(),
+        );
+        let ids = |bytes: &[u8]| bytes.iter().map(|&byte| u32::from(byte) + 1).collect::<Vec<_>>();
+        let with_eos = |bytes: &[u8], count: usize| {
+            let mut ids = ids(bytes);
+            ids.extend(std::iter::repeat_n(EOS_ID, count));
+            ids
+        };
+        // Ids past the tokenizer vocabulary, which a larger model vocabulary
+        // still admits in a prompt.
+        let with_unknown = |bytes: &[u8]| {
+            let mut ids = ids(bytes);
+            ids.extend([10_000, 10_001, 10_002]);
+            ids
+        };
+        // 鑫 is E9 91 AB, 龘 is E9 BE 98.
+        let cases = [
+            (ids(b"Hi \xE9\x91"), ids(b"\xAB\xE9\xBE\x98!"), "鑫龘!"),
+            (ids(b"Hi \xE9\x91\xAB\xE9\xBE"), ids(b"\x98!"), "龘!"),
+            (ids(b"Hi \xE9"), ids(b"\x91\xAB!"), "鑫!"),
+            // Skipped special tokens after the partial bytes decode to nothing.
+            (with_eos(b"Hi \xE9", 3), ids(b"\x91\xAB!"), "鑫!"),
+            // Enough of them to fill a short prompt suffix on their own.
+            (with_eos(b"Hi \xE9", 6), ids(b"\x91\xAB!"), "鑫!"),
+            // Ids the tokenizer cannot map decode to nothing as well.
+            (
+                with_unknown(b"Hi \xE9\x91"),
+                ids(b"\xAB\xE9\xBE\x98!"),
+                "鑫龘!",
+            ),
+            // A literal U+FFFD before the partial character hides the boundary.
+            // This tokenizer decodes the prompt as one invalid byte run, so no
+            // prompt text can be told apart; the generated text stays intact.
+            (
+                ids(b"Hi \xEF\xBF\xBD\xE9\x91"),
+                ids(b"\xAB\xE9\xBE\x98!"),
+                "Hi \u{FFFD}鑫龘!",
+            ),
+        ];
+        let tokenizers = [
+            ("hf", HuggingFaceTokenizer::new_hf(&path).expect("load hf")),
+            (
+                "fastokens",
+                HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens"),
+            ),
+        ];
+        for (loader, tokenizer) in &tokenizers {
+            for (prompt, generated, expected) in &cases {
+                assert_eq!(
+                    decode_after_prompt(tokenizer, prompt, generated),
+                    *expected,
+                    "{loader} prompt={prompt:?}"
+                );
+            }
+        }
+    }
+
+    /// With byte-level BPE, one token can hold a space and the first byte of a
+    /// character. The space belongs to the prompt.
+    #[test]
+    fn decode_stream_prompt_ending_mid_character_byte_level() {
+        let mut value = ordinary_test_tokenizer_json(false, false);
+        let vocab = value["model"]["vocab"].as_object_mut().expect("vocab");
+        let space_e9 = u32::try_from(vocab.len()).expect("vocab size");
+        vocab.insert("\u{120}\u{E9}".to_string(), json!(space_e9));
+        value["model"]["merges"] = json!([["\u{120}", "\u{E9}"]]);
+        let dir = tempdir().expect("create temp dir");
+        let path = write_tokenizer_json(dir.path(), "byte-level.json", &value);
+        for constructor in [
+            HuggingFaceTokenizer::new_hf,
+            HuggingFaceTokenizer::new_fastokens,
+        ] {
+            let tokenizer = constructor(&path).expect("load tokenizer");
+            // 鑫 is E9 91 AB; " \xE9" is the merged token.
+            let ids = tokenizer.encode("Hi 鑫!", false).expect("encode");
+            assert_eq!(ids[2], space_e9);
+            assert_eq!(decode_after_prompt(&tokenizer, &ids[..3], &ids[3..]), "鑫!");
+        }
+    }
 }

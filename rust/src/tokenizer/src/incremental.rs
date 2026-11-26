@@ -76,6 +76,10 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
 const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
+/// A UTF-8 character has at most 3 bytes before its last, and every token
+/// that decodes to text holds at least one byte.
+const MAX_PARTIAL_CHAR_TOKENS: usize = 3;
+
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
     /// Decide whether `token_id` can be anchored at its own first byte inside
     /// `new_chunk`, separately from the older tokens still pending.
@@ -140,10 +144,12 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
     }
 
     /// Seed `self.prefix` from the shortest trailing prompt suffix whose
-    /// filtered context is still long enough and whose decoded text has no
-    /// U+FFFD. A clean decode means the suffix starts and ends at valid
-    /// UTF-8/token boundaries, so priming from it is equivalent to priming from
-    /// the full prompt.
+    /// filtered context is still long enough and whose decoded text is
+    /// non-empty and has no U+FFFD. A clean decode means the suffix starts and
+    /// ends at valid UTF-8/token boundaries, so priming from it is equivalent to
+    /// priming from the full prompt. An empty decode (only skipped special
+    /// tokens) says nothing about the text before it, which may end partway
+    /// through a character.
     fn seed_prefix(&mut self) -> Result<()> {
         let prompt_len = self.ids.len();
         if prompt_len > SAFE_SUFFIX_MIN {
@@ -151,7 +157,10 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
                 let (decoded, context_ids) = self.decode_prompt_context(&self.ids[start..])?;
-                if !decoded.contains('\u{FFFD}') && context_ids.len() >= SAFE_SUFFIX_MIN {
+                if !decoded.is_empty()
+                    && !decoded.contains('\u{FFFD}')
+                    && context_ids.len() >= SAFE_SUFFIX_MIN
+                {
                     self.prefix = decoded;
                     self.ids = context_ids;
                     self.prefix_index = self.ids.len();
@@ -161,10 +170,44 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
         }
         let (decoded, context_ids) = self.decode_prompt_context(&self.ids)?;
         self.ids = context_ids;
+        self.prefix_index = self.ids.len();
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
-            self.prefix_index = self.ids.len();
+            return Ok(());
         }
+        // The prompt ends partway through a character. Keep that character's
+        // tokens in the context so it decodes whole once completed (byte
+        // fallback decodes a byte run only as a whole), and keep the prompt
+        // text before it out of the output. A byte-level BPE token can hold
+        // text and partial bytes together, so trimming may give the longer
+        // prefix. Without a clean boundary within reach (a literal U+FFFD
+        // right before the partial character looks the same), the whole
+        // prompt stays in the context so no byte of the character is lost.
+        let mut prefix = decoded.trim_end_matches('\u{FFFD}').to_owned();
+        self.prefix_index = 0;
+        let mut end = self.ids.len();
+        let mut steps = 0;
+        while end > 0 && steps < MAX_PARTIAL_CHAR_TOKENS {
+            end -= 1;
+            // Skipped special tokens and ids the tokenizer cannot map decode
+            // to nothing, so they hold no byte of the character.
+            let id = self.ids[end];
+            if (self.skip_special_tokens && self.tokenizer.is_special_id(id))
+                || self.tokenizer.id_to_token(id).is_none()
+            {
+                continue;
+            }
+            steps += 1;
+            let text = self.tokenizer.decode(&self.ids[..end], self.skip_special_tokens)?;
+            if !text.ends_with('\u{FFFD}') {
+                self.prefix_index = end;
+                if text.len() > prefix.len() {
+                    prefix = text;
+                }
+                break;
+            }
+        }
+        self.prefix = prefix;
         Ok(())
     }
 }
