@@ -1020,6 +1020,7 @@ mod tests {
                         prompt_cache_usage: vllm_llm::PromptCacheUsage {
                             cached_token_count: 3,
                             cache_creation_token_count: 0,
+                            prefill_reported: true,
                         },
                     },
                     finish_reason: FinishReason::Repetition(Some(StopReason::Text(
