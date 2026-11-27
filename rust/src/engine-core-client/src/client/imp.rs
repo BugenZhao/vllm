@@ -17,8 +17,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
-use crate::client::health::HealthProbes;
-use crate::client::readiness::{Readiness, RecheckGuard};
+use crate::client::health::{Health, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
     UtilityRegistry,
@@ -60,14 +59,9 @@ pub(crate) struct ClientInner {
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
     health_tx: watch::Sender<bool>,
-    /// Whether the engines can accept and process new requests, maintained
-    /// around the control calls this client sends.
-    readiness: Arc<Readiness>,
-    // TODO: consider merging into `readiness`: both ask the engines whether
-    // they can serve (`is_inference_ready` versus a `check_health_generate`
-    // probe) and track the same control-call epochs.
-    /// Generation readiness probes, one in flight per engine at most.
-    health_probes: HealthProbes,
+    /// Whether the engines can serve generation requests, from the control
+    /// calls this client sends and the probes it runs.
+    health: Arc<Health>,
 }
 
 impl ClientInner {
@@ -109,8 +103,7 @@ impl ClientInner {
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
-            readiness: Arc::new(Readiness::new()),
-            health_probes: HealthProbes::new(engines),
+            health: Arc::new(Health::new(engines)),
         }
     }
 
@@ -278,12 +271,8 @@ impl ClientInner {
         self.health_tx.subscribe()
     }
 
-    pub fn readiness(&self) -> &Arc<Readiness> {
-        &self.readiness
-    }
-
-    pub fn health_probes(&self) -> &HealthProbes {
-        &self.health_probes
+    pub fn health(&self) -> &Arc<Health> {
+        &self.health
     }
 
     /// The runtime this client's tasks run on.
@@ -384,12 +373,6 @@ impl ClientInner {
             }
         };
         outputs.into_iter().map(|output| output?.into_typed_result(method)).collect()
-    }
-
-    /// Ask every engine whether it can accept and process new requests.
-    pub async fn is_inference_ready(self: &Arc<Self>) -> Result<bool> {
-        let ready: Vec<bool> = self.call_utility("is_inference_ready", (), None).await?;
-        Ok(ready.into_iter().all(|ready| ready))
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a

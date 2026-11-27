@@ -128,6 +128,9 @@ pub enum EngineHealthState {
     Busy,
     /// The engine is sleeping or paused.
     Sleeping,
+    /// A weight update started and has not finished successfully, so the
+    /// weights may be incomplete.
+    WeightUpdateIncomplete,
 }
 
 impl FromStr for EngineHealthState {
@@ -138,8 +141,10 @@ impl FromStr for EngineHealthState {
             "ok" => Ok(Self::Ok),
             "busy" => Ok(Self::Busy),
             "sleeping" => Ok(Self::Sleeping),
+            "weight_update_incomplete" => Ok(Self::WeightUpdateIncomplete),
             other => Err(format!(
-                "invalid engine health state `{other}`; expected one of: ok, busy, sleeping"
+                "invalid engine health state `{other}`; expected one of: ok, busy, sleeping, \
+                 weight_update_incomplete"
             )),
         }
     }

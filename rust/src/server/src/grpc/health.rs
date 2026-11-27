@@ -18,15 +18,16 @@ use crate::state::AppState;
 pub(crate) const LIVENESS_SERVICE: &str = "liveness";
 
 /// Health service for readiness probes. Like `vllm.Inference`, it reports
-/// whether the engines can accept and process new requests, and
-/// `NOT_SERVING` on shutdown or engine failure.
+/// whether the engines can serve generation requests, as their periodic
+/// health probes and the control calls in flight show, and `NOT_SERVING` on
+/// shutdown or engine failure.
 pub(crate) const READINESS_SERVICE: &str = "readiness";
 
 /// The [`Llm`] signals that the gRPC health services follow.
 pub(crate) struct EngineHealth {
     /// `false` once the engines fail, which is permanent.
     pub liveness: watch::Receiver<bool>,
-    /// Whether the engines can accept and process new requests.
+    /// Whether the engines can serve generation requests.
     pub readiness: watch::Receiver<bool>,
 }
 

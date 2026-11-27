@@ -96,7 +96,7 @@ pub trait Llm: Any + Send + Sync {
 
     /// Subscribe to whether new requests can be accepted and processed now.
     /// It may change either way, such as while engines are paused or asleep,
-    /// or while a remote one is unreachable.
+    /// fail a health probe, or while a remote one is unreachable.
     fn subscribe_readiness(&self) -> watch::Receiver<bool>;
 
     /// Whether this `Llm` has not failed.

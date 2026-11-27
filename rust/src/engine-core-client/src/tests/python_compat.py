@@ -544,6 +544,7 @@ class EngineCoreReadyResponse:
     kv_events_config: KVEventsConfig | None = None
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
+    starts_paused: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None

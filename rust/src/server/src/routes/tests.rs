@@ -1737,24 +1737,11 @@ async fn test_dev_mode_app_with_ready(
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
-    let answers_readiness = ready_response.enable_sleep_mode;
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id,
         ready_response,
-        move |dealer, push| {
-            boxed_test_future(async move {
-                // With sleep mode, the client asks for readiness at connect.
-                if answers_readiness {
-                    let utility = recv_engine_message(dealer).await;
-                    let payload = decode_value(&utility[1]).expect("decode utility payload");
-                    let array = payload.as_array().expect("utility payload array");
-                    assert_eq!(array[2], Value::from("is_inference_ready"));
-                    let call_id = array[1].as_u64().expect("call id");
-                    send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
-                }
-            })
-        },
+        |_, _| boxed_test_future(async {}),
     ));
 
     let client = EngineCoreClient::connect(
@@ -7772,32 +7759,71 @@ async fn health_generate_returns_ok_when_the_engine_can_run_the_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn health_generate_reports_a_sleeping_engine() {
-    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+async fn health_generate_reports_why_the_engine_cannot_serve() {
+    let cases = [
+        (
+            "sleeping",
+            "Engine is sleeping or paused (engine ranks: [0])",
+        ),
+        (
+            "weight_update_incomplete",
+            "Weight update has not finished (engine ranks: [0])",
+        ),
+    ];
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, push| {
         boxed_test_future(async move {
-            let call_id = recv_health_generate_call(dealer).await;
-            send_outputs(
-                push,
-                utility_outputs(call_id, utility_result_value("sleeping")),
-            )
-            .await;
+            for (state, _) in cases {
+                let call_id = recv_health_generate_call(dealer).await;
+                send_outputs(push, utility_outputs(call_id, utility_result_value(state))).await;
+            }
         })
     })
     .await;
 
+    for (reason, message) in cases {
+        assert_eq!(
+            health_generate(&app, "").await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(json!({
+                    "status": "not_ready",
+                    "reason": reason,
+                    "message": message,
+                    "engine_ranks": [0],
+                }))
+            )
+        );
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_generate_answers_at_once_when_the_server_shuts_down() {
+    let (state, engine_task) =
+        test_admin_state_with_ready_and_engine_script(default_ready_response(), |dealer, _push| {
+            boxed_test_future(async move {
+                // Never answered.
+                recv_health_generate_call(dealer).await;
+            })
+        })
+        .await;
+    let app = build_router_with_gates(state.clone(), RouteGates::default());
+
+    let check = tokio::spawn(async move { health_generate(&app, "").await });
+    engine_task.await.expect("mock engine task");
+    state.shutting_down().cancel();
     assert_eq!(
-        health_generate(&app, "").await,
+        check.await.expect("health_generate task"),
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Some(json!({
                 "status": "not_ready",
-                "reason": "sleeping",
-                "message": "Engine is sleeping or paused (engine ranks: [0])",
-                "engine_ranks": [0],
+                "reason": "shutting_down",
+                "message": "Server is shutting down",
             }))
         )
     );
-    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

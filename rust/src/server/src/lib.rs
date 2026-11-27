@@ -116,7 +116,11 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 /// Build the shared application state for one configured model and its
 /// [`Llm`]. When the server drives engine-core itself, connect to it here and
 /// load any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppState>> {
+async fn build_state(
+    config: &ServerConfig,
+    llm: LlmSource,
+    shutting_down: CancellationToken,
+) -> Result<Arc<AppState>> {
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.
@@ -202,7 +206,8 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_cors(config.cors.clone())
         .with_access_log(config.access_log.clone())
         .with_system_fingerprint(system_fingerprint)
-        .with_decisions(decisions);
+        .with_decisions(decisions)
+        .with_shutting_down(shutting_down);
     if let Some((engine_core, server_info)) = &engine_core {
         state = (state.with_engine_core_client())
             .with_server_info(server_info.clone())
@@ -347,10 +352,16 @@ async fn serve(
         .transpose()
         .context("invalid TLS configuration")?;
 
+    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
+    // token. Caller cancellation propagates into both protocols; if either
+    // protocol exits first, we cancel this child token so its sibling also
+    // begins a graceful drain.
+    let server_shutdown = shutdown.child_token();
+
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config, llm) => result?,
+        result = build_state(&config, llm, server_shutdown.clone()) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
@@ -425,11 +436,6 @@ async fn serve(
     };
     let model = model.as_str();
 
-    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
-    // token. Caller cancellation propagates into both protocols; if either
-    // protocol exits first, we cancel this child token so its sibling also
-    // begins a graceful drain.
-    let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
     let health_fut = monitor_llm_health(
