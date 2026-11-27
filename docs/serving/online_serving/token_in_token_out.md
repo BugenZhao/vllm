@@ -208,9 +208,8 @@ With `--tokens-only`, the same handler is also served at `POST /abort_requests` 
 
 ## Rust frontend with a remote generation worker
 
-Set `--remote-generation-url` to the worker’s gRPC address and use the same
-model and context limit as the worker.
+Set `--remote-generation-url` to the worker’s gRPC address and use the same model as the worker. The frontend reads the worker’s served model name and context limit from its `vllm.Control` service at startup.
 
 ```bash
-vllm-rs serve Qwen/Qwen3-0.6B --remote-generation-url http://worker:50051 --max-model-len 512
+vllm-rs serve Qwen/Qwen3-0.6B --remote-generation-url http://worker:50051
 ```

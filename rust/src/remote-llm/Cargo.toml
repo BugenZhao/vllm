@@ -19,7 +19,6 @@ uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-proto.workspace = true
-vllm-text.workspace = true
 
 [lints]
 workspace = true

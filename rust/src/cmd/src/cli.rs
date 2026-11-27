@@ -44,7 +44,7 @@ use vllm_server::{
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, FingerprintMode, HttpListenerMode,
     LlmSource, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort,
-    RemoteGrpcConfig, RenderConfig, RendererSelection, Server, ServerConfig,
+    RenderConfig, RendererSelection, Server, ServerConfig,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -1479,8 +1479,9 @@ pub struct ServeArgs {
     /// the server drives engine-core. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_port: Option<u16>,
-    /// Send token generation to a vllm.Inference gRPC endpoint.
-    #[arg(long, conflicts_with = "headless")]
+    /// Send token generation to a vllm.Inference gRPC endpoint. The context
+    /// limit comes from the worker.
+    #[arg(long, conflicts_with_all = ["headless", "max_model_len"])]
     pub remote_generation_url: Option<String>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
@@ -1522,22 +1523,6 @@ impl ServeArgs {
         });
 
         self.runtime.server_config(listener_mode, grpc_listener_mode)
-    }
-
-    pub(super) fn to_remote_grpc_config(&self, url: &str) -> anyhow::Result<RemoteGrpcConfig> {
-        let max_model_len = match self.managed_engine.max_model_len.as_deref() {
-            Some(value) => {
-                let Some(limit) = parse_human_readable_int(value)
-                    .and_then(|n| u32::try_from(n).ok())
-                    .and_then(NonZeroU32::new)
-                else {
-                    anyhow::bail!("remote --max-model-len must be a positive token count");
-                };
-                Some(limit)
-            }
-            None => None,
-        };
-        RemoteGrpcConfig::new(url.to_owned(), max_model_len)
     }
 
     pub(super) fn to_engine_core_config(

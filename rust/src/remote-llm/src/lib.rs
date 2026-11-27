@@ -23,10 +23,10 @@ use vllm_llm::{
     BoxGenerateOutputStream, Error, FinishReason, GenerateOutput, GeneratePromptInfo,
     GenerateRequest, Llm, LlmInfo, PromptCacheUsage, Result, WeightVersions,
 };
-use vllm_text::backend::TextBackend;
 
 use vllm_proto as pb;
 
+use self::pb::control_client::ControlClient;
 use self::pb::inference_client::InferenceClient;
 
 /// Token-only client for a vllm.Inference endpoint.
@@ -40,15 +40,44 @@ pub struct GrpcLlm {
 }
 
 impl GrpcLlm {
-    pub fn new(channel: Channel, model: String, max_model_len: u32) -> Self {
+    /// Connect to the worker at `url`, reading its served model name and
+    /// context limit from its `vllm.Control` service.
+    pub async fn connect(url: String) -> anyhow::Result<Self> {
+        let channel = Endpoint::from_shared(url)?.connect_lazy();
+        Self::with_channel(channel).await
+    }
+
+    /// Like [`Self::connect`], over an existing channel.
+    pub async fn with_channel(channel: Channel) -> anyhow::Result<Self> {
+        let mut control = ControlClient::new(channel.clone());
+        let server_info = control
+            .get_server_info(pb::GetServerInfoRequest {})
+            .await
+            .context("failed to get the worker's server info")?
+            .into_inner();
+        let model_info = control
+            .get_model_info(pb::GetModelInfoRequest {})
+            .await
+            .context("failed to get the worker's model info")?
+            .into_inner();
+        anyhow::ensure!(
+            server_info.max_model_len > 0,
+            "the worker reported no context length"
+        );
         let info = LlmInfo {
-            max_model_len,
+            max_model_len: server_info.max_model_len,
             model_dtype: None,
             supports_lora: false,
             allow_missing_mm_embeddings: false,
-            vllm_version: "unknown".to_owned(),
+            vllm_version: server_info.engine_version,
+            // TODO: build the fingerprint once `ServerInfo` reports the engine
+            // config hash and expert parallelism.
             fingerprint: None,
         };
+        Ok(Self::new(channel, model_info.served_model_name, info))
+    }
+
+    fn new(channel: Channel, model: String, info: LlmInfo) -> Self {
         let (ready, readiness) = watch::channel(false);
         let mut health = tonic_health::pb::health_client::HealthClient::new(channel.clone());
         let readiness_task = tokio::spawn(async move {
@@ -113,46 +142,6 @@ impl Llm for GrpcLlm {
     }
     async fn shutdown(self: Box<Self>) -> Result<()> {
         Ok(())
-    }
-}
-
-/// Settings for serving generation through a remote vLLM gRPC endpoint.
-pub struct RemoteGrpcConfig {
-    endpoint: Endpoint,
-    max_model_len: Option<NonZeroU32>,
-}
-
-impl RemoteGrpcConfig {
-    /// Parse the worker URL and record an optional context limit override.
-    pub fn new(url: String, max_model_len: Option<NonZeroU32>) -> anyhow::Result<Self> {
-        Ok(Self {
-            endpoint: Endpoint::from_shared(url)?,
-            max_model_len,
-        })
-    }
-
-    pub fn into_llm(
-        self,
-        model: String,
-        text_backend: &dyn TextBackend,
-    ) -> anyhow::Result<GrpcLlm> {
-        let max_model_len = if let Some(limit) = self.max_model_len {
-            limit.get()
-        } else {
-            let limit = text_backend
-                .max_model_len()?
-                .context("config.json has no context length; pass --max-model-len")?;
-            anyhow::ensure!(
-                limit > 0,
-                "invalid context length in config.json: expected a positive token count"
-            );
-            limit
-        };
-        Ok(GrpcLlm::new(
-            self.endpoint.connect_lazy(),
-            model,
-            max_model_len,
-        ))
     }
 }
 
