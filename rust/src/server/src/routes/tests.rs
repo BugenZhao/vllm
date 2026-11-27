@@ -13884,6 +13884,58 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_chat_replays_assistant_refusal_as_its_text() {
+    let (mut app, _engine_task) = test_app().await;
+    let mut tokenize = async |assistant: serde_json::Value| {
+        post_json(
+            &mut app,
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [
+                    {"role": "user", "content": "Can you share private details?"},
+                    assistant,
+                    {"role": "user", "content": "What alternative did you suggest?"},
+                ],
+            }),
+        )
+        .await
+    };
+    let refusal = "I cannot provide private details, but can suggest public sources.";
+    let (status, as_text) = tokenize(json!({"role": "assistant", "content": refusal})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, without_refusal) = tokenize(json!({"role": "assistant", "content": null})).await;
+
+    for (assistant, expected) in [
+        (json!({"role": "assistant", "refusal": refusal}), &as_text),
+        (
+            json!({"role": "assistant", "content": null, "refusal": refusal}),
+            &as_text,
+        ),
+        (
+            json!({"role": "assistant", "content": [], "refusal": refusal}),
+            &as_text,
+        ),
+        (
+            json!({"role": "assistant", "content": null, "refusal": ""}),
+            &without_refusal,
+        ),
+        (
+            json!({"role": "assistant", "content": null, "refusal": null}),
+            &without_refusal,
+        ),
+    ] {
+        let (status, body) = tokenize(assistant.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{assistant}");
+        assert_eq!(&body, expected, "{assistant}");
+    }
+
+    let (status, _) = tokenize(json!({"role": "assistant", "content": null, "refusal": 1})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn world_size_endpoint_is_dev_mode_only() {
     let (mut app, _engine_task) = test_app().await;
     let response = app

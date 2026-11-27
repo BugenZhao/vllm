@@ -628,16 +628,51 @@ fn normalize_reasoning_aliases(message: &mut Value) {
     }
 }
 
+/// Replace the empty content of an assistant message with its top-level
+/// `refusal`, as a refusal content part.
+///
+/// Mirrors the Python frontend's `parse_chat_message_content`: the OpenAI SDK
+/// replays a refused turn as `{"content": null, "refusal": "..."}`. Non-empty
+/// content wins and the refusal is dropped.
+fn fold_assistant_refusal(message: &mut Value) -> Result<(), serde_json::Error> {
+    let Some(message) = message.as_object_mut() else {
+        return Ok(());
+    };
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Ok(());
+    }
+    let Some(refusal) = message.remove("refusal") else {
+        return Ok(());
+    };
+    let Some(refusal) = Option::<String>::deserialize(refusal)?.filter(|r| !r.is_empty()) else {
+        return Ok(());
+    };
+    let content_is_empty = match message.get("content") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.is_empty(),
+        Some(Value::Array(parts)) => parts.is_empty(),
+        Some(_) => false,
+    };
+    if content_is_empty {
+        message.insert(
+            "content".to_string(),
+            serde_json::json!([{"type": "refusal", "refusal": refusal}]),
+        );
+    }
+    Ok(())
+}
+
 impl<'de> Deserialize<'de> for ChatMessage {
-    /// Normalize the reasoning aliases, then dispatch on the role tag: standard
-    /// roles keep their derived errors, and any other string role becomes
-    /// [`ChatMessage::Custom`].
+    /// Normalize the reasoning aliases and an assistant refusal, then dispatch
+    /// on the role tag: standard roles keep their derived errors, and any other
+    /// string role becomes [`ChatMessage::Custom`].
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let mut value = Value::deserialize(deserializer)?;
         normalize_reasoning_aliases(&mut value);
+        fold_assistant_refusal(&mut value).map_err(serde::de::Error::custom)?;
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)
