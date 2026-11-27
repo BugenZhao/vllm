@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineHealthState
+from vllm.v1.engine import SHUTDOWN_UTILITY_FAILURE, EngineHealthState
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
@@ -18,6 +18,7 @@ from vllm.v1.engine.exceptions import EngineSleepingError, EngineUnhealthyError
 OK = EngineHealthState.OK
 BUSY = EngineHealthState.BUSY
 SLEEPING = EngineHealthState.SLEEPING
+WEIGHT_UPDATE_INCOMPLETE = EngineHealthState.WEIGHT_UPDATE_INCOMPLETE
 
 
 @pytest.mark.parametrize(
@@ -42,9 +43,44 @@ def test_engine_probes_only_idle_ranks(
         pause_state=PauseState.PAUSED_ALL if paused else PauseState.UNPAUSED
     )
     core.model_executor = SimpleNamespace(is_sleeping=asleep, probe_forward=Mock())
+    core._weights_maybe_incomplete = False
 
     assert core.check_health_generate() == expected
     assert core.model_executor.probe_forward.called == probed
+
+
+@pytest.mark.parametrize(
+    ("worker_answers", "expected", "still_dirty"),
+    [
+        pytest.param([False, True], WEIGHT_UPDATE_INCOMPLETE, True, id="incomplete"),
+        pytest.param([False, False], OK, False, id="complete"),
+    ],
+)
+def test_engine_asks_workers_for_incomplete_weights_after_an_rpc(
+    worker_answers, expected, still_dirty
+):
+    """After a worker RPC, which may start a weight update, the engine asks the
+    workers whether their weights are complete until they are."""
+    core = object.__new__(EngineCoreProc)
+    core.has_work = Mock(return_value=False)  # type: ignore[method-assign]
+    core.scheduler = SimpleNamespace(pause_state=PauseState.UNPAUSED)
+    core.model_executor = SimpleNamespace(
+        is_sleeping=False,
+        probe_forward=Mock(),
+        collective_rpc=Mock(return_value=worker_answers),
+    )
+    core._weights_maybe_incomplete = True
+
+    assert core.check_health_generate() == expected
+    core.model_executor.collective_rpc.assert_called_once_with(
+        "has_incomplete_weight_update"
+    )
+    assert core._weights_maybe_incomplete == still_dirty
+
+    # Without a new RPC, complete weights are not asked about again.
+    if not still_dirty:
+        core.check_health_generate()
+        core.model_executor.collective_rpc.assert_called_once()
 
 
 def make_async_engine(*rank_results) -> AsyncLLM:
@@ -77,9 +113,22 @@ def make_async_engine(*rank_results) -> AsyncLLM:
     ("rank_results", "reason", "engine_ranks"),
     [
         pytest.param([SLEEPING, OK], "sleeping", [0], id="sleeping"),
+        pytest.param(
+            [WEIGHT_UPDATE_INCOMPLETE, None],
+            "weight_update_incomplete",
+            [0],
+            id="weight-update-incomplete",
+        ),
         pytest.param([BUSY, None], "probe_timeout", [1], id="one-dp-rank-hung"),
         pytest.param(
             [OK, RuntimeError("CUDA error")], "probe_failed", [1], id="probe-failed"
+        ),
+        # The engine rejects utility calls once it starts shutting down.
+        pytest.param(
+            [SLEEPING, Exception(SHUTDOWN_UTILITY_FAILURE)],
+            "shutting_down",
+            None,
+            id="shutting-down",
         ),
     ],
 )
@@ -93,7 +142,7 @@ async def test_check_health_generate_aggregates_engine_ranks(
         await engine.check_health_generate(0.05)
 
     assert exc_info.value.reason == reason
-    assert exc_info.value.details["engine_ranks"] == engine_ranks
+    assert exc_info.value.details.get("engine_ranks") == engine_ranks
     assert not engine.errored
 
 

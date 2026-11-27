@@ -82,6 +82,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    SHUTDOWN_UTILITY_FAILURE,
     CheckpointState,
     EEPNotificationType,
     EngineCoreOutput,
@@ -162,6 +163,10 @@ class EngineCore:
         self.collect_stats = collect_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
+        # Set by every worker RPC, which may start a weight update; cleared once
+        # the workers report complete weights, so health checks ask them only
+        # after an RPC.
+        self._weights_maybe_incomplete = False
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -1276,6 +1281,8 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        # Weight updates run as worker methods.
+        self._weights_maybe_incomplete = True
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
@@ -1829,6 +1836,10 @@ class EngineCoreProc(EngineCore):
         """
         if self.is_sleeping():
             return EngineHealthState.SLEEPING
+        if self._weights_maybe_incomplete:
+            if any(self.model_executor.collective_rpc("has_incomplete_weight_update")):
+                return EngineHealthState.WEIGHT_UPDATE_INCOMPLETE
+            self._weights_maybe_incomplete = False
         if self.has_work():
             return EngineHealthState.BUSY
         self._probe_forward()
@@ -2103,7 +2114,7 @@ class EngineCoreProc(EngineCore):
             "[shutdown] EngineCore: rejecting utility call method=%s",
             method_name,
         )
-        output = UtilityOutput(call_id, failure_message="Server shutting down")
+        output = UtilityOutput(call_id, failure_message=SHUTDOWN_UTILITY_FAILURE)
         self.output_queue.put_nowait(
             (client_idx, EngineCoreOutputs(utility_output=output))
         )
@@ -2208,6 +2219,7 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
+            starts_paused=self.vllm_config.model_config.checkpoint_prepare_on_startup,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
                 if self.vllm_config.weight_transfer_config is not None

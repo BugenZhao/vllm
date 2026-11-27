@@ -66,12 +66,19 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+# `UtilityOutput.failure_message` of a utility call the engine rejects because
+# it is shutting down.
+SHUTDOWN_UTILITY_FAILURE = "Server shutting down"
+
+
 class EngineHealthState(enum.StrEnum):
     """EngineCore answer to a `check_health_generate` utility call."""
 
     OK = "ok"
     BUSY = "busy"
     SLEEPING = "sleeping"
+    # A weight update started and has not finished successfully.
+    WEIGHT_UPDATE_INCOMPLETE = "weight_update_incomplete"
 
 
 class FinishReason(enum.IntEnum):
@@ -146,6 +153,9 @@ class EngineCoreReadyResponse:
     kv_events_config: KVEventsConfig | None = None
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
+    # Whether the engine starts paused, prepared for a checkpoint
+    # (`checkpoint_prepare_on_startup`).
+    starts_paused: bool = False
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None

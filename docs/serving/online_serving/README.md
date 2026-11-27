@@ -106,7 +106,9 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 | Reason | Meaning |
 | :---- | :---- |
 | `engine_dead` | An engine process has died. |
+| `shutting_down` | The server is shutting down. |
 | `sleeping` | An engine rank is sleeping or paused, e.g. during a weight sync. |
+| `weight_update_incomplete` | A weight update started on an engine rank and has not finished successfully, so its weights may be incomplete. |
 | `probe_timeout` | An engine rank did not answer in time. Its busy loop is blocked, e.g. in a hung collective, or a single step is taking longer than the timeout. |
 | `probe_failed` | The GPU probe on an idle engine rank raised an error. |
 
