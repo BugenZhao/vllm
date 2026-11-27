@@ -51,17 +51,14 @@ impl HealthGenerateParams {
 
 /// The 503 body of [`health_generate`], as Python's: `reason` names the
 /// [`NotReady`] variant and the other fields describe it.
+#[serde_with::skip_serializing_none]
 #[derive(Serialize)]
 struct NotReadyResponse<'a> {
     status: &'static str,
     reason: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     engine_ranks: Option<&'a [u32]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     timeout_s: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
 }
 
