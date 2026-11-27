@@ -15,6 +15,7 @@ const QWEN3_JSON_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     delimiter: None,
     name_key: "name",
     arguments_key: &["arguments"],
+    id_key: None,
 };
 
 /// Tool parser for Qwen2.5, QwQ and Qwen3 JSON tool calls wrapped in

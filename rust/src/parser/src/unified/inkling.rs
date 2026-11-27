@@ -74,6 +74,7 @@ const INKLING_TOOL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     delimiter: None,
     name_key: "name",
     arguments_key: &["args"],
+    id_key: None,
 };
 
 type InklingInput<'i> = Partial<&'i str>;

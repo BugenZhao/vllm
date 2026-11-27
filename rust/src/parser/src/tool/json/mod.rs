@@ -19,7 +19,7 @@ mod qwen;
 
 use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, seq};
+use winnow::combinator::{alt, opt, seq};
 use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
@@ -50,6 +50,10 @@ pub(crate) struct JsonToolCallConfig {
     /// Most parsers use a single key like `["arguments"]`, but some accept
     /// multiple (e.g. InternLM2 accepts `parameters` or `arguments`).
     pub arguments_key: &'static [&'static str],
+    /// Key of an optional string member after the arguments, as a chat
+    /// template renders a call's ID in history. It is parsed and dropped: the
+    /// call's ID is fixed when its name is emitted, before this member.
+    pub id_key: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -324,6 +328,19 @@ fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
+    if let Some(id_key) = config.id_key {
+        opt(seq!(
+            _: ws0,
+            _: literal(","),
+            _: ws0,
+            _: |input: &mut JsonToolInput<'_>| json_key(input, id_key),
+            _: ws0,
+            _: literal(":"),
+            _: ws0,
+            _: json_str,
+        ))
+        .parse_next(input)?;
+    }
     seq!(_: ws0, _: literal("}")).parse_next(input)?;
 
     match config.delimiter {
@@ -407,6 +424,7 @@ mod tests {
         delimiter: Some("<"),
         name_key: "function",
         arguments_key: &["parameters"],
+        id_key: None,
     };
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {

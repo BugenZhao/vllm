@@ -11,6 +11,7 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
 use openai_harmony::{HarmonyEncoding, StreamableParser};
+use vllm_parser::tool::ToolCallIdFormat;
 use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result as ChatResult;
@@ -344,7 +345,7 @@ impl HarmonyState {
             None => false,
         };
         if !opens_same_call {
-            let id = generate_tool_call_id();
+            let id = generate_tool_call_id(ToolCallIdFormat::Any);
             self.open_tool_call = Some(OpenHarmonyToolCall { recipient });
             events.push(AssistantEvent::ToolCallStart {
                 id,

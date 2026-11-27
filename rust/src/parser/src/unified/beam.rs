@@ -56,7 +56,7 @@ use crate::output_grammar::arguments::{
 use crate::output_grammar::{
     self, BuiltOutputGrammar, OutputGrammarContext, tool_grammar_applies, tool_params,
 };
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolCallIdFormat};
 
 const ANALYSIS_OPEN: &str = "<|channel|>analysis<|message|>";
 const FINAL_OPEN: &str = "<|channel|>final<|message|>";
@@ -149,6 +149,10 @@ impl UnifiedParser for BeamUnifiedParser {
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
         self.inner.tool_call_id(tool_index)
+    }
+
+    fn tool_call_id_format(&self) -> ToolCallIdFormat {
+        self.inner.tool_call_id_format()
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {

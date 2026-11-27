@@ -458,6 +458,14 @@ mod tests {
     }
 
     #[test]
+    fn mistral_without_args_token_preserves_special_tokens() {
+        let tokenizer = TestTokenizer::new().with_special_token(TOOL_CALLS, 256);
+        let parser = MistralToolParser::create(&test_tools(), Arc::new(tokenizer)).unwrap();
+
+        assert!(parser.preserve_special_tokens());
+    }
+
+    #[test]
     fn mistral_without_args_token_parses_json_arrays() {
         let tokenizer = TestTokenizer::new().with_special_token(TOOL_CALLS, 256);
         let mut parser = MistralToolParser::create(&test_tools(), Arc::new(tokenizer)).unwrap();

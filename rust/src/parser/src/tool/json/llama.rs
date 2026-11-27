@@ -218,6 +218,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
         delimiter: Some(";"),
         name_key: "name",
         arguments_key: &["parameters"],
+        id_key: None,
     };
 
     match tool_call_header_event(input, CONFIG)? {
