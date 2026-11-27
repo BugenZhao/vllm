@@ -63,6 +63,9 @@ pub(crate) struct ClientInner {
     /// Whether the engines can accept and process new requests, maintained
     /// around the control calls this client sends.
     readiness: Arc<Readiness>,
+    // TODO: consider merging into `readiness`: both ask the engines whether
+    // they can serve (`is_inference_ready` versus a `check_health_generate`
+    // probe) and track the same control-call epochs.
     /// Generation readiness probes, one in flight per engine at most.
     health_probes: HealthProbes,
 }
