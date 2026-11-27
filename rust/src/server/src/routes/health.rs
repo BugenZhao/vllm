@@ -49,8 +49,15 @@ impl HealthGenerateParams {
     }
 }
 
+/// Why [`health_generate`] reports the server not ready.
+enum NotReadyReason {
+    /// The server started shutting down.
+    ShuttingDown,
+    Engines(NotReady),
+}
+
 /// The 503 body of [`health_generate`], as Python's: `reason` names the
-/// [`NotReady`] variant and the other fields describe it.
+/// [`NotReadyReason`] and the other fields describe it.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize)]
 struct NotReadyResponse<'a> {
@@ -63,10 +70,26 @@ struct NotReadyResponse<'a> {
 }
 
 impl<'a> NotReadyResponse<'a> {
-    fn new(not_ready: &'a NotReady) -> Self {
+    fn new(reason: &'a NotReadyReason) -> Self {
+        let not_ready = match reason {
+            NotReadyReason::ShuttingDown => {
+                return Self {
+                    status: "not_ready",
+                    reason: "shutting_down",
+                    message: Some("Server is shutting down".to_owned()),
+                    engine_ranks: None,
+                    timeout_s: None,
+                    error: None,
+                };
+            }
+            NotReadyReason::Engines(not_ready) => not_ready,
+        };
         let (reason, engine_ranks, timeout_s, error) = match not_ready {
             NotReady::EngineDead => ("engine_dead", None, None, None),
             NotReady::Sleeping { engine_ranks } => ("sleeping", Some(engine_ranks), None, None),
+            NotReady::WeightUpdateIncomplete { engine_ranks } => {
+                ("weight_update_incomplete", Some(engine_ranks), None, None)
+            }
             NotReady::ProbeTimeout {
                 engine_ranks,
                 timeout,
@@ -93,18 +116,30 @@ impl<'a> NotReadyResponse<'a> {
     }
 }
 
-/// Generation readiness check: 503 when an engine cannot run the model.
+/// Generation readiness check: 503 when an engine cannot run the model or the
+/// server is shutting down.
 pub async fn health_generate(
     State(state): State<Arc<AppState>>,
     params: Result<Query<HealthGenerateParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let timeout = params?.0.timeout()?;
-    Ok(match state.llm().check_health_generate(timeout).await {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(not_ready) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(NotReadyResponse::new(&not_ready)),
-        )
-            .into_response(),
-    })
+    // Shutting down answers at once, so a probe in flight does not hold the
+    // graceful drain; a dead engine, which also shuts the server down, is
+    // still reported as such.
+    let reason = tokio::select! {
+        biased;
+        () = state.shutting_down().cancelled() => match state.llm().is_healthy() {
+            true => NotReadyReason::ShuttingDown,
+            false => NotReadyReason::Engines(NotReady::EngineDead),
+        },
+        result = state.llm().check_health_generate(timeout) => match result {
+            Ok(()) => return Ok(StatusCode::OK.into_response()),
+            Err(not_ready) => NotReadyReason::Engines(not_ready),
+        },
+    };
+    Ok((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(NotReadyResponse::new(&reason)),
+    )
+        .into_response())
 }

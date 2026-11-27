@@ -3168,7 +3168,13 @@ async fn serve_readiness_engine(
         let array = payload.as_array().expect("utility payload array");
         let call_id = array[1].as_u64().expect("call_id");
         let result = match array[2].as_str().expect("utility method") {
-            "is_inference_ready" => utility_result_value(!paused && !updating_weights),
+            "check_health_generate" => utility_result_value(if paused {
+                "sleeping"
+            } else if updating_weights {
+                "weight_update_incomplete"
+            } else {
+                "ok"
+            }),
             "pause_generation" => {
                 paused = true;
                 utility_result_value(())
@@ -3204,8 +3210,8 @@ async fn serve_readiness_engine(
     }
 }
 
-/// Connect a client to [`serve_readiness_engine`], with `enable_sleep_mode`
-/// set on the engine when it starts paused.
+/// Connect a client to [`serve_readiness_engine`], which reports in its ready
+/// response whether it starts paused.
 async fn connect_readiness_engine(
     engine_id: &'static [u8],
     start_paused: bool,
@@ -3220,6 +3226,7 @@ async fn connect_readiness_engine(
     let handshake_address = ipc.handshake_endpoint();
     let mut ready_response = crate::mock_engine::default_ready_response();
     ready_response.enable_sleep_mode = start_paused;
+    ready_response.starts_paused = start_paused;
     let (stop_tx, stop_rx) = oneshot::channel();
     let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
@@ -3333,8 +3340,9 @@ async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
                 pause_seen_tx.send(()).unwrap();
                 reply_rx.await.unwrap();
                 reply_utility(push, pause, utility_result_value(())).await;
-                let ask = recv_utility_call(dealer, "is_inference_ready").await;
-                reply_utility(push, ask, utility_result_value(false)).await;
+                // The probe after the pause is the first one the engine sees.
+                let probe = recv_utility_call(dealer, "check_health_generate").await;
+                reply_utility(push, probe, utility_result_value("sleeping")).await;
             })
         },
     );
@@ -3359,7 +3367,6 @@ async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
         _ = pause_seen_rx => {}
     }
     // The caller is gone, but the call still waits for the engine.
-    assert!(!client.readiness_recheck_pending());
     assert!(!*readiness.borrow());
     reply_tx.send(()).unwrap();
 
@@ -3370,7 +3377,64 @@ async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn readiness_starts_from_engine_answer_with_sleep_mode() {
+async fn readiness_follows_a_failed_probe() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-readiness-probe-failed".to_vec(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let resume = recv_utility_call(dealer, "resume_scheduler").await;
+                reply_utility(push, resume, utility_result_value(())).await;
+                // The forward probe after the resume hits a device fault.
+                let probe = recv_utility_call(dealer, "check_health_generate").await;
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: probe.into(),
+                            failure_message: Some("CUDA error".to_owned()),
+                            result: None,
+                        },
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+    let mut readiness = client.subscribe_readiness();
+    assert!(*readiness.borrow());
+
+    client.resume_scheduler().await.unwrap();
+    timeout(Duration::from_secs(2), readiness.wait_for(|ready| !*ready))
+        .await
+        .expect("the failed probe withdraws readiness")
+        .unwrap();
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_starts_paused_when_the_engine_does() {
     // Prepared for a checkpoint on startup.
     let (client, _ipc, stop, engine_task) =
         connect_readiness_engine(b"engine-readiness-startup", true).await;

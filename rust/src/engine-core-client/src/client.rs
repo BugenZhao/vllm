@@ -14,8 +14,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
+use crate::client::health::{RecheckGuard, run_health_loop};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
-use crate::client::readiness::{RecheckGuard, run_readiness_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
@@ -31,7 +31,6 @@ use crate::transport::{self, ConnectedEngine};
 mod health;
 pub(crate) mod imp;
 mod output_channel;
-mod readiness;
 mod state;
 mod stream;
 
@@ -334,7 +333,7 @@ pub struct EngineCoreClient {
     input_watch_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
     abort_task: AbortOnDropHandle<()>,
-    readiness_task: AbortOnDropHandle<()>,
+    health_task: AbortOnDropHandle<()>,
     coordinator_output_task: Option<AbortOnDropHandle<()>>,
     coordinator_task: Option<AbortOnDropHandle<()>>,
 }
@@ -454,8 +453,7 @@ impl EngineCoreClient {
         );
         let abort_task =
             AbortOnDropHandle::new(runtime.spawn(run_abort_loop(inner.clone(), abort_rx)));
-        let readiness_task =
-            AbortOnDropHandle::new(runtime.spawn(run_readiness_loop(inner.clone())));
+        let health_task = AbortOnDropHandle::new(runtime.spawn(run_health_loop(inner.clone())));
 
         // If any engine reported a dp_stats_address in its ready response, use it
         // as the external coordinator address.
@@ -496,14 +494,6 @@ impl EngineCoreClient {
                 (None, None, None)
             };
 
-        // Only engines with sleep mode can start paused, prepared for a
-        // checkpoint. Asking here also fails startup with a clear error when
-        // the engines predate the `is_inference_ready` utility.
-        if engines.iter().all(|engine| engine.ready_response.enable_sleep_mode) {
-            let ready = inner.is_inference_ready().await?;
-            inner.readiness().start(ready);
-        }
-
         Ok(Self {
             config,
             input_address: connected.input_address,
@@ -519,7 +509,7 @@ impl EngineCoreClient {
             input_watch_task,
             dispatcher_task,
             abort_task,
-            readiness_task,
+            health_task,
             coordinator_output_task,
             coordinator_task,
         })
@@ -551,11 +541,6 @@ impl EngineCoreClient {
     #[cfg(test)]
     pub(crate) fn pending_utility_call_count(&self) -> usize {
         self.inner.pending_utility_call_count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn readiness_recheck_pending(&self) -> bool {
-        self.inner.readiness().pending_ask().is_some()
     }
 
     /// Return the engine-side indices connected to this client, as stamped on
@@ -689,11 +674,13 @@ impl EngineCoreClient {
         self.inner.health_error()
     }
 
-    /// Subscribe to whether the engines can accept and process new requests.
-    /// It is `false` while they are paused, asleep, or prepared for a
-    /// checkpoint, or while a weight update has not finished successfully.
+    /// Subscribe to whether the engines can serve generation requests. It is
+    /// `false` while they are paused, asleep, or prepared for a checkpoint,
+    /// while a weight update has not finished successfully, and while an
+    /// engine fails or leaves unanswered the periodic probe it runs for
+    /// subscribers.
     pub fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.inner.readiness().subscribe()
+        self.inner.health().subscribe()
     }
 }
 
@@ -906,7 +893,7 @@ impl EngineCoreClient {
         K: serde::Serialize + std::fmt::Debug,
     {
         // Worker methods can change readiness, as a weight update does.
-        let recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.health().recheck_after_call();
         self.collective_rpc_with(recheck, method, timeout, args, kwargs).await
     }
 
@@ -969,7 +956,7 @@ impl EngineCoreClient {
     /// Start a weight update for the base model.
     pub async fn start_weight_update(&self) -> Result<()> {
         self.collective_rpc_with(
-            self.inner.readiness().withdraw_until_recheck(),
+            self.inner.health().withdraw_until_recheck(),
             "start_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -982,7 +969,7 @@ impl EngineCoreClient {
     /// Start a weight update for the speculative draft model.
     pub async fn start_draft_weight_update(&self) -> Result<()> {
         self.collective_rpc_with(
-            self.inner.readiness().withdraw_until_recheck(),
+            self.inner.health().withdraw_until_recheck(),
             "start_draft_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -1034,7 +1021,7 @@ impl EngineCoreClient {
         &self,
         timeout: Duration,
     ) -> std::result::Result<(), NotReady> {
-        self.inner.health_probes().check(&self.inner, timeout).await
+        self.inner.health().check(&self.inner, timeout).await
     }
 
     /// Return whether the engine is currently sleeping at any level.
@@ -1098,7 +1085,7 @@ impl EngineCoreClient {
         mode: PauseMode,
         reset_connector: bool,
     ) -> Result<()> {
-        let recheck = self.inner.readiness().withdraw_until_recheck();
+        let recheck = self.inner.health().withdraw_until_recheck();
         self.inner
             .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
             .await?;
@@ -1117,7 +1104,7 @@ impl EngineCoreClient {
     /// Wake the engine from sleep, optionally limiting the wake-up to specific
     /// tags, and return whether every engine is fully awake.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
-        let recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.health().recheck_after_call();
         let fully_awake = self
             .inner
             .call_utility::<bool, _>("wake_up", (tags,), Some(recheck))
@@ -1134,7 +1121,7 @@ impl EngineCoreClient {
     /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
     /// the engine rejects new requests with a retryable error until resume.
     pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        let recheck = self.inner.readiness().withdraw_until_recheck();
+        let recheck = self.inner.health().withdraw_until_recheck();
         self.inner
             .call_utility::<(), _>("pause_generation", (mode, clear_cache), Some(recheck))
             .await?;
@@ -1143,7 +1130,7 @@ impl EngineCoreClient {
 
     /// Resume the scheduler after a pause
     pub async fn resume_scheduler(&self) -> Result<()> {
-        let recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.health().recheck_after_call();
         self.inner.call_utility::<(), _>("resume_scheduler", (), Some(recheck)).await?;
         Ok(())
     }
@@ -1153,7 +1140,7 @@ impl EngineCoreClient {
     /// Returns the first refusal from any engine. An engine that refuses
     /// changes nothing, but with data parallelism the others may have started.
     pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
-        let recheck = self.inner.readiness().withdraw_until_recheck();
+        let recheck = self.inner.health().withdraw_until_recheck();
         let refusals: Vec<Option<String>> =
             self.inner.call_utility("checkpoint_prepare", (mode,), Some(recheck)).await?;
         Ok(refusals.into_iter().flatten().next())
@@ -1161,7 +1148,7 @@ impl EngineCoreClient {
 
     /// Bring back what `checkpoint_prepare` released and serve again.
     pub async fn checkpoint_restore(&self) -> Result<()> {
-        let recheck = self.inner.readiness().recheck_after_call();
+        let recheck = self.inner.health().recheck_after_call();
         self.inner
             .call_utility::<(), _>("checkpoint_restore", (), Some(recheck))
             .await?;
@@ -1247,7 +1234,7 @@ impl EngineCoreClient {
             input_watch_task,
             dispatcher_task,
             abort_task,
-            readiness_task,
+            health_task,
             coordinator_output_task,
             coordinator_task,
             ..
@@ -1260,7 +1247,7 @@ impl EngineCoreClient {
         // Abort all client tasks first, then await them.
         // Note the aborting orders here.
         let mut tasks = vec![
-            readiness_task,
+            health_task,
             abort_task,
             dispatcher_task,
             output_task,

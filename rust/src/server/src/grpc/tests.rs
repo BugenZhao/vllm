@@ -2551,10 +2551,7 @@ async fn control_sleep_rejects_unknown_level() {
             ready,
             Arc::new(FakeTextBackend::default()),
             None,
-            // With sleep mode, the client asks for readiness at connect.
-            |dealer, push| {
-                boxed_test_future(reply_utility_bool(dealer, push, "is_inference_ready", true))
-            },
+            |_, _| boxed_test_future(async {}),
         )
         .await;
     let (channel, server_task) = start_grpc_test_server(
@@ -2996,7 +2993,7 @@ async fn next_health_status(
     HealthServingStatus::try_from(response.status).expect("known health status")
 }
 
-/// Serve pause, resume, and readiness asks as an engine that is ready unless
+/// Serve pause, resume, and health probes as an engine that is ready unless
 /// paused, in whatever order the client sends them.
 async fn serve_pausable_engine(dealer: &mut DealerSocket, push: &mut PushSocket) {
     let mut paused = false;
@@ -3007,7 +3004,7 @@ async fn serve_pausable_engine(dealer: &mut DealerSocket, push: &mut PushSocket)
         let fields = payload.as_array().expect("utility payload array");
         let call_id = fields[1].as_u64().expect("utility call id");
         let result = match fields[2].as_str().expect("utility method") {
-            "is_inference_ready" => Value::Boolean(!paused),
+            "check_health_generate" => Value::from(if paused { "sleeping" } else { "ok" }),
             "pause_generation" => {
                 paused = true;
                 Value::Nil

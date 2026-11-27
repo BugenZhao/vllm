@@ -55,6 +55,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import (
+    SHUTDOWN_UTILITY_FAILURE,
     CheckpointState,
     EngineCoreRequest,
     EngineHealthState,
@@ -1228,10 +1229,20 @@ class AsyncLLM(EngineClient):
         def ranks_in(state: EngineHealthState) -> list[int]:
             return [rank for rank, s in states.items() if s == state]
 
+        if any(str(exc) == SHUTDOWN_UTILITY_FAILURE for exc in failed.values()):
+            raise EngineUnhealthyError(
+                "Engine is shutting down", reason="shutting_down"
+            )
         if sleeping := ranks_in(EngineHealthState.SLEEPING):
             raise EngineSleepingError(
                 f"Engine is sleeping or paused (engine ranks: {sleeping})",
                 engine_ranks=sleeping,
+            )
+        if incomplete := ranks_in(EngineHealthState.WEIGHT_UPDATE_INCOMPLETE):
+            raise EngineUnhealthyError(
+                f"Weight update has not finished (engine ranks: {incomplete})",
+                reason="weight_update_incomplete",
+                engine_ranks=incomplete,
             )
         if timed_out:
             raise EngineUnhealthyError(

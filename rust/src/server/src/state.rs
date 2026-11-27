@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
@@ -69,6 +70,8 @@ pub struct AppState {
     has_engine_core_client: bool,
     /// How `/v1/decisions` reads the model, when it serves the endpoint.
     decisions: Option<NextTokenReads>,
+    /// Cancelled once the server starts shutting down.
+    shutting_down: CancellationToken,
 }
 
 impl AppState {
@@ -101,7 +104,19 @@ impl AppState {
             profiler: None,
             has_engine_core_client: false,
             decisions: None,
+            shutting_down: CancellationToken::new(),
         }
+    }
+
+    /// Set the token cancelled once the server starts shutting down.
+    pub fn with_shutting_down(mut self, shutting_down: CancellationToken) -> Self {
+        self.shutting_down = shutting_down;
+        self
+    }
+
+    /// Cancelled once the server starts shutting down.
+    pub fn shutting_down(&self) -> &CancellationToken {
+        &self.shutting_down
     }
 
     /// Set HTTP/API-server behavior switches.
