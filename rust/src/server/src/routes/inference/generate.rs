@@ -63,8 +63,6 @@ pub async fn generate(
     body: Result<Json<GenerateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(mut body) = body?;
-    // Python's `ServingTokens` names the request `generate-tokens-<base>`; media
-    // timings, the engine request, the response and aborts all use that name.
     let request_context =
         resolve_request_context(&headers, "generate-tokens-", body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
